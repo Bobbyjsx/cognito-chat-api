@@ -1,0 +1,10 @@
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+ignore = [
+    "B008",    # Do not perform function call `Depends` in argument defaults (standard in FastAPI)
+    "DTZ003",  # datetime.datetime.utcnow() used (acceptable for our simple tracking)
+    "BLE001",  # Do not catch blind exception (ok for our global error handler)
+    "TRY201",  # Use raise without specifying exception name (ok for FastAPI handler)
+]
