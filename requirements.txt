@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+google-antigravity
+passlib[bcrypt]
+PyJWT
+python-multipart
+firebase-admin
+google-cloud-firestore
+ruff
+pytest
+httpx
