@@ -1,6 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from google.cloud.firestore_v1.async_client import AsyncClient
 
 from app.api.dependencies import get_current_user
@@ -41,6 +42,27 @@ async def chat_with_agent(
 
         tb = traceback.format_exc()
         raise HTTPException(status_code=500, detail=f"Error: {e!s}\nTraceback: {tb}")
+
+
+@router.post("/chat/stream", summary="Stream a chat response via SSE")
+async def stream_chat_with_agent(
+    request: ChatRequest,
+    session_id: uuid.UUID | None = None,
+    current_user: UserDB = Depends(get_current_user),
+    agent_service: AgentService = Depends(get_agent_service),
+):
+    return StreamingResponse(
+        agent_service.stream_chat(
+            user=current_user,
+            message_text=request.message,
+            session_id=session_id,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disables nginx / Cloud Run proxy buffering
+        },
+    )
 
 
 @router.get("/sessions", response_model=list[ChatSessionListSchema])

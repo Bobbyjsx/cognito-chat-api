@@ -1,4 +1,6 @@
+import json
 import uuid
+from collections.abc import AsyncGenerator
 
 from fastapi import HTTPException
 from google.antigravity import Agent, CapabilitiesConfig, LocalAgentConfig
@@ -70,3 +72,54 @@ class AgentService:
         await self.chat_repo.add_message(session_id, role="agent", content=response_text)
 
         return ChatResponse(session_id=session_id, response=response_text)
+
+    async def stream_chat(
+        self,
+        user: UserDB,
+        message_text: str,
+        session_id: uuid.UUID | None = None,
+    ) -> AsyncGenerator[str, None]:
+        """Yields SSE-formatted chunks as the agent responds, then persists the
+        full message and token usage once the stream is complete."""
+
+        if user.tokens_used >= user.token_limit:
+            yield f"event: error\ndata: {json.dumps({'detail': 'Token limit exceeded. Please upgrade your plan.'})}\n\n"
+            return
+
+        if session_id is None:
+            session = await self.chat_repo.create_session(user_id=user.id)
+            session_id = session.id
+        else:
+            session = await self.chat_repo.get_session(session_id, user_id=user.id)
+            if not session:
+                yield f"event: error\ndata: {json.dumps({'detail': f'Session {session_id} not found.'})}\n\n"
+                return
+
+        await self.chat_repo.add_message(session_id, role="user", content=message_text)
+
+        history_context = ""
+        if session and session.messages:
+            history_context = "\n".join([f"{m.role}: {m.content}" for m in session.messages])
+
+        prompt = f"Chat History:\n{history_context}\n\nAgent, please respond to the latest user message: {message_text}"
+
+        # Emit session_id first so the client can track it
+        yield f"event: session\ndata: {json.dumps({'session_id': str(session_id)})}\n\n"
+
+        full_response = ""
+        total_tokens = 0
+        async with Agent(self.agent_config) as agent:
+            response = await agent.chat(prompt)
+            async for token in response:
+                full_response += token
+                yield f"data: {json.dumps({'token': token})}\n\n"
+
+            if hasattr(response, "usage_metadata") and response.usage_metadata:
+                total_tokens = getattr(response.usage_metadata, "total_token_count", 0)
+
+        # Persist after stream completes
+        await self.chat_repo.add_message(session_id, role="agent", content=full_response)
+        if total_tokens > 0:
+            await self.user_repo.update_token_usage(user.id, total_tokens)
+
+        yield f"event: done\ndata: {json.dumps({'session_id': str(session_id), 'tokens_used': total_tokens})}\n\n"
