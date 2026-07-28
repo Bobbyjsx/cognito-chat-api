@@ -21,7 +21,6 @@ class Settings(BaseSettings):
     refresh_token_expire_days: int = 7
 
     # Antigravity SDK configuration can go here
-    system_instructions: str = "You are a helpful AI assistant."
 
     class Config:
         env_file = ".env"

@@ -8,6 +8,7 @@ from app.models.chats import ChatResponse
 from app.models.users import UserDB
 from app.repositories.chats import ChatRepository
 from app.repositories.users import UserRepository
+from app.utils.prompts import get_base_system_instructions
 
 
 class AgentService:
@@ -17,7 +18,7 @@ class AgentService:
 
         self.agent_config = LocalAgentConfig(
             api_key=settings.gemini_api_key,
-            system_instructions=settings.system_instructions,
+            system_instructions=get_base_system_instructions(),
             capabilities=CapabilitiesConfig(),
         )
 
