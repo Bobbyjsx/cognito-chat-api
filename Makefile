@@ -6,7 +6,8 @@ install:
 	$(VENV)/pip install -r requirements.txt
 
 run:
-	$(VENV)/uvicorn app.main:app --reload
+	docker compose up --build --watch cognito-chat-api -d
+	docker image prune -f
 
 lint:
 	$(VENV)/ruff check .
@@ -18,13 +19,15 @@ format:
 	$(VENV)/ruff format .
 
 test:
-	docker-compose up -d
+	docker compose up --build -d firestore
 	sleep 5
-	PYTHONPATH=. $(VENV)/pytest tests/ || (docker-compose down && exit 1)
-	docker-compose down
+	PYTHONPATH=. $(VENV)/pytest tests/ || (docker compose down && exit 1)
+	docker compose down
 
 clean:
 	rm -rf __pycache__
 	rm -rf .ruff_cache
 	rm -rf .pytest_cache
 	find . -type d -name "__pycache__" -exec rm -rf {} +
+	docker compose down --rmi local
+	docker image prune -f

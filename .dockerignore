@@ -1,0 +1,4 @@
+firebase-credentials.json
+.postman
+.pytest_cache
+.ruff_cache
