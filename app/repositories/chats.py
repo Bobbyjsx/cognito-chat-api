@@ -57,9 +57,9 @@ class ChatRepository:
         await doc_ref.set(data)
 
         # Update session updated_at
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         session_ref = self.collection.document(str(session_id))
-        await session_ref.update({"updated_at": datetime.utcnow().isoformat()})
+        await session_ref.update({"updated_at": datetime.now(timezone.utc).isoformat()})
 
         return message_db

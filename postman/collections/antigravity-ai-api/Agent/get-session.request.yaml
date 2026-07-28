@@ -1,0 +1,13 @@
+$kind: http-request
+name: 'Get a specific chat session'
+method: GET
+url: '{{baseUrl}}/agent/sessions/:session_id'
+order: 3000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{accessToken}}'
+pathVariables:
+  - key: session_id
+    value: '{{sessionId}}'

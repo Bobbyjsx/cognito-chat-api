@@ -34,4 +34,6 @@ def get_db() -> AsyncClient:
 
     # Create the async client
     # Note: Application Default Credentials will automatically be used by google-cloud-firestore
-    return AsyncClient(project=project_id)
+    database = settings.firestore_database or "(default)"
+    db_client = AsyncClient(project=project_id, database=database)
+    return db_client

@@ -13,6 +13,7 @@ class Settings(BaseSettings):
 
     # Database Configuration (Firebase)
     firebase_credentials_path: str = ""
+    firestore_database: str = ""
 
     # Auth Settings
     secret_key: str = "supersecretkey_please_change_in_production"

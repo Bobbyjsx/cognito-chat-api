@@ -1,0 +1,10 @@
+$kind: http-request
+name: List all chat sessions
+method: GET
+url: '{{baseUrl}}/agent/sessions'
+order: 2000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{accessToken}}'

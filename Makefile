@@ -18,7 +18,10 @@ format:
 	$(VENV)/ruff format .
 
 test:
-	PYTHONPATH=. $(VENV)/pytest tests/
+	docker-compose up -d
+	sleep 5
+	PYTHONPATH=. $(VENV)/pytest tests/ || (docker-compose down && exit 1)
+	docker-compose down
 
 clean:
 	rm -rf __pycache__

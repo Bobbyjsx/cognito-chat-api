@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -11,7 +11,7 @@ class ChatMessageDB(BaseModel):
     session_id: UUID
     role: str
     content: str
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class ChatSessionDB(BaseModel):
@@ -19,8 +19,8 @@ class ChatSessionDB(BaseModel):
 
     id: UUID = Field(default_factory=uuid4)
     user_id: UUID
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     # We won't store messages directly inside the session document in Firestore,
     # they will be in a subcollection, but we can load them into this model in the repo.
     messages: list[ChatMessageDB] = Field(default_factory=list)

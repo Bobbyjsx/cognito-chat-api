@@ -1,0 +1,23 @@
+$kind: http-request
+name: Chat with agent
+method: POST
+url: '{{baseUrl}}/agent/chat'
+order: 1000
+auth:
+  type: bearer
+  credentials:
+    - key: token
+      value: '{{accessToken}}'
+queryParams:
+  - key: session_id
+    value: '{{sessionId}}'
+    disabled: true
+headers:
+  - key: Content-Type
+    value: application/json
+body:
+  type: json
+  content: |-
+    {
+      "message": "Hello, how can you help me?"
+    }

@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  firestore:
+    image: google/cloud-sdk:latest
+    platform: linux/amd64
+    container_name: firestore-emulator
+    command: >
+      gcloud beta emulators firestore start
+      --host-port=0.0.0.0:8080
+    ports:
+      - "8080:8080"
+    environment:
+      - FIRESTORE_PROJECT_ID=test-project
