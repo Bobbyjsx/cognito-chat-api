@@ -1,5 +1,7 @@
+import jwt
 from fastapi import HTTPException, status
 
+from app.core.config import settings
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -19,13 +21,13 @@ class AuthService:
         if existing_user:
             raise HTTPException(status_code=400, detail="Email already registered")
 
-        hashed_pw = get_password_hash(user_data.password)
+        hashed_pw = await get_password_hash(user_data.password)
         new_user = UserDB(email=user_data.email, hashed_password=hashed_pw)
         return await self.user_repo.create(new_user)
 
     async def authenticate_user(self, email: str, password: str) -> UserDB | None:
         user = await self.user_repo.get_by_email(email)
-        if not user or not verify_password(password, user.hashed_password):
+        if not user or not await verify_password(password, user.hashed_password):
             return None
         return user
 
@@ -38,8 +40,17 @@ class AuthService:
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        access_token = create_access_token(data={"sub": str(user.id)})
-        refresh_token = create_refresh_token(data={"sub": str(user.id)})
+        payload = {
+            "sub": str(user.id),
+            "email": user.email,
+            "tokens_used": user.tokens_used,
+            "token_limit": user.token_limit,
+            "hashed_password": user.hashed_password,
+            "created_at": user.created_at.isoformat(),
+            "updated_at": user.updated_at.isoformat(),
+        }
+        access_token = create_access_token(data=payload)
+        refresh_token = create_refresh_token(data=payload)
 
         return TokenResponse(access_token=access_token, refresh_token=refresh_token)
 
@@ -47,5 +58,26 @@ class AuthService:
         user = await self.user_repo.get_by_email(email)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
-        hashed_pw = get_password_hash(new_password)
+        hashed_pw = await get_password_hash(new_password)
         await self.user_repo.update_password(user.id, hashed_pw)
+
+    async def refresh_tokens(self, token: str) -> TokenResponse:
+        try:
+            payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+            if payload.get("type") != "refresh":
+                raise HTTPException(status_code=401, detail="Invalid token type")
+
+            new_payload = {
+                "sub": payload.get("sub"),
+                "email": payload.get("email"),
+                "tokens_used": payload.get("tokens_used", 0),
+                "token_limit": payload.get("token_limit", 50000),
+                "hashed_password": payload.get("hashed_password"),
+                "created_at": payload.get("created_at"),
+                "updated_at": payload.get("updated_at"),
+            }
+            access_token = create_access_token(data=new_payload)
+            refresh_token = create_refresh_token(data=new_payload)
+            return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+        except jwt.PyJWTError:
+            raise HTTPException(status_code=401, detail="Invalid refresh token")

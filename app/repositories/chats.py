@@ -19,8 +19,14 @@ class ChatRepository:
         return session_db
 
     async def get_session(self, session_id: UUID, user_id: UUID) -> ChatSessionDB | None:
+        import asyncio
+
         doc_ref = self.collection.document(str(session_id))
-        doc = await doc_ref.get()
+        messages_ref = doc_ref.collection("messages").order_by("created_at")
+
+        # Fetch session document and messages subcollection concurrently
+        doc, messages_docs = await asyncio.gather(doc_ref.get(), messages_ref.get())
+
         if doc.exists:
             data = doc.to_dict()
             if data.get("user_id") != str(user_id):
@@ -28,9 +34,7 @@ class ChatRepository:
 
             session = ChatSessionDB(**data)
 
-            # Fetch messages subcollection
-            messages_ref = doc_ref.collection("messages").order_by("created_at").stream()
-            async for msg_doc in messages_ref:
+            for msg_doc in messages_docs:
                 msg_data = msg_doc.to_dict()
                 session.messages.append(ChatMessageDB(**msg_data))
 
@@ -54,12 +58,29 @@ class ChatRepository:
         message_db = ChatMessageDB(session_id=session_id, role=role, content=content)
         doc_ref = self.collection.document(str(session_id)).collection("messages").document(str(message_db.id))
         data = message_db.model_dump(mode="json")
-        await doc_ref.set(data)
 
-        # Update session updated_at
         from datetime import datetime, timezone
 
+        read_status = "read" if role == "user" else "not read"
+
         session_ref = self.collection.document(str(session_id))
-        await session_ref.update({"updated_at": datetime.now(timezone.utc).isoformat()})
+
+        # Use batch write to cut network roundtrips in half
+        batch = self.db.batch()
+        batch.set(doc_ref, data)
+        batch.update(
+            session_ref,
+            {
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "last_message_content": content,
+                "last_message_role": role,
+                "read_status": read_status,
+            },
+        )
+        await batch.commit()
 
         return message_db
+
+    async def mark_session_read(self, session_id: UUID) -> None:
+        session_ref = self.collection.document(str(session_id))
+        await session_ref.update({"read_status": "read"})

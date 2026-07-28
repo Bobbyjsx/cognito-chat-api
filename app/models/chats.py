@@ -21,6 +21,9 @@ class ChatSessionDB(BaseModel):
     user_id: UUID
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_message_content: str | None = None
+    last_message_role: str | None = None
+    read_status: str = "read"
     # We won't store messages directly inside the session document in Firestore,
     # they will be in a subcollection, but we can load them into this model in the repo.
     messages: list[ChatMessageDB] = Field(default_factory=list)
@@ -46,3 +49,16 @@ class ChatSessionSchema(BaseModel):
     messages: list[MessageSchema] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
+    last_message_content: str | None = None
+    last_message_role: str | None = None
+    read_status: str = "read"
+
+
+class ChatSessionListSchema(BaseModel):
+    id: UUID
+    user_id: UUID
+    created_at: datetime
+    updated_at: datetime
+    last_message_content: str | None = None
+    last_message_role: str | None = None
+    read_status: str = "read"

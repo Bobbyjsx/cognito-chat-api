@@ -1,6 +1,7 @@
 import os
 
 import firebase_admin
+from fastapi import Request
 from firebase_admin import credentials
 from google.cloud.firestore_v1.async_client import AsyncClient
 
@@ -21,8 +22,7 @@ def init_db():
     print("Firebase Admin initialized successfully.")
 
 
-def get_db() -> AsyncClient:
-    """Dependency that returns an Async Firestore client."""
+def create_db_client() -> AsyncClient:
     # We create an AsyncClient natively because firebase_admin's firestore.client() is synchronous
     app = firebase_admin.get_app()
     project_id = app.project_id or os.environ.get("GOOGLE_CLOUD_PROJECT")
@@ -35,5 +35,9 @@ def get_db() -> AsyncClient:
     # Create the async client
     # Note: Application Default Credentials will automatically be used by google-cloud-firestore
     database = settings.firestore_database or "(default)"
-    db_client = AsyncClient(project=project_id, database=database)
-    return db_client
+    return AsyncClient(project=project_id, database=database)
+
+
+def get_db(request: Request) -> AsyncClient:
+    """Dependency that returns an Async Firestore client from app state."""
+    return request.app.state.db_client

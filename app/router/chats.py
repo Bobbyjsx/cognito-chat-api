@@ -5,7 +5,7 @@ from google.cloud.firestore_v1.async_client import AsyncClient
 
 from app.api.dependencies import get_current_user
 from app.database import get_db
-from app.models.chats import ChatRequest, ChatResponse, ChatSessionSchema
+from app.models.chats import ChatRequest, ChatResponse, ChatSessionListSchema, ChatSessionSchema
 from app.models.users import UserDB
 from app.repositories.chats import ChatRepository
 from app.repositories.users import UserRepository
@@ -43,7 +43,7 @@ async def chat_with_agent(
         raise HTTPException(status_code=500, detail=f"Error: {e!s}\nTraceback: {tb}")
 
 
-@router.get("/sessions", response_model=list[ChatSessionSchema])
+@router.get("/sessions", response_model=list[ChatSessionListSchema])
 async def list_sessions(current_user: UserDB = Depends(get_current_user), db: AsyncClient = Depends(get_db)):
     repo = ChatRepository(db)
     sessions = await repo.get_user_sessions(current_user.id)
@@ -60,4 +60,24 @@ async def get_session(
     session = await repo.get_session(session_id, current_user.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    await repo.mark_session_read(session_id)
+    session.read_status = "read"
+
     return session
+
+
+@router.post("/sessions/{session_id}/read", status_code=200)
+async def mark_as_read(
+    session_id: uuid.UUID,
+    current_user: UserDB = Depends(get_current_user),
+    db: AsyncClient = Depends(get_db),
+):
+    repo = ChatRepository(db)
+    # Check if session exists and belongs to user
+    session = await repo.get_session(session_id, current_user.id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    await repo.mark_session_read(session_id)
+    return {"message": "Session marked as read"}

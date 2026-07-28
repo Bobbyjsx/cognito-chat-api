@@ -21,6 +21,11 @@ class UserCreate(BaseModel):
     password: str
 
 
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
 class UserResponse(BaseModel):
     id: UUID
     email: EmailStr
@@ -37,3 +42,7 @@ class TokenResponse(BaseModel):
 class PasswordResetRequest(BaseModel):
     email: EmailStr
     new_password: str
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str

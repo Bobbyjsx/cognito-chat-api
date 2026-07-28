@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, status
-from fastapi.security import OAuth2PasswordRequestForm
 from google.cloud.firestore_v1.async_client import AsyncClient
 
 from app.api.dependencies import get_current_user
 from app.database import get_db
 from app.models.users import (
+    LoginRequest,
     PasswordResetRequest,
+    RefreshRequest,
     TokenResponse,
     UserCreate,
     UserResponse,
@@ -28,10 +29,10 @@ async def signup(user_data: UserCreate, auth_service: AuthService = Depends(get_
 
 @router.post("/login", response_model=TokenResponse)
 async def login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
+    request: LoginRequest,
     auth_service: AuthService = Depends(get_auth_service),
 ):
-    return await auth_service.login(form_data.username, form_data.password)
+    return await auth_service.login(request.email, request.password)
 
 
 @router.post("/reset-password", status_code=status.HTTP_200_OK)
@@ -44,3 +45,8 @@ async def reset_password(request: PasswordResetRequest, auth_service: AuthServic
 @router.get("/me", response_model=UserResponse)
 async def get_my_profile(current_user=Depends(get_current_user)):
     return current_user
+
+
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh_tokens(request: RefreshRequest, auth_service: AuthService = Depends(get_auth_service)):
+    return await auth_service.refresh_tokens(request.refresh_token)

@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.core.config import settings
-from app.database import init_db
+from app.database import create_db_client, init_db
 from app.router import auth, chats
 
 
@@ -11,8 +11,10 @@ from app.router import auth, chats
 async def lifespan(app: FastAPI):
     # Initialize Firebase on startup
     init_db()
+    app.state.db_client = create_db_client()
     yield
     # Any cleanup on shutdown
+    # Not strictly necessary to close AsyncClient manually here, but we can if we want.
 
 
 app = FastAPI(
