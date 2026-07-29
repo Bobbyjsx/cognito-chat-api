@@ -1,9 +1,9 @@
-from collections import deque
-from datetime import datetime, timezone
 import json
 import logging
 import uuid
-from typing import AsyncGenerator
+from collections import deque
+from collections.abc import AsyncGenerator
+from datetime import datetime, timezone
 
 from fastapi import HTTPException
 from google import genai
@@ -16,6 +16,7 @@ from app.models.users import UserDB
 from app.repositories.chats import ChatRepository
 from app.repositories.config import ConfigRepository
 from app.repositories.users import UserRepository
+from app.services.quota import resolve_user_limits
 from app.utils.datetime import ensure_utc
 
 logger = logging.getLogger(__name__)
@@ -78,8 +79,13 @@ class AgentService:
         allowed_for_model = cfg.model_reasoning_modes.get(model, cfg.allowed_reasoning_levels)
 
         reasoning = requested_reasoning or cfg.default_reasoning_level
-        if reasoning not in cfg.allowed_reasoning_levels or reasoning not in allowed_for_model:
-            reasoning = "none"
+        if requested_reasoning and (
+            requested_reasoning not in cfg.allowed_reasoning_levels or requested_reasoning not in allowed_for_model
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Reasoning level '{requested_reasoning}' is not allowed for model '{model}'. Allowed: {allowed_for_model}",
+            )
 
         thinking_config: types.ThinkingConfig | None = None
         if reasoning != "none":
@@ -95,7 +101,7 @@ class AgentService:
         if cfg.allowed_tools and len(cfg.allowed_tools) > 0:
             tool_list = []
             if "code_execution" in cfg.allowed_tools:
-                tool_list.append(types.Tool(code_execution=types.CodeExecution()))
+                tool_list.append(types.Tool(code_execution=types.ToolCodeExecution()))
 
             if tool_list:
                 tools = tool_list
@@ -213,7 +219,7 @@ class AgentService:
         if not message_text or not message_text.strip():
             raise HTTPException(status_code=400, detail="Message is empty.")
 
-        model, thinking_config, reasoning, tools = await self.validate_and_resolve_config(
+        model, thinking_config, _reasoning, tools = await self.validate_and_resolve_config(
             requested_model, requested_reasoning
         )
 
@@ -227,10 +233,13 @@ class AgentService:
         effective_6h = 0 if is_6h_expired else user.tokens_used_6h
         effective_weekly = 0 if is_weekly_expired else user.tokens_used_weekly
 
-        if effective_6h >= user.token_limit_6h:
+        active_config = await self.get_active_config()
+        limit_6h, limit_weekly = resolve_user_limits(user, active_config)
+
+        if effective_6h >= limit_6h:
             reset_str = reset_at.isoformat() if reset_at else ""
             raise HTTPException(status_code=429, detail=f"6-hour token limit reached. Resets at {reset_str}")
-        if effective_weekly >= user.token_limit_weekly:
+        if effective_weekly >= limit_weekly:
             reset_str = weekly_reset_at.isoformat() if weekly_reset_at else ""
             raise HTTPException(status_code=429, detail=f"Weekly token limit reached. Resets at {reset_str}")
 
@@ -265,9 +274,7 @@ class AgentService:
             total_tokens = getattr(response.usage_metadata, "total_token_count", 0) if response.usage_metadata else 0
         except Exception:
             logger.exception("Model generation failed for session %s", session_id)
-            await self.chat_repo.add_message(
-                session_id, role="agent", content="", error=SAFE_GENERATION_ERROR
-            )
+            await self.chat_repo.add_message(session_id, role="agent", content="", error=SAFE_GENERATION_ERROR)
             raise HTTPException(status_code=500, detail=SAFE_GENERATION_ERROR) from None
 
         await self.chat_repo.add_message(session_id, role="agent", content=response_text)
@@ -313,11 +320,14 @@ class AgentService:
         effective_6h = 0 if is_6h_expired else user.tokens_used_6h
         effective_weekly = 0 if is_weekly_expired else user.tokens_used_weekly
 
-        if effective_6h >= user.token_limit_6h:
+        active_config = await self.get_active_config()
+        limit_6h, limit_weekly = resolve_user_limits(user, active_config)
+
+        if effective_6h >= limit_6h:
             reset_str = reset_at.isoformat() if reset_at else ""
             yield f"event: error\ndata: {json.dumps({'detail': f'6-hour token limit reached. Resets at {reset_str}'})}\n\n"
             return
-        if effective_weekly >= user.token_limit_weekly:
+        if effective_weekly >= limit_weekly:
             reset_str = weekly_reset_at.isoformat() if weekly_reset_at else ""
             yield f"event: error\ndata: {json.dumps({'detail': f'Weekly token limit reached. Resets at {reset_str}'})}\n\n"
             return
@@ -376,7 +386,12 @@ class AgentService:
 
         await self.chat_repo.add_message(session_id, role="agent", content=full_response)
         if total_tokens > 0:
-            within_limit = await self.user_repo.atomic_increment_if_within_limit(user.id, total_tokens)
+            within_limit = await self.user_repo.atomic_increment_if_within_limit(
+                user.id,
+                total_tokens,
+                default_limit_6h=active_config.default_token_limit_6h,
+                default_limit_weekly=active_config.default_token_limit_weekly,
+            )
             if not within_limit:
                 yield f"event: error\ndata: {json.dumps({'detail': 'Token limit exceeded after generation. Please upgrade your plan.'})}\n\n"
                 return

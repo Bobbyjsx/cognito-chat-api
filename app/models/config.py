@@ -8,6 +8,10 @@ class AppConfigDB(BaseModel):
 
     id: str = "app_config"
 
+    # Default Token Quota Configurations
+    default_token_limit_6h: int = 60_000
+    default_token_limit_weekly: int = 300_000
+
     # Feature Toggles
     enable_text_generation: bool = True
     enable_image_generation: bool = False
@@ -27,9 +31,7 @@ class AppConfigDB(BaseModel):
     default_text_model: str = "gemini-3.6-flash"
 
     # Reasoning / thinking effort configurations (Global source of truth)
-    allowed_reasoning_levels: list[str] = Field(
-        default_factory=lambda: ["none", "minimal", "low", "medium", "high"]
-    )
+    allowed_reasoning_levels: list[str] = Field(default_factory=lambda: ["none", "minimal", "low", "medium", "high"])
     default_reasoning_level: str = "medium"
 
     # Per-model reasoning mode mappings (filtered against allowed_reasoning_levels)
@@ -63,8 +65,6 @@ class AppConfigDB(BaseModel):
     )
 
     # Tool configurations
-    allowed_tools: list[str] = Field(
-        default_factory=lambda: ["google_search", "code_execution"]
-    )
+    allowed_tools: list[str] = Field(default_factory=lambda: ["google_search", "code_execution"])
 
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

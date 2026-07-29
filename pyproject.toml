@@ -8,3 +8,7 @@ ignore = [
     "BLE001",  # Do not catch blind exception (ok for our global error handler)
     "TRY201",  # Use raise without specifying exception name (ok for FastAPI handler)
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

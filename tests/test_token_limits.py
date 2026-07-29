@@ -8,13 +8,13 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from freezegun import freeze_time
 
 from app.models.users import UserDB
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_user(**kwargs) -> UserDB:
     now = datetime.now(timezone.utc)
@@ -43,6 +43,7 @@ def _auth_headers(client, email="quota@example.com", password="password123"):
 # Unit tests — UserDB model defaults
 # ---------------------------------------------------------------------------
 
+
 class TestUserDBDefaults:
     def test_6h_reset_defaults_to_6h_from_now(self):
         before = datetime.now(timezone.utc)
@@ -56,18 +57,19 @@ class TestUserDBDefaults:
         after = datetime.now(timezone.utc)
         assert before + timedelta(weeks=1) <= user.weekly_reset_at <= after + timedelta(weeks=1)
 
-    def test_6h_token_limit_default_is_60k(self):
+    def test_6h_token_limit_default_is_none_for_global(self):
         user = UserDB(email="a@b.com", hashed_password="x")
-        assert user.token_limit_6h == 60_000
+        assert user.token_limit_6h is None
 
-    def test_weekly_token_limit_default_is_300k(self):
+    def test_weekly_token_limit_default_is_none_for_global(self):
         user = UserDB(email="a@b.com", hashed_password="x")
-        assert user.token_limit_weekly == 300_000
+        assert user.token_limit_weekly is None
 
 
 # ---------------------------------------------------------------------------
 # Unit tests — Repository transaction logic (mocked Firestore)
 # ---------------------------------------------------------------------------
+
 
 class TestAtomicIncrementTransaction:
     """Tests for UserRepository.atomic_increment_if_within_limit."""
@@ -150,7 +152,7 @@ class TestAtomicIncrementTransaction:
         past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
         doc_data = {
             "tokens_used": 0,
-            "tokens_used_6h": 59_999,   # Would normally block, but window is expired
+            "tokens_used_6h": 59_999,  # Would normally block, but window is expired
             "token_limit_6h": 60_000,
             "reset_at": past,
             "tokens_used_weekly": 0,
@@ -213,8 +215,8 @@ class TestAtomicIncrementTransaction:
 # Integration tests — HTTP endpoints via TestClient
 # ---------------------------------------------------------------------------
 
-class TestTokenQuotaEndpoints:
 
+class TestTokenQuotaEndpoints:
     def test_chat_blocked_when_6h_limit_reached(self, client, mock_agent):
         headers = _auth_headers(client, "quota6h@example.com")
 
@@ -289,18 +291,31 @@ class TestTokenQuotaEndpoints:
         assert data["token_limit_6h"] == 60_000
         assert data["token_limit_weekly"] == 300_000
 
-    @freeze_time("2026-07-29 06:00:00", tz_offset=0)
     def test_reset_at_is_6h_from_signup(self, client):
-        headers = _auth_headers(client, "quotareset@example.com")
-        me = client.get("/auth/me", headers=headers).json()
+        frozen_now = datetime(2026, 7, 29, 6, 0, 0, tzinfo=timezone.utc)
+        with (
+            patch("app.models.users.datetime") as mock_dt1,
+            patch("app.repositories.users.datetime") as mock_dt2,
+        ):
+            mock_dt1.now.return_value = frozen_now
+            mock_dt1.fromisoformat = datetime.fromisoformat
+            mock_dt2.now.return_value = frozen_now
+            headers = _auth_headers(client, "quotareset@example.com")
+            me = client.get("/auth/me", headers=headers).json()
         reset_at = datetime.fromisoformat(me["reset_at"])
         expected = datetime(2026, 7, 29, 12, 0, 0, tzinfo=timezone.utc)
         assert reset_at == expected
 
-    @freeze_time("2026-07-29 06:00:00", tz_offset=0)
     def test_weekly_reset_at_is_7_days_from_signup(self, client):
-        headers = _auth_headers(client, "quotawkreset@example.com")
-        me = client.get("/auth/me", headers=headers).json()
+        frozen_now = datetime(2026, 7, 29, 6, 0, 0, tzinfo=timezone.utc)
+        with (
+            patch("app.models.users.datetime") as mock_dt1,
+            patch("app.repositories.users.datetime") as mock_dt2,
+        ):
+            mock_dt1.now.return_value = frozen_now
+            mock_dt2.now.return_value = frozen_now
+            headers = _auth_headers(client, "quotawkreset@example.com")
+            me = client.get("/auth/me", headers=headers).json()
         weekly_reset_at = datetime.fromisoformat(me["weekly_reset_at"])
         expected = datetime(2026, 8, 5, 6, 0, 0, tzinfo=timezone.utc)
         assert weekly_reset_at == expected
@@ -313,4 +328,3 @@ class TestTokenQuotaEndpoints:
 
         assert res1["reset_at"] == res2["reset_at"] == res3["reset_at"]
         assert res1["weekly_reset_at"] == res2["weekly_reset_at"] == res3["weekly_reset_at"]
-

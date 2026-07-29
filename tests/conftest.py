@@ -34,7 +34,9 @@ def clear_database():
     """Clear the Firestore emulator database and re-seed app_config between tests."""
     try:
         # Emulator REST API for wiping the database
-        httpx.delete("http://127.0.0.1:8080/emulator/v1/projects/test-project/databases/(default)/documents")
+        httpx.delete(
+            "http://127.0.0.1:8080/emulator/v1/projects/test-project/databases/(default)/documents", timeout=2.0
+        )
     except httpx.RequestError:
         print("Warning: Could not connect to Firestore emulator at 127.0.0.1:8080. Is it running?")
 
@@ -99,8 +101,6 @@ def mock_agent():
             return _stream()
 
         mock_client_instance.aio.models.generate_content = AsyncMock(side_effect=mock_generate_content)
-        mock_client_instance.aio.models.generate_content_stream = AsyncMock(
-            side_effect=mock_generate_content_stream
-        )
+        mock_client_instance.aio.models.generate_content_stream = AsyncMock(side_effect=mock_generate_content_stream)
 
         yield mock_client_instance

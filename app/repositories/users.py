@@ -50,17 +50,6 @@ class UserRepository:
             updates["tokens_used_weekly"] = 0
             need_update = True
 
-        # Ensure default limit fields exist
-        if "token_limit_6h" not in data:
-            data["token_limit_6h"] = 60_000
-            updates["token_limit_6h"] = 60_000
-            need_update = True
-
-        if "token_limit_weekly" not in data:
-            data["token_limit_weekly"] = 300_000
-            updates["token_limit_weekly"] = 300_000
-            need_update = True
-
         if need_update:
             await doc_snapshot.reference.update(updates)
 
@@ -88,7 +77,13 @@ class UserRepository:
         doc_ref = self.collection.document(str(user_id))
         await doc_ref.update({"tokens_used": Increment(tokens_added)})
 
-    async def atomic_increment_if_within_limit(self, user_id: UUID | str, tokens_added: int) -> bool:
+    async def atomic_increment_if_within_limit(
+        self,
+        user_id: UUID | str,
+        tokens_added: int,
+        default_limit_6h: int = 60_000,
+        default_limit_weekly: int = 300_000,
+    ) -> bool:
         """Atomically checks both 6-hourly and weekly windows inside a Firestore transaction.
 
         If either window has expired, resets the window counters and advances the reset
@@ -111,7 +106,8 @@ class UserRepository:
             # 6-hourly reset check
             reset_at = ensure_utc(data.get("reset_at"))
             tokens_used_6h = data.get("tokens_used_6h", 0)
-            token_limit_6h = data.get("token_limit_6h", 60_000)
+            user_limit_6h = data.get("token_limit_6h")
+            token_limit_6h = user_limit_6h if user_limit_6h is not None else default_limit_6h
 
             if reset_at is None or now >= reset_at:
                 tokens_used_6h = 0
@@ -121,7 +117,8 @@ class UserRepository:
             # Weekly reset check
             weekly_reset_at = ensure_utc(data.get("weekly_reset_at"))
             tokens_used_weekly = data.get("tokens_used_weekly", 0)
-            token_limit_weekly = data.get("token_limit_weekly", 300_000)
+            user_limit_weekly = data.get("token_limit_weekly")
+            token_limit_weekly = user_limit_weekly if user_limit_weekly is not None else default_limit_weekly
 
             if weekly_reset_at is None or now >= weekly_reset_at:
                 tokens_used_weekly = 0

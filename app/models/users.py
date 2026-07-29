@@ -24,12 +24,12 @@ class UserDB(BaseModel):
 
     # 6-hourly rolling window
     tokens_used_6h: int = 0
-    token_limit_6h: int = 60_000
+    token_limit_6h: int | None = None
     reset_at: datetime = Field(default_factory=_next_6h_reset)
 
     # Weekly rolling window
     tokens_used_weekly: int = 0
-    token_limit_weekly: int = 300_000
+    token_limit_weekly: int | None = None
     weekly_reset_at: datetime = Field(default_factory=_next_weekly_reset)
 
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

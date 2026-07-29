@@ -1,7 +1,6 @@
-from uuid import UUID
-from datetime import datetime, timezone
-import asyncio
 import logging
+from datetime import datetime, timezone
+from uuid import UUID
 
 from google.cloud.firestore_v1.async_client import AsyncClient
 from google.cloud.firestore_v1.base_query import FieldFilter
@@ -49,9 +48,7 @@ class ChatRepository:
 
         return session
 
-    async def get_user_sessions(
-        self, user_id: UUID, search_query: str | None = None
-    ) -> list[ChatSessionDB]:
+    async def get_user_sessions(self, user_id: UUID, search_query: str | None = None) -> list[ChatSessionDB]:
         sessions = []
         docs = self.collection.where(filter=FieldFilter("user_id", "==", str(user_id))).stream()
         q_lower = search_query.strip().lower() if search_query and search_query.strip() else None
@@ -65,9 +62,7 @@ class ChatRepository:
 
             if q_lower:
                 title_match = bool(session.title and q_lower in session.title.lower())
-                content_match = bool(
-                    session.last_message_content and q_lower in session.last_message_content.lower()
-                )
+                content_match = bool(session.last_message_content and q_lower in session.last_message_content.lower())
 
                 if not (title_match or content_match):
                     # Deep search message history using async stream
@@ -98,18 +93,18 @@ class ChatRepository:
             if data.get("user_id") != str(user_id):
                 return False
 
-            await doc_ref.update({
-                "is_deleted": True,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            })
+            await doc_ref.update(
+                {
+                    "is_deleted": True,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
             return True
         except Exception:
             logger.exception("Error soft-deleting session %s", session_id)
             return False
 
-    async def add_message(
-        self, session_id: UUID, role: str, content: str, error: str | None = None
-    ) -> ChatMessageDB:
+    async def add_message(self, session_id: UUID, role: str, content: str, error: str | None = None) -> ChatMessageDB:
         message_db = ChatMessageDB(session_id=session_id, role=role, content=content, error=error)
         doc_ref = self.collection.document(str(session_id)).collection("messages").document(str(message_db.id))
         data = message_db.model_dump(mode="json")

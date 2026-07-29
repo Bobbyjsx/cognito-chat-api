@@ -1,7 +1,22 @@
 from datetime import datetime, timezone
 
+from app.models.config import AppConfigDB
 from app.models.users import UserDB, UserResponse
 from app.utils.datetime import ensure_utc
+
+
+def resolve_user_limits(user: UserDB, config: AppConfigDB | None = None) -> tuple[int, int]:
+    limit_6h = (
+        user.token_limit_6h
+        if user.token_limit_6h is not None
+        else (config.default_token_limit_6h if config else 60_000)
+    )
+    limit_weekly = (
+        user.token_limit_weekly
+        if user.token_limit_weekly is not None
+        else (config.default_token_limit_weekly if config else 300_000)
+    )
+    return limit_6h, limit_weekly
 
 
 def format_countdown_string(dt_val: datetime | None) -> str:
@@ -34,7 +49,7 @@ def format_countdown_string(dt_val: datetime | None) -> str:
 
 class QuotaService:
     @staticmethod
-    def build_user_response(user: UserDB) -> UserResponse:
+    def build_user_response(user: UserDB, config: AppConfigDB | None = None) -> UserResponse:
         now = datetime.now(timezone.utc)
         reset_at = ensure_utc(user.reset_at)
         weekly_reset_at = ensure_utc(user.weekly_reset_at)
@@ -45,24 +60,22 @@ class QuotaService:
         effective_6h = 0 if is_6h_expired else user.tokens_used_6h
         effective_weekly = 0 if is_weekly_expired else user.tokens_used_weekly
 
-        pct_6h = min(round((effective_6h / user.token_limit_6h) * 100, 1), 100.0) if user.token_limit_6h > 0 else 0.0
-        pct_weekly = (
-            min(round((effective_weekly / user.token_limit_weekly) * 100, 1), 100.0)
-            if user.token_limit_weekly > 0
-            else 0.0
-        )
+        limit_6h, limit_weekly = resolve_user_limits(user, config)
+
+        pct_6h = min(round((effective_6h / limit_6h) * 100, 1), 100.0) if limit_6h > 0 else 0.0
+        pct_weekly = min(round((effective_weekly / limit_weekly) * 100, 1), 100.0) if limit_weekly > 0 else 0.0
 
         return UserResponse(
             id=user.id,
             email=user.email,
             tokens_used=user.tokens_used,
             tokens_used_6h=effective_6h,
-            token_limit_6h=user.token_limit_6h,
+            token_limit_6h=limit_6h,
             reset_at=user.reset_at,
             pct_6h=pct_6h,
             reset_countdown_6h=format_countdown_string(user.reset_at),
             tokens_used_weekly=effective_weekly,
-            token_limit_weekly=user.token_limit_weekly,
+            token_limit_weekly=limit_weekly,
             weekly_reset_at=user.weekly_reset_at,
             pct_weekly=pct_weekly,
             reset_countdown_weekly=format_countdown_string(user.weekly_reset_at),

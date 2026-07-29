@@ -11,6 +11,7 @@ from app.models.users import (
     UserCreate,
     UserResponse,
 )
+from app.repositories.config import ConfigRepository
 from app.repositories.users import UserRepository
 from app.services.auth import AuthService
 from app.services.quota import QuotaService
@@ -23,10 +24,19 @@ def get_auth_service(db: AsyncClient = Depends(get_db)) -> AuthService:
     return AuthService(user_repo)
 
 
+def get_config_repo(db: AsyncClient = Depends(get_db)) -> ConfigRepository:
+    return ConfigRepository(db)
+
+
 @router.post("/signup", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-async def signup(user_data: UserCreate, auth_service: AuthService = Depends(get_auth_service)):
+async def signup(
+    user_data: UserCreate,
+    auth_service: AuthService = Depends(get_auth_service),
+    config_repo: ConfigRepository = Depends(get_config_repo),
+):
     user = await auth_service.register_user(user_data)
-    return QuotaService.build_user_response(user)
+    config = await config_repo.get_config()
+    return QuotaService.build_user_response(user, config)
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -44,8 +54,12 @@ async def reset_password(request: PasswordResetRequest, auth_service: AuthServic
 
 
 @router.get("/me", response_model=UserResponse)
-async def get_my_profile(current_user=Depends(get_current_user)):
-    return QuotaService.build_user_response(current_user)
+async def get_my_profile(
+    current_user=Depends(get_current_user),
+    config_repo: ConfigRepository = Depends(get_config_repo),
+):
+    config = await config_repo.get_config()
+    return QuotaService.build_user_response(current_user, config)
 
 
 @router.post("/refresh", response_model=TokenResponse)

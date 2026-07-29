@@ -34,7 +34,7 @@ def test_chat_invalid_model_returns_400(client, mock_agent):
         json={"message": "hello", "model": "invalid-model-999"},
     )
     assert resp.status_code == 400
-    assert "not allowed or supported" in resp.json()["detail"]
+    assert "is not in the allowed text models list" in resp.json()["detail"]
 
 
 def test_chat_invalid_reasoning_returns_400(client, mock_agent):
@@ -67,7 +67,7 @@ def test_chat_valid_model_and_reasoning_success(client, mock_agent):
     assert "response" in resp.json()
 
 
-def test_chat_disabled_text_generation_returns_400(client, mock_agent):
+def test_chat_disabled_text_generation_returns_403(client, mock_agent):
     client.post("/auth/signup", json={"email": "cfgtest4@example.com", "password": "password123"})
     login_resp = client.post("/auth/login", json={"email": "cfgtest4@example.com", "password": "password123"})
     token = login_resp.json()["access_token"]
@@ -81,5 +81,5 @@ def test_chat_disabled_text_generation_returns_400(client, mock_agent):
             headers=headers,
             json={"message": "hello"},
         )
-        assert resp.status_code == 400
+        assert resp.status_code == 403
         assert "disabled" in resp.json()["detail"]
