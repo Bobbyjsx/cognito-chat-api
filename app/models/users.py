@@ -1,7 +1,15 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, EmailStr, Field
+
+
+def _next_6h_reset() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(hours=6)
+
+
+def _next_weekly_reset() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(weeks=1)
 
 
 class UserDB(BaseModel):
@@ -10,8 +18,21 @@ class UserDB(BaseModel):
     id: UUID = Field(default_factory=uuid4)
     email: EmailStr
     hashed_password: str
+
+    # Lifetime / all-time usage (kept for historical reference)
     tokens_used: int = 0
     token_limit: int = 50000
+
+    # 6-hourly rolling window
+    tokens_used_6h: int = 0
+    token_limit_6h: int = 60_000
+    reset_at: datetime = Field(default_factory=_next_6h_reset)
+
+    # Weekly rolling window
+    tokens_used_weekly: int = 0
+    token_limit_weekly: int = 300_000
+    weekly_reset_at: datetime = Field(default_factory=_next_weekly_reset)
+
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -31,6 +52,12 @@ class UserResponse(BaseModel):
     email: EmailStr
     tokens_used: int
     token_limit: int
+    tokens_used_6h: int
+    token_limit_6h: int
+    reset_at: datetime
+    tokens_used_weekly: int
+    token_limit_weekly: int
+    weekly_reset_at: datetime
 
 
 class TokenResponse(BaseModel):

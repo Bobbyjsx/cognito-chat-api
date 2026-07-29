@@ -24,9 +24,9 @@ class MockApp:
 
 patch("firebase_admin.get_app", return_value=MockApp()).start()
 
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient  # noqa: E402
 
-from app.main import app
+from app.main import app  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -50,15 +50,29 @@ def client():
 def mock_agent():
     # Mock the antigravity Agent so we don't hit the real Gemini API
     with patch("app.services.chats.Agent", autospec=True) as MockAgent:
+        from google.antigravity import types
+
         instance = MockAgent.return_value.__aenter__.return_value
 
         class MockResponse:
             def __init__(self):
                 self.usage_metadata = MagicMock(total_token_count=10)
+                self._chunks = [
+                    types.Text(step_index=0, text=t)
+                    for t in ["Hello ", "from ", "mocked ", "agent!"]
+                ]
+
+            @property
+            def chunks(self):
+                async def _gen():
+                    for chunk in self._chunks:
+                        yield chunk
+
+                return _gen()
 
             async def __aiter__(self):
-                for token in ["Hello ", "from ", "mocked ", "agent!"]:
-                    yield token
+                for chunk in self._chunks:
+                    yield chunk.text
 
         instance.chat.return_value = MockResponse()
         yield instance

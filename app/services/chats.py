@@ -1,6 +1,7 @@
 import json
 import uuid
 from collections.abc import AsyncGenerator
+from datetime import datetime, timezone
 
 from fastapi import HTTPException
 from google.antigravity import Agent, CapabilitiesConfig, LocalAgentConfig, types
@@ -10,6 +11,7 @@ from app.models.chats import ChatResponse
 from app.models.users import UserDB
 from app.repositories.chats import ChatRepository
 from app.repositories.users import UserRepository
+from app.utils.datetime import ensure_utc
 from app.utils.prompts import get_base_system_instructions
 
 
@@ -26,15 +28,25 @@ class AgentService:
 
     async def process_chat(self, user: UserDB, message_text: str, session_id: uuid.UUID | None = None) -> ChatResponse:
 
-        # Check token limits
-        if user.tokens_used >= user.token_limit:
-            raise HTTPException(
-                status_code=403,
-                detail="Token limit exceeded. Please upgrade your plan.",
-            )
+        # Check token limits before hitting the model
+        now = datetime.now(timezone.utc)
+        reset_at = ensure_utc(user.reset_at)
+        weekly_reset_at = ensure_utc(user.weekly_reset_at)
+
+        is_6h_expired = reset_at is None or reset_at <= now
+        is_weekly_expired = weekly_reset_at is None or weekly_reset_at <= now
+
+        effective_6h = 0 if is_6h_expired else user.tokens_used_6h
+        effective_weekly = 0 if is_weekly_expired else user.tokens_used_weekly
+
+        if effective_6h >= user.token_limit_6h:
+            reset_str = reset_at.isoformat() if reset_at else ""
+            raise HTTPException(status_code=403, detail=f"6-hour token limit reached. Resets at {reset_str}")
+        if effective_weekly >= user.token_limit_weekly:
+            reset_str = weekly_reset_at.isoformat() if weekly_reset_at else ""
+            raise HTTPException(status_code=403, detail=f"Weekly token limit reached. Resets at {reset_str}")
 
         if session_id is None:
-            # Create a new session in PostgreSQL
             session = await self.chat_repo.create_session(user_id=user.id)
             session_id = session.id
         else:
@@ -58,8 +70,6 @@ class AgentService:
             async for token in response:
                 response_text += token
 
-            # Extract token usage from the response
-            # Note: the usage metadata format varies, we attempt to sum standard counts
             total_tokens = 0
             if hasattr(response, "usage_metadata") and response.usage_metadata:
                 usage = response.usage_metadata
@@ -84,8 +94,24 @@ class AgentService:
         """Yields SSE-formatted chunks as the agent responds, then persists the
         full message and token usage once the stream is complete."""
 
-        if user.tokens_used >= user.token_limit:
-            yield f"event: error\ndata: {json.dumps({'detail': 'Token limit exceeded. Please upgrade your plan.'})}\n\n"
+        # Check token limits before hitting the model
+        now = datetime.now(timezone.utc)
+        reset_at = ensure_utc(user.reset_at)
+        weekly_reset_at = ensure_utc(user.weekly_reset_at)
+
+        is_6h_expired = reset_at is None or reset_at <= now
+        is_weekly_expired = weekly_reset_at is None or weekly_reset_at <= now
+
+        effective_6h = 0 if is_6h_expired else user.tokens_used_6h
+        effective_weekly = 0 if is_weekly_expired else user.tokens_used_weekly
+
+        if effective_6h >= user.token_limit_6h:
+            reset_str = reset_at.isoformat() if reset_at else ""
+            yield f"event: error\ndata: {json.dumps({'detail': f'6-hour token limit reached. Resets at {reset_str}'})}\n\n"
+            return
+        if effective_weekly >= user.token_limit_weekly:
+            reset_str = weekly_reset_at.isoformat() if weekly_reset_at else ""
+            yield f"event: error\ndata: {json.dumps({'detail': f'Weekly token limit reached. Resets at {reset_str}'})}\n\n"
             return
 
         if session_id is None:
@@ -129,7 +155,6 @@ class AgentService:
         if total_tokens > 0:
             within_limit = await self.user_repo.atomic_increment_if_within_limit(user.id, total_tokens)
             if not within_limit:
-                # Response already streamed — notify client the quota was hit at billing time
                 yield f"event: error\ndata: {json.dumps({'detail': 'Token limit exceeded after generation. Please upgrade your plan.'})}\n\n"
                 return
 
