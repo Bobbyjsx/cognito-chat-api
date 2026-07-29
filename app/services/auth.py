@@ -43,11 +43,6 @@ class AuthService:
         payload = {
             "sub": str(user.id),
             "email": user.email,
-            "tokens_used": user.tokens_used,
-            "token_limit": user.token_limit,
-            "hashed_password": user.hashed_password,
-            "created_at": user.created_at.isoformat(),
-            "updated_at": user.updated_at.isoformat(),
         }
         access_token = create_access_token(data=payload)
         refresh_token = create_refresh_token(data=payload)
@@ -67,14 +62,17 @@ class AuthService:
             if payload.get("type") != "refresh":
                 raise HTTPException(status_code=401, detail="Invalid token type")
 
+            user_id = payload.get("sub")
+            if not user_id:
+                raise HTTPException(status_code=401, detail="Invalid token claims")
+
+            user = await self.user_repo.get_by_id(user_id)
+            if not user:
+                raise HTTPException(status_code=401, detail="User not found")
+
             new_payload = {
-                "sub": payload.get("sub"),
-                "email": payload.get("email"),
-                "tokens_used": payload.get("tokens_used", 0),
-                "token_limit": payload.get("token_limit", 50000),
-                "hashed_password": payload.get("hashed_password"),
-                "created_at": payload.get("created_at"),
-                "updated_at": payload.get("updated_at"),
+                "sub": str(user.id),
+                "email": user.email,
             }
             access_token = create_access_token(data=new_payload)
             refresh_token = create_refresh_token(data=new_payload)
