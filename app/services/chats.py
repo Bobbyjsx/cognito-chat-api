@@ -34,10 +34,10 @@ class AgentService:
         self,
         requested_model: str | None,
         requested_reasoning: str | None,
-    ) -> tuple[str, types.ThinkingConfig | None]:
+    ) -> tuple[str, types.ThinkingConfig | None, str]:
         """Fetches system configuration from Firestore and validates feature toggles, text model, and reasoning.
 
-        Returns (resolved_model, thinking_config).
+        Returns (resolved_model, thinking_config, resolved_reasoning).
         Raises HTTPException 400 if text generation is disabled or if model/reasoning level is invalid.
         """
         sys_config: AppConfigDB = await self.config_repo.get_config()
@@ -73,7 +73,7 @@ class AgentService:
         elif reasoning in ("minimal", "low", "medium", "high"):
             thinking_config = types.ThinkingConfig(thinking_level=reasoning.upper())
 
-        return model, thinking_config
+        return model, thinking_config, reasoning
 
     def _build_contents(self, history_messages: list, current_message: str) -> list[types.Content]:
         contents: list[types.Content] = []
@@ -92,7 +92,7 @@ class AgentService:
         requested_reasoning: str | None = None,
     ) -> ChatResponse:
         # Validate model, feature toggle, and reasoning against Firestore config
-        model, thinking_config = await self.validate_and_resolve_config(
+        model, thinking_config, _reasoning = await self.validate_and_resolve_config(
             requested_model, requested_reasoning
         )
 
@@ -167,7 +167,7 @@ class AgentService:
 
         # Validate model, feature toggle, and reasoning against Firestore config
         try:
-            model, thinking_config = await self.validate_and_resolve_config(
+            model, thinking_config, reasoning = await self.validate_and_resolve_config(
                 requested_model, requested_reasoning
             )
         except HTTPException as e:
@@ -239,4 +239,4 @@ class AgentService:
                 yield f"event: error\ndata: {json.dumps({'detail': 'Token limit exceeded after generation. Please upgrade your plan.'})}\n\n"
                 return
 
-        yield f"event: done\ndata: {json.dumps({'session_id': str(session_id), 'tokens_used': total_tokens})}\n\n"
+        yield f"event: done\ndata: {json.dumps({'session_id': str(session_id), 'tokens_used': total_tokens, 'model': model, 'reasoning': reasoning})}\n\n"
