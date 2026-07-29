@@ -19,9 +19,8 @@ class UserDB(BaseModel):
     email: EmailStr
     hashed_password: str
 
-    # Lifetime / all-time usage (kept for historical reference)
+    # Lifetime / all-time cumulative tokens used across account history
     tokens_used: int = 0
-    token_limit: int = 50000
 
     # 6-hourly rolling window
     tokens_used_6h: int = 0
@@ -51,7 +50,6 @@ class UserResponse(BaseModel):
     id: UUID
     email: EmailStr
     tokens_used: int
-    token_limit: int
     tokens_used_6h: int
     token_limit_6h: int
     reset_at: datetime

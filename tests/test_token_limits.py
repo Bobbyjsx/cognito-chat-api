@@ -23,7 +23,6 @@ def _make_user(**kwargs) -> UserDB:
         email="test@example.com",
         hashed_password="hashed",
         tokens_used=0,
-        token_limit=50_000,
         tokens_used_6h=0,
         token_limit_6h=60_000,
         reset_at=now + timedelta(hours=6),
