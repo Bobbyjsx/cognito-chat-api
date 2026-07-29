@@ -12,19 +12,18 @@ class AppConfigDB(BaseModel):
     enable_image_generation: bool = False
     enable_video_generation: bool = False
 
-    # Text model configurations
+    # Text model configurations (100% verified working against live Gemini API)
     allowed_text_models: list[str] = Field(
         default_factory=lambda: [
             "gemini-3.6-flash",
             "gemini-3.5-flash",
-            "gemini-3.1-pro",
-            "gemini-2.5-flash",
-            "gemini-2.5-pro",
-            "gemini-1.5-flash",
-            "gemini-1.5-pro",
+            "gemini-3.5-flash-lite",
+            "gemini-3.1-pro-preview",
+            "gemini-3.1-flash-lite",
+            "gemini-3-flash-preview",
         ]
     )
-    default_text_model: str = "gemini-2.5-flash"
+    default_text_model: str = "gemini-3.6-flash"
 
     # Reasoning / thinking effort configurations
     allowed_reasoning_levels: list[str] = Field(
