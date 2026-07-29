@@ -1,3 +1,4 @@
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -12,6 +13,8 @@ from app.repositories.chats import ChatRepository
 from app.repositories.config import ConfigRepository
 from app.repositories.users import UserRepository
 from app.services.chats import AgentService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
@@ -40,14 +43,12 @@ async def chat_with_agent(
         )
         return response
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        import traceback
-
-        tb = traceback.format_exc()
-        raise HTTPException(status_code=500, detail=f"Error: {e!s}\nTraceback: {tb}")
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Unexpected error in /agent/chat")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred.") from None
 
 
 @router.post("/chat/stream", summary="Stream a chat response via SSE")
