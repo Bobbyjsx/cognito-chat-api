@@ -3,7 +3,7 @@ import uuid
 from collections.abc import AsyncGenerator
 
 from fastapi import HTTPException
-from google.antigravity import Agent, CapabilitiesConfig, LocalAgentConfig
+from google.antigravity import Agent, CapabilitiesConfig, LocalAgentConfig, types
 
 from app.core.config import settings
 from app.models.chats import ChatResponse
@@ -66,7 +66,9 @@ class AgentService:
                 total_tokens = getattr(usage, "total_token_count", 0)
 
             if total_tokens > 0:
-                await self.user_repo.update_token_usage(user.id, total_tokens)
+                within_limit = await self.user_repo.atomic_increment_if_within_limit(user.id, total_tokens)
+                if not within_limit:
+                    raise HTTPException(status_code=403, detail="Token limit exceeded. Please upgrade your plan.")
 
         # Save agent response
         await self.chat_repo.add_message(session_id, role="agent", content=response_text)
@@ -110,9 +112,14 @@ class AgentService:
         total_tokens = 0
         async with Agent(self.agent_config) as agent:
             response = await agent.chat(prompt)
-            async for token in response:
-                full_response += token
-                yield f"data: {json.dumps({'token': token})}\n\n"
+            async for chunk in response.chunks:
+                if isinstance(chunk, types.Text):
+                    full_response += chunk.text
+                    yield f"data: {json.dumps({'type': 'text', 'token': chunk.text})}\n\n"
+                elif isinstance(chunk, types.Thought):
+                    yield f"data: {json.dumps({'type': 'thought', 'token': chunk.text})}\n\n"
+                elif isinstance(chunk, types.ToolCall):
+                    yield f"data: {json.dumps({'type': 'tool_call', 'name': chunk.name})}\n\n"
 
             if hasattr(response, "usage_metadata") and response.usage_metadata:
                 total_tokens = getattr(response.usage_metadata, "total_token_count", 0)
@@ -120,6 +127,10 @@ class AgentService:
         # Persist after stream completes
         await self.chat_repo.add_message(session_id, role="agent", content=full_response)
         if total_tokens > 0:
-            await self.user_repo.update_token_usage(user.id, total_tokens)
+            within_limit = await self.user_repo.atomic_increment_if_within_limit(user.id, total_tokens)
+            if not within_limit:
+                # Response already streamed — notify client the quota was hit at billing time
+                yield f"event: error\ndata: {json.dumps({'detail': 'Token limit exceeded after generation. Please upgrade your plan.'})}\n\n"
+                return
 
         yield f"event: done\ndata: {json.dumps({'session_id': str(session_id), 'tokens_used': total_tokens})}\n\n"
