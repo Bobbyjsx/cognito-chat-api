@@ -67,11 +67,17 @@ class AgentService:
             )
 
         # 3. Construct Gemini ThinkingConfig
+        thinking_level_map = {
+            "minimal": types.ThinkingLevel.MINIMAL,
+            "low": types.ThinkingLevel.LOW,
+            "medium": types.ThinkingLevel.MEDIUM,
+            "high": types.ThinkingLevel.HIGH,
+        }
         thinking_config = None
         if reasoning == "none":
             thinking_config = types.ThinkingConfig(thinking_budget=0)
-        elif reasoning in ("minimal", "low", "medium", "high"):
-            thinking_config = types.ThinkingConfig(thinking_level=reasoning.upper())
+        elif reasoning in thinking_level_map:
+            thinking_config = types.ThinkingConfig(thinking_level=thinking_level_map[reasoning])
 
         return model, thinking_config, reasoning
 
