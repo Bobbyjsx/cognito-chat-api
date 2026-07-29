@@ -1,12 +1,13 @@
 import asyncio
-from datetime import datetime, timedelta, timezone
-import sys
 import os
+import sys
+from datetime import datetime, timedelta, timezone
 
 # Add root directory to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from google.cloud.firestore_v1 import DELETE_FIELD
+
 from app.database import create_db_client, init_db
 from app.utils.datetime import ensure_utc
 

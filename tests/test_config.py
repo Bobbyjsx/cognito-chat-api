@@ -1,4 +1,5 @@
 from unittest.mock import AsyncMock, patch
+
 from app.models.config import AppConfigDB
 
 

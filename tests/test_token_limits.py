@@ -12,7 +12,6 @@ from freezegun import freeze_time
 
 from app.models.users import UserDB
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -76,6 +75,7 @@ class TestAtomicIncrementTransaction:
     @pytest.mark.asyncio
     async def test_allows_increment_within_both_limits(self):
         import uuid
+
         from app.repositories.users import UserRepository
 
         now = datetime.now(timezone.utc)
@@ -109,6 +109,7 @@ class TestAtomicIncrementTransaction:
     async def test_rejects_when_6h_limit_exceeded(self):
         """If tokens_used_6h is already at the cap, return False."""
         import uuid
+
         from app.repositories.users import UserRepository
 
         now = datetime.now(timezone.utc)
@@ -143,6 +144,7 @@ class TestAtomicIncrementTransaction:
     async def test_resets_6h_window_when_expired(self):
         """When reset_at is in the past, tokens_used_6h should be zeroed before checking."""
         import uuid
+
         from app.repositories.users import UserRepository
 
         past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
@@ -176,6 +178,7 @@ class TestAtomicIncrementTransaction:
     async def test_resets_weekly_window_when_expired(self):
         """When weekly_reset_at is in the past, tokens_used_weekly should be zeroed."""
         import uuid
+
         from app.repositories.users import UserRepository
 
         past_weekly = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()

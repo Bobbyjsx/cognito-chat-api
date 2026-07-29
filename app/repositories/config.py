@@ -1,5 +1,6 @@
 from fastapi import HTTPException
 from google.cloud.firestore_v1.async_client import AsyncClient
+
 from app.models.config import AppConfigDB
 
 
