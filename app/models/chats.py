@@ -11,6 +11,7 @@ class ChatMessageDB(BaseModel):
     session_id: UUID
     role: str
     content: str
+    error: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -19,6 +20,7 @@ class ChatSessionDB(BaseModel):
 
     id: UUID = Field(default_factory=uuid4)
     user_id: UUID
+    title: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_message_content: str | None = None
@@ -30,24 +32,27 @@ class ChatSessionDB(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(min_length=1, max_length=32_000)
     model: str | None = None
     reasoning: str | None = None
 
 
 class ChatResponse(BaseModel):
     session_id: UUID
+    title: str | None = None
     response: str
 
 
 class MessageSchema(BaseModel):
     role: str
     content: str
+    error: str | None = None
 
 
 class ChatSessionSchema(BaseModel):
     id: UUID
     user_id: UUID
+    title: str | None = None
     messages: list[MessageSchema] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
@@ -59,6 +64,7 @@ class ChatSessionSchema(BaseModel):
 class ChatSessionListSchema(BaseModel):
     id: UUID
     user_id: UUID
+    title: str | None = None
     created_at: datetime
     updated_at: datetime
     last_message_content: str | None = None

@@ -11,12 +11,16 @@ class ChatRepository:
         self.db = db
         self.collection = self.db.collection("sessions")
 
-    async def create_session(self, user_id: UUID) -> ChatSessionDB:
-        session_db = ChatSessionDB(user_id=user_id)
+    async def create_session(self, user_id: UUID, title: str | None = None) -> ChatSessionDB:
+        session_db = ChatSessionDB(user_id=user_id, title=title)
         doc_ref = self.collection.document(str(session_db.id))
         data = session_db.model_dump(mode="json")
         await doc_ref.set(data)
         return session_db
+
+    async def update_session_title(self, session_id: UUID, title: str) -> None:
+        doc_ref = self.collection.document(str(session_id))
+        await doc_ref.update({"title": title})
 
     async def get_session(self, session_id: UUID, user_id: UUID) -> ChatSessionDB | None:
         import asyncio
@@ -54,8 +58,10 @@ class ChatRepository:
             sessions.append(session)
         return sessions
 
-    async def add_message(self, session_id: UUID, role: str, content: str) -> ChatMessageDB:
-        message_db = ChatMessageDB(session_id=session_id, role=role, content=content)
+    async def add_message(
+        self, session_id: UUID, role: str, content: str, error: str | None = None
+    ) -> ChatMessageDB:
+        message_db = ChatMessageDB(session_id=session_id, role=role, content=content, error=error)
         doc_ref = self.collection.document(str(session_id)).collection("messages").document(str(message_db.id))
         data = message_db.model_dump(mode="json")
 
@@ -72,7 +78,7 @@ class ChatRepository:
             session_ref,
             {
                 "updated_at": datetime.now(timezone.utc).isoformat(),
-                "last_message_content": content,
+                "last_message_content": content or (error or "Error responding"),
                 "last_message_role": role,
                 "read_status": read_status,
             },
