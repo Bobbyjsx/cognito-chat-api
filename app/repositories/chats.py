@@ -1,9 +1,14 @@
 from uuid import UUID
+from datetime import datetime, timezone
+import asyncio
+import logging
 
 from google.cloud.firestore_v1.async_client import AsyncClient
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from app.models.chats import ChatMessageDB, ChatSessionDB
+
+logger = logging.getLogger(__name__)
 
 
 class ChatRepository:
@@ -23,40 +28,84 @@ class ChatRepository:
         await doc_ref.update({"title": title})
 
     async def get_session(self, session_id: UUID, user_id: UUID) -> ChatSessionDB | None:
-        import asyncio
-
         doc_ref = self.collection.document(str(session_id))
         messages_ref = doc_ref.collection("messages").order_by("created_at")
 
-        # Fetch session document and messages subcollection concurrently
-        doc, messages_docs = await asyncio.gather(doc_ref.get(), messages_ref.get())
+        doc = await doc_ref.get()
+        if not doc.exists:
+            return None
 
-        if doc.exists:
-            data = doc.to_dict()
-            if data.get("user_id") != str(user_id):
-                return None
+        data = doc.to_dict()
+        if data.get("user_id") != str(user_id):
+            return None
+        if data.get("is_deleted") is True:
+            return None
 
-            session = ChatSessionDB(**data)
+        session = ChatSessionDB(**data)
 
-            for msg_doc in messages_docs:
-                msg_data = msg_doc.to_dict()
-                session.messages.append(ChatMessageDB(**msg_data))
+        async for msg_doc in messages_ref.stream():
+            msg_data = msg_doc.to_dict()
+            session.messages.append(ChatMessageDB(**msg_data))
 
-            return session
-        return None
+        return session
 
-    async def get_user_sessions(self, user_id: UUID) -> list[ChatSessionDB]:
+    async def get_user_sessions(
+        self, user_id: UUID, search_query: str | None = None
+    ) -> list[ChatSessionDB]:
         sessions = []
-        docs = (
-            self.collection.where(filter=FieldFilter("user_id", "==", str(user_id)))
-            .order_by("updated_at", direction="DESCENDING")
-            .stream()
-        )
+        docs = self.collection.where(filter=FieldFilter("user_id", "==", str(user_id))).stream()
+        q_lower = search_query.strip().lower() if search_query and search_query.strip() else None
+
         async for doc in docs:
             data = doc.to_dict()
+            if data.get("is_deleted") is True:
+                continue
+
             session = ChatSessionDB(**data)
+
+            if q_lower:
+                title_match = bool(session.title and q_lower in session.title.lower())
+                content_match = bool(
+                    session.last_message_content and q_lower in session.last_message_content.lower()
+                )
+
+                if not (title_match or content_match):
+                    # Deep search message history using async stream
+                    messages_ref = self.collection.document(str(session.id)).collection("messages")
+                    deep_match = False
+                    async for msg_doc in messages_ref.stream():
+                        msg_data = msg_doc.to_dict()
+                        msg_content = msg_data.get("content", "")
+                        if msg_content and q_lower in msg_content.lower():
+                            deep_match = True
+                            break
+                    if not deep_match:
+                        continue
+
             sessions.append(session)
+
+        sessions.sort(key=lambda s: s.updated_at, reverse=True)
         return sessions
+
+    async def soft_delete_session(self, session_id: UUID, user_id: UUID) -> bool:
+        try:
+            doc_ref = self.collection.document(str(session_id))
+            doc = await doc_ref.get()
+            if not doc.exists:
+                return False
+
+            data = doc.to_dict()
+            if data.get("user_id") != str(user_id):
+                return False
+
+            await doc_ref.update({
+                "is_deleted": True,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            })
+            return True
+        except Exception:
+            logger.exception("Error soft-deleting session %s", session_id)
+            return False
 
     async def add_message(
         self, session_id: UUID, role: str, content: str, error: str | None = None
@@ -65,13 +114,9 @@ class ChatRepository:
         doc_ref = self.collection.document(str(session_id)).collection("messages").document(str(message_db.id))
         data = message_db.model_dump(mode="json")
 
-        from datetime import datetime, timezone
-
         read_status = "read" if role == "user" else "not read"
-
         session_ref = self.collection.document(str(session_id))
 
-        # Use batch write to cut network roundtrips in half
         batch = self.db.batch()
         batch.set(doc_ref, data)
         batch.update(

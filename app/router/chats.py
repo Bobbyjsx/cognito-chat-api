@@ -69,15 +69,19 @@ async def stream_chat_with_agent(
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",  # disables nginx / Cloud Run proxy buffering
+            "X-Accel-Buffering": "no",
         },
     )
 
 
 @router.get("/sessions", response_model=list[ChatSessionListSchema])
-async def list_sessions(current_user: UserDB = Depends(get_current_user), db: AsyncClient = Depends(get_db)):
+async def list_sessions(
+    q: str | None = None,
+    current_user: UserDB = Depends(get_current_user),
+    db: AsyncClient = Depends(get_db),
+):
     repo = ChatRepository(db)
-    sessions = await repo.get_user_sessions(current_user.id)
+    sessions = await repo.get_user_sessions(current_user.id, search_query=q)
     return sessions
 
 
@@ -98,6 +102,20 @@ async def get_session(
     return session
 
 
+@router.delete("/sessions/{session_id}", status_code=200)
+@router.post("/sessions/{session_id}/delete", status_code=200)
+async def delete_session(
+    session_id: uuid.UUID,
+    current_user: UserDB = Depends(get_current_user),
+    db: AsyncClient = Depends(get_db),
+):
+    repo = ChatRepository(db)
+    success = await repo.soft_delete_session(session_id, current_user.id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"message": "Session deleted successfully"}
+
+
 @router.post("/sessions/{session_id}/read", status_code=200)
 async def mark_as_read(
     session_id: uuid.UUID,
@@ -105,7 +123,6 @@ async def mark_as_read(
     db: AsyncClient = Depends(get_db),
 ):
     repo = ChatRepository(db)
-    # Check if session exists and belongs to user
     session = await repo.get_session(session_id, current_user.id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")

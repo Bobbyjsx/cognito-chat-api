@@ -1,9 +1,9 @@
+from collections import deque
+from datetime import datetime, timezone
 import json
 import logging
 import uuid
-from collections import deque
-from collections.abc import AsyncGenerator
-from datetime import datetime, timezone
+from typing import AsyncGenerator
 
 from fastapi import HTTPException
 from google import genai
@@ -17,11 +17,18 @@ from app.repositories.chats import ChatRepository
 from app.repositories.config import ConfigRepository
 from app.repositories.users import UserRepository
 from app.utils.datetime import ensure_utc
-from app.utils.prompts import get_base_system_instructions
 
 logger = logging.getLogger(__name__)
 
 SAFE_GENERATION_ERROR = "Model generation failed. Please try again."
+
+
+def get_base_system_instructions() -> str:
+    """Standard system instructions for Gemini chat sessions."""
+    return (
+        "You are Cognito, an advanced AI assistant created to be helpful, concise, and clear. "
+        "Format responses cleanly with Markdown when applicable."
+    )
 
 
 class AgentService:
@@ -30,93 +37,90 @@ class AgentService:
         chat_repo: ChatRepository,
         user_repo: UserRepository,
         config_repo: ConfigRepository,
+        client: genai.Client | None = None,
     ):
         self.chat_repo = chat_repo
         self.user_repo = user_repo
         self.config_repo = config_repo
-        self.client = genai.Client(api_key=settings.gemini_api_key)
 
-    async def _generate_title(self, user_message: str) -> str:
-        """Offload chat title generation to a fast, lightweight model."""
-        try:
-            prompt = (
-                "Generate a concise, 3 to 5 word title for a chat conversation starting "
-                "with this user message. Return ONLY the title text without quotes or punctuation:\n\n"
-                f"{user_message[:500]}"
-            )
-            response = await self.client.aio.models.generate_content(
-                model="gemini-3.5-flash-lite",
-                contents=prompt,
-            )
-            title = response.text.strip().replace('"', "").replace("'", "")
-            return title[:60] if title else user_message[:30]
-        except Exception:
-            logger.warning("Title generation failed, falling back to message truncation", exc_info=True)
-            return user_message[:30].strip()
+        if client is not None:
+            self.client = client
+        elif settings.gemini_api_key:
+            self.client = genai.Client(api_key=settings.gemini_api_key)
+        else:
+            self.client = genai.Client()
+
+    async def get_active_config(self) -> AppConfigDB:
+        cfg = await self.config_repo.get_config()
+        if not cfg:
+            cfg = AppConfigDB()
+            await self.config_repo.save_config(cfg)
+        return cfg
 
     async def validate_and_resolve_config(
         self,
-        requested_model: str | None,
-        requested_reasoning: str | None,
+        requested_model: str | None = None,
+        requested_reasoning: str | None = None,
     ) -> tuple[str, types.ThinkingConfig | None, str, list[types.Tool] | None]:
-        """Fetch config, validate toggles/model/reasoning against per-model rules and global source of truth.
 
-        Returns (resolved_model, thinking_config, resolved_reasoning, tools).
-        """
-        sys_config: AppConfigDB = await self.config_repo.get_config()
+        cfg = await self.get_active_config()
 
-        if not sys_config.enable_text_generation:
+        if not cfg.enable_text_generation:
+            raise HTTPException(status_code=403, detail="Text generation is currently disabled by admin.")
+
+        model = requested_model or cfg.default_text_model
+        if model not in cfg.allowed_text_models:
             raise HTTPException(
                 status_code=400,
-                detail="Text generation is currently disabled by system configuration.",
+                detail=f"Model '{model}' is not in the allowed text models list: {cfg.allowed_text_models}",
             )
 
-        model = requested_model if requested_model else sys_config.default_text_model
-        if model not in sys_config.allowed_text_models:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Model '{model}' is not allowed or supported. Allowed text models: {sys_config.allowed_text_models}",
-            )
+        allowed_for_model = cfg.model_reasoning_modes.get(model, cfg.allowed_reasoning_levels)
 
-        # Global source of truth filter
-        global_allowed_lower = {r.lower() for r in sys_config.allowed_reasoning_levels}
+        reasoning = requested_reasoning or cfg.default_reasoning_level
+        if reasoning not in cfg.allowed_reasoning_levels or reasoning not in allowed_for_model:
+            reasoning = "none"
 
-        # Per-model reasoning rules
-        model_modes = sys_config.model_reasoning_modes.get(model, ["none", "minimal", "low", "medium", "high"])
-        valid_model_reasoning = [r.lower() for r in model_modes if r.lower() in global_allowed_lower] or ["none"]
-
-        reasoning = requested_reasoning.lower() if requested_reasoning else sys_config.default_reasoning_level.lower()
-        if reasoning not in valid_model_reasoning:
-            reasoning = valid_model_reasoning[0]
-
-        thinking_config = None
+        thinking_config: types.ThinkingConfig | None = None
         if reasoning != "none":
-            thinking_level_map = {
-                "minimal": types.ThinkingLevel.MINIMAL,
-                "low": types.ThinkingLevel.LOW,
-                "medium": types.ThinkingLevel.MEDIUM,
-                "high": types.ThinkingLevel.HIGH,
+            budget_map = {
+                "low": 1024,
+                "medium": 4096,
+                "high": 8192,
             }
-            if reasoning in thinking_level_map:
-                thinking_config = types.ThinkingConfig(
-                    thinking_level=thinking_level_map[reasoning],
-                    include_thoughts=True,
-                )
+            budget = budget_map.get(reasoning, 2048)
+            thinking_config = types.ThinkingConfig(thinking_budget=budget)
 
-        tools = self._build_tools(sys_config)
+        tools: list[types.Tool] | None = None
+        if cfg.allowed_tools and len(cfg.allowed_tools) > 0:
+            tool_list = []
+            if "code_execution" in cfg.allowed_tools:
+                tool_list.append(types.Tool(code_execution=types.CodeExecution()))
+
+            if tool_list:
+                tools = tool_list
+
         return model, thinking_config, reasoning, tools
 
-    def _build_tools(self, sys_config: AppConfigDB) -> list[types.Tool] | None:
-        """Map allowed_tools from Firestore config to Gemini Tool objects."""
-        tools: list[types.Tool] = []
-        allowed = {t.lower() for t in (sys_config.allowed_tools or [])}
+    async def _generate_title(self, first_message: str) -> str:
+        """Generates a concise title (3-5 words) for a new chat session."""
+        try:
+            prompt = (
+                "Summarize the following user prompt into a short, descriptive chat title (maximum 5 words, no quotes, plain text):\n\n"
+                f"{first_message[:300]}"
+            )
+            resp = await self.client.aio.models.generate_content(
+                model="gemini-2.5-flash-lite",
+                contents=prompt,
+            )
+            title = (resp.text or "").strip().strip('"').strip("'")
+            if title and len(title) <= 60:
+                return title
+        except Exception:
+            logger.warning("Fast title generation failed, falling back to message snippet.")
 
-        if "google_search" in allowed:
-            tools.append(types.Tool(google_search=types.GoogleSearch()))
-        if "code_execution" in allowed:
-            tools.append(types.Tool(code_execution=types.ToolCodeExecution()))
-
-        return tools or None
+        words = first_message.strip().split()
+        return " ".join(words[:5]) if words else "New Chat"
 
     def _build_generate_config(
         self,
@@ -157,7 +161,9 @@ class AgentService:
                 code_execution_result = getattr(part, "code_execution_result", None)
 
                 if thought:
-                    events.append({"type": "reasoning", "token": part.text or ""})
+                    thought_str = text if text else (thought if isinstance(thought, str) else "")
+                    if thought_str:
+                        events.append({"type": "reasoning", "token": thought_str})
                 elif text:
                     events.append({"type": "text", "token": text})
 
@@ -203,10 +209,11 @@ class AgentService:
         requested_model: str | None = None,
         requested_reasoning: str | None = None,
     ) -> ChatResponse:
+        """Non-streaming processing of chat messages."""
         if not message_text or not message_text.strip():
             raise HTTPException(status_code=400, detail="Message is empty.")
 
-        model, thinking_config, _reasoning, tools = await self.validate_and_resolve_config(
+        model, thinking_config, reasoning, tools = await self.validate_and_resolve_config(
             requested_model, requested_reasoning
         )
 
@@ -235,8 +242,12 @@ class AgentService:
         else:
             session = await self.chat_repo.get_session(session_id, user_id=user.id)
             if not session:
-                raise HTTPException(status_code=404, detail=f"Session {session_id} not found.")
-            title = session.title
+                raise HTTPException(status_code=44, detail=f"Session {session_id} not found.")
+            if not session.title:
+                title = await self._generate_title(message_text)
+                await self.chat_repo.update_session_title(session_id, title)
+            else:
+                title = session.title
 
         await self.chat_repo.add_message(session_id, role="user", content=message_text)
 
@@ -347,12 +358,13 @@ class AgentService:
             )
 
             async for chunk in response_stream:
-                for event in self._extract_stream_events(chunk, code_tool_ids):
-                    if event.get("type") == "text":
-                        full_response += event.get("token") or ""
-                    yield f"data: {json.dumps(event)}\n\n"
+                events = self._extract_stream_events(chunk, code_tool_ids)
+                for event in events:
+                    if event.get("type") == "text" and "token" in event:
+                        full_response += event["token"]
+                    yield f"event: chunk\ndata: {json.dumps(event)}\n\n"
 
-                if chunk.usage_metadata:
+                if getattr(chunk, "usage_metadata", None):
                     total_tokens = getattr(chunk.usage_metadata, "total_token_count", total_tokens)
         except Exception:
             logger.exception("Model generation failed for session %s", session_id)
