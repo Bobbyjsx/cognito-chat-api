@@ -6,7 +6,7 @@ install:
 	$(VENV)/pip install -r requirements.txt
 
 run:
-	docker compose up --build --watch cognito-chat-api -d
+	docker compose up --build --watch cognito-chat-api
 	docker image prune -f
 
 lint:
