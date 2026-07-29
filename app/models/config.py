@@ -13,7 +13,7 @@ class AppConfigDB(BaseModel):
     enable_image_generation: bool = False
     enable_video_generation: bool = False
 
-    # Text model configurations (100% verified working against live Gemini API)
+    # Text model configurations
     allowed_text_models: list[str] = Field(
         default_factory=lambda: [
             "gemini-3.6-flash",
@@ -26,11 +26,23 @@ class AppConfigDB(BaseModel):
     )
     default_text_model: str = "gemini-3.6-flash"
 
-    # Reasoning / thinking effort configurations
+    # Reasoning / thinking effort configurations (Global source of truth)
     allowed_reasoning_levels: list[str] = Field(
         default_factory=lambda: ["none", "minimal", "low", "medium", "high"]
     )
     default_reasoning_level: str = "medium"
+
+    # Per-model reasoning mode mappings (filtered against allowed_reasoning_levels)
+    model_reasoning_modes: dict[str, list[str]] = Field(
+        default_factory=lambda: {
+            "gemini-3.6-flash": ["none", "minimal", "low", "medium", "high"],
+            "gemini-3.5-flash": ["none", "minimal", "low", "medium"],
+            "gemini-3.5-flash-lite": ["none"],
+            "gemini-3.1-pro-preview": ["none", "minimal", "low", "medium", "high"],
+            "gemini-3.1-flash-lite": ["none"],
+            "gemini-3-flash-preview": ["none", "minimal", "low", "medium"],
+        }
+    )
 
     # Image model configurations
     allowed_image_models: list[str] = Field(
@@ -52,7 +64,7 @@ class AppConfigDB(BaseModel):
 
     # Tool configurations
     allowed_tools: list[str] = Field(
-        default_factory=lambda: ["google_search"]
+        default_factory=lambda: ["google_search", "code_execution"]
     )
 
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
