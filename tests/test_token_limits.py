@@ -297,3 +297,13 @@ class TestTokenQuotaEndpoints:
         weekly_reset_at = datetime.fromisoformat(me["weekly_reset_at"])
         expected = datetime(2026, 8, 5, 6, 0, 0, tzinfo=timezone.utc)
         assert weekly_reset_at == expected
+
+    def test_reset_timestamp_is_persistent_across_multiple_requests(self, client):
+        headers = _auth_headers(client, "persist@example.com")
+        res1 = client.get("/auth/me", headers=headers).json()
+        res2 = client.get("/auth/me", headers=headers).json()
+        res3 = client.get("/auth/me", headers=headers).json()
+
+        assert res1["reset_at"] == res2["reset_at"] == res3["reset_at"]
+        assert res1["weekly_reset_at"] == res2["weekly_reset_at"] == res3["weekly_reset_at"]
+
