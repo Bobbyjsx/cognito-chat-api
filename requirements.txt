@@ -2,7 +2,7 @@ fastapi
 uvicorn[standard]
 pydantic[email]
 pydantic-settings
-google-antigravity
+google-genai
 passlib[bcrypt]
 PyJWT
 python-multipart

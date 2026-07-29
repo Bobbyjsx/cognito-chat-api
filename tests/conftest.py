@@ -1,5 +1,5 @@
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -48,31 +48,28 @@ def client():
 
 @pytest.fixture
 def mock_agent():
-    # Mock the antigravity Agent so we don't hit the real Gemini API
-    with patch("app.services.chats.Agent", autospec=True) as MockAgent:
-        from google.antigravity import types
+    # Mock the google-genai Client so we don't hit the real Gemini API
+    with patch("app.services.chats.genai.Client") as MockClientClass:
+        mock_client_instance = MockClientClass.return_value
 
-        instance = MockAgent.return_value.__aenter__.return_value
+        class MockChunk:
+            def __init__(self, text):
+                self.text = text
+                self.usage_metadata = MagicMock(total_token_count=10)
 
         class MockResponse:
             def __init__(self):
+                self.text = "Hello from mocked agent!"
                 self.usage_metadata = MagicMock(total_token_count=10)
-                self._chunks = [
-                    types.Text(step_index=0, text=t)
-                    for t in ["Hello ", "from ", "mocked ", "agent!"]
-                ]
 
-            @property
-            def chunks(self):
-                async def _gen():
-                    for chunk in self._chunks:
-                        yield chunk
+        async def mock_generate_content(*args, **kwargs):
+            return MockResponse()
 
-                return _gen()
+        async def mock_generate_content_stream(*args, **kwargs):
+            for t in ["Hello ", "from ", "mocked ", "agent!"]:
+                yield MockChunk(t)
 
-            async def __aiter__(self):
-                for chunk in self._chunks:
-                    yield chunk.text
+        mock_client_instance.aio.models.generate_content = AsyncMock(side_effect=mock_generate_content)
+        mock_client_instance.aio.models.generate_content_stream = MagicMock(side_effect=mock_generate_content_stream)
 
-        instance.chat.return_value = MockResponse()
-        yield instance
+        yield mock_client_instance

@@ -1,3 +1,4 @@
+import os
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
 
@@ -5,11 +6,12 @@ load_dotenv()  # This explicitly loads the .env file into os.environ
 
 
 class Settings(BaseSettings):
-    app_name: str = "Antigravity AI API"
+    app_name: str = "Cognito Chat API"
     debug: bool = False
 
     # Explicitly define this so Pydantic expects it from the .env file
     gemini_api_key: str = ""
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
     # Database Configuration (Firebase)
     firebase_credentials_path: str = ""
@@ -20,8 +22,6 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 7
-
-    # Antigravity SDK configuration can go here
 
     class Config:
         env_file = ".env"
