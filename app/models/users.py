@@ -53,9 +53,13 @@ class UserResponse(BaseModel):
     tokens_used_6h: int
     token_limit_6h: int
     reset_at: datetime
+    pct_6h: float = 0.0
+    reset_countdown_6h: str = "Resets soon"
     tokens_used_weekly: int
     token_limit_weekly: int
     weekly_reset_at: datetime
+    pct_weekly: float = 0.0
+    reset_countdown_weekly: str = "Resets soon"
 
 
 class TokenResponse(BaseModel):

@@ -13,6 +13,7 @@ from app.models.users import (
 )
 from app.repositories.users import UserRepository
 from app.services.auth import AuthService
+from app.services.quota import QuotaService
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -24,7 +25,8 @@ def get_auth_service(db: AsyncClient = Depends(get_db)) -> AuthService:
 
 @router.post("/signup", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def signup(user_data: UserCreate, auth_service: AuthService = Depends(get_auth_service)):
-    return await auth_service.register_user(user_data)
+    user = await auth_service.register_user(user_data)
+    return QuotaService.build_user_response(user)
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -37,14 +39,13 @@ async def login(
 
 @router.post("/reset-password", status_code=status.HTTP_200_OK)
 async def reset_password(request: PasswordResetRequest, auth_service: AuthService = Depends(get_auth_service)):
-    # Note: In a real app, this should involve sending a secure token to the user's email first!
     await auth_service.change_password(request.email, request.new_password)
     return {"message": "Password updated successfully."}
 
 
 @router.get("/me", response_model=UserResponse)
 async def get_my_profile(current_user=Depends(get_current_user)):
-    return current_user
+    return QuotaService.build_user_response(current_user)
 
 
 @router.post("/refresh", response_model=TokenResponse)
