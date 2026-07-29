@@ -9,19 +9,64 @@ from google.genai import types
 
 from app.core.config import settings
 from app.models.chats import ChatResponse
+from app.models.config import AppConfigDB
 from app.models.users import UserDB
 from app.repositories.chats import ChatRepository
+from app.repositories.config import ConfigRepository
 from app.repositories.users import UserRepository
 from app.utils.datetime import ensure_utc
 from app.utils.prompts import get_base_system_instructions
 
 
 class AgentService:
-    def __init__(self, chat_repo: ChatRepository, user_repo: UserRepository):
+    def __init__(
+        self,
+        chat_repo: ChatRepository,
+        user_repo: UserRepository,
+        config_repo: ConfigRepository,
+    ):
         self.chat_repo = chat_repo
         self.user_repo = user_repo
+        self.config_repo = config_repo
         self.client = genai.Client(api_key=settings.gemini_api_key)
-        self.model_name = settings.gemini_model
+
+    async def validate_and_resolve_config(
+        self,
+        requested_model: str | None,
+        requested_reasoning: str | None,
+    ) -> tuple[str, types.ThinkingConfig | None]:
+        """Fetches system configuration from Firestore and validates requested model and reasoning.
+
+        Returns (resolved_model, thinking_config).
+        Raises HTTPException 400 if model or reasoning level is not allowed.
+        """
+        sys_config: AppConfigDB = await self.config_repo.get_config()
+
+        # 1. Resolve and validate text model
+        model = requested_model if requested_model else sys_config.default_text_model
+        if model not in sys_config.allowed_text_models:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Model '{model}' is not allowed or supported. Allowed text models: {sys_config.allowed_text_models}",
+            )
+
+        # 2. Resolve and validate reasoning level
+        reasoning = requested_reasoning.lower() if requested_reasoning else sys_config.default_reasoning_level.lower()
+        allowed_reasoning_lower = [r.lower() for r in sys_config.allowed_reasoning_levels]
+        if reasoning not in allowed_reasoning_lower:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Reasoning level '{reasoning}' is not allowed. Allowed reasoning levels: {sys_config.allowed_reasoning_levels}",
+            )
+
+        # 3. Construct Gemini ThinkingConfig
+        thinking_config = None
+        if reasoning == "none":
+            thinking_config = types.ThinkingConfig(thinking_budget=0)
+        elif reasoning in ("minimal", "low", "medium", "high"):
+            thinking_config = types.ThinkingConfig(thinking_level=reasoning.upper())
+
+        return model, thinking_config
 
     def _build_contents(self, history_messages: list, current_message: str) -> list[types.Content]:
         contents: list[types.Content] = []
@@ -31,7 +76,19 @@ class AgentService:
         contents.append(types.Content(role="user", parts=[types.Part.from_text(text=current_message)]))
         return contents
 
-    async def process_chat(self, user: UserDB, message_text: str, session_id: uuid.UUID | None = None) -> ChatResponse:
+    async def process_chat(
+        self,
+        user: UserDB,
+        message_text: str,
+        session_id: uuid.UUID | None = None,
+        requested_model: str | None = None,
+        requested_reasoning: str | None = None,
+    ) -> ChatResponse:
+        # Validate model and reasoning against Firestore config
+        model, thinking_config = await self.validate_and_resolve_config(
+            requested_model, requested_reasoning
+        )
+
         # Check token limits before hitting the model
         now = datetime.now(timezone.utc)
         reset_at = ensure_utc(user.reset_at)
@@ -66,10 +123,11 @@ class AgentService:
 
         config = types.GenerateContentConfig(
             system_instruction=get_base_system_instructions(),
+            thinking_config=thinking_config,
         )
 
         response = await self.client.aio.models.generate_content(
-            model=self.model_name,
+            model=model,
             contents=contents,
             config=config,
         )
@@ -94,9 +152,20 @@ class AgentService:
         user: UserDB,
         message_text: str,
         session_id: uuid.UUID | None = None,
+        requested_model: str | None = None,
+        requested_reasoning: str | None = None,
     ) -> AsyncGenerator[str, None]:
         """Yields SSE-formatted chunks as Gemini responds, then persists the
         full message and token usage once the stream is complete."""
+
+        # Validate model and reasoning against Firestore config
+        try:
+            model, thinking_config = await self.validate_and_resolve_config(
+                requested_model, requested_reasoning
+            )
+        except HTTPException as e:
+            yield f"event: error\ndata: {json.dumps({'detail': e.detail})}\n\n"
+            return
 
         # Check token limits before hitting the model
         now = datetime.now(timezone.utc)
@@ -134,6 +203,7 @@ class AgentService:
 
         config = types.GenerateContentConfig(
             system_instruction=get_base_system_instructions(),
+            thinking_config=thinking_config,
         )
 
         # Emit session_id first so the client can track it
@@ -142,7 +212,7 @@ class AgentService:
         full_response = ""
         total_tokens = 0
         response_stream = await self.client.aio.models.generate_content_stream(
-            model=self.model_name,
+            model=model,
             contents=contents,
             config=config,
         )

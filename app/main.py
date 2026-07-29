@@ -4,7 +4,7 @@ from fastapi import FastAPI
 
 from app.core.config import settings
 from app.database import create_db_client, init_db
-from app.router import auth, chats
+from app.router import auth, chats, config
 
 
 @asynccontextmanager
@@ -26,6 +26,7 @@ app = FastAPI(
 
 app.include_router(auth.router)
 app.include_router(chats.router)
+app.include_router(config.router)
 
 
 @app.get("/health")

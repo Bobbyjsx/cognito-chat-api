@@ -9,6 +9,7 @@ from app.database import get_db
 from app.models.chats import ChatRequest, ChatResponse, ChatSessionListSchema, ChatSessionSchema
 from app.models.users import UserDB
 from app.repositories.chats import ChatRepository
+from app.repositories.config import ConfigRepository
 from app.repositories.users import UserRepository
 from app.services.chats import AgentService
 
@@ -18,7 +19,8 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 def get_agent_service(db: AsyncClient = Depends(get_db)) -> AgentService:
     chat_repo = ChatRepository(db)
     user_repo = UserRepository(db)
-    return AgentService(chat_repo=chat_repo, user_repo=user_repo)
+    config_repo = ConfigRepository(db)
+    return AgentService(chat_repo=chat_repo, user_repo=user_repo, config_repo=config_repo)
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -30,7 +32,11 @@ async def chat_with_agent(
 ):
     try:
         response = await agent_service.process_chat(
-            user=current_user, message_text=request.message, session_id=session_id
+            user=current_user,
+            message_text=request.message,
+            session_id=session_id,
+            requested_model=request.model,
+            requested_reasoning=request.reasoning,
         )
         return response
     except ValueError as e:
@@ -56,6 +62,8 @@ async def stream_chat_with_agent(
             user=current_user,
             message_text=request.message,
             session_id=session_id,
+            requested_model=request.model,
+            requested_reasoning=request.reasoning,
         ),
         media_type="text/event-stream",
         headers={

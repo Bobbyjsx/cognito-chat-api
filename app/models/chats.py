@@ -31,6 +31,8 @@ class ChatSessionDB(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+    model: str | None = None
+    reasoning: str | None = None
 
 
 class ChatResponse(BaseModel):
