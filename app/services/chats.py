@@ -35,12 +35,19 @@ class AgentService:
         requested_model: str | None,
         requested_reasoning: str | None,
     ) -> tuple[str, types.ThinkingConfig | None]:
-        """Fetches system configuration from Firestore and validates requested model and reasoning.
+        """Fetches system configuration from Firestore and validates feature toggles, text model, and reasoning.
 
         Returns (resolved_model, thinking_config).
-        Raises HTTPException 400 if model or reasoning level is not allowed.
+        Raises HTTPException 400 if text generation is disabled or if model/reasoning level is invalid.
         """
         sys_config: AppConfigDB = await self.config_repo.get_config()
+
+        # 0. Check feature toggle
+        if not sys_config.enable_text_generation:
+            raise HTTPException(
+                status_code=400,
+                detail="Text generation is currently disabled by system configuration.",
+            )
 
         # 1. Resolve and validate text model
         model = requested_model if requested_model else sys_config.default_text_model
@@ -84,7 +91,7 @@ class AgentService:
         requested_model: str | None = None,
         requested_reasoning: str | None = None,
     ) -> ChatResponse:
-        # Validate model and reasoning against Firestore config
+        # Validate model, feature toggle, and reasoning against Firestore config
         model, thinking_config = await self.validate_and_resolve_config(
             requested_model, requested_reasoning
         )
@@ -158,7 +165,7 @@ class AgentService:
         """Yields SSE-formatted chunks as Gemini responds, then persists the
         full message and token usage once the stream is complete."""
 
-        # Validate model and reasoning against Firestore config
+        # Validate model, feature toggle, and reasoning against Firestore config
         try:
             model, thinking_config = await self.validate_and_resolve_config(
                 requested_model, requested_reasoning

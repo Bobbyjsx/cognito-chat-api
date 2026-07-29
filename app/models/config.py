@@ -7,9 +7,17 @@ class AppConfigDB(BaseModel):
 
     id: str = "app_config"
 
+    # Feature Toggles
+    enable_text_generation: bool = True
+    enable_image_generation: bool = False
+    enable_video_generation: bool = False
+
     # Text model configurations
     allowed_text_models: list[str] = Field(
         default_factory=lambda: [
+            "gemini-3.6-flash",
+            "gemini-3.5-flash",
+            "gemini-3.1-pro",
             "gemini-2.5-flash",
             "gemini-2.5-pro",
             "gemini-1.5-flash",
@@ -24,13 +32,25 @@ class AppConfigDB(BaseModel):
     )
     default_reasoning_level: str = "medium"
 
-    # Tool and multimodal model configurations
+    # Image model configurations
     allowed_image_models: list[str] = Field(
-        default_factory=lambda: ["imagen-3.0-generate-002"]
+        default_factory=lambda: [
+            "imagen-3.0-generate-002",
+            "imagen-3.0-generate-001",
+            "imagen-3.0-fast-generate-001",
+        ]
     )
+
+    # Video model configurations
     allowed_video_models: list[str] = Field(
-        default_factory=lambda: ["veo-2.0-generate-001"]
+        default_factory=lambda: [
+            "veo-2.0-generate-001",
+            "veo-1.0-generate-001",
+            "veo-1.0-fast-generate-001",
+        ]
     )
+
+    # Tool configurations
     allowed_tools: list[str] = Field(
         default_factory=lambda: ["google_search"]
     )

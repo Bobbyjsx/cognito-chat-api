@@ -1,5 +1,5 @@
+from fastapi import HTTPException
 from google.cloud.firestore_v1.async_client import AsyncClient
-
 from app.models.config import AppConfigDB
 
 
@@ -11,19 +11,19 @@ class ConfigRepository:
     async def get_config(self) -> AppConfigDB:
         """Fetches the global application configuration from Firestore.
 
-        If no configuration document exists yet, initializes and persists default AppConfigDB.
+        Raises HTTPException 500 if the app_config document has not been created by migrations.
         """
         doc_ref = self.collection.document("app_config")
         doc = await doc_ref.get()
 
-        if doc.exists:
-            data = doc.to_dict() or {}
-            return AppConfigDB(**data)
+        if not doc.exists:
+            raise HTTPException(
+                status_code=500,
+                detail="System configuration 'configs/app_config' not found in database. Please run migrations.",
+            )
 
-        # Initialize default config if document does not exist
-        default_config = AppConfigDB()
-        await doc_ref.set(default_config.model_dump(mode="json"))
-        return default_config
+        data = doc.to_dict() or {}
+        return AppConfigDB(**data)
 
     async def update_config(self, config: AppConfigDB) -> AppConfigDB:
         doc_ref = self.collection.document("app_config")

@@ -15,13 +15,14 @@ async def run_migration():
     db = create_db_client()
 
     doc_ref = db.collection("configs").document("app_config")
-    default_config = AppConfigDB()
-    config_dict = default_config.model_dump(mode="json")
+    config = AppConfigDB()
+    data = config.model_dump(mode="json")
 
-    print("Syncing updated system config to Firestore 'configs/app_config'...")
-    await doc_ref.set(config_dict, merge=True)
-    print("Successfully updated 'configs/app_config' in Firestore!")
-    print("Config data:", config_dict)
+    print("Writing/updating system configuration document 'configs/app_config' in Firestore...")
+    await doc_ref.set(data)
+    print("Migration successful! System configuration set to:")
+    for key, val in data.items():
+        print(f"  - {key}: {val}")
 
 
 if __name__ == "__main__":
