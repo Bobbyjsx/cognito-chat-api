@@ -71,12 +71,18 @@ def test_stream_done_event_includes_model_and_reasoning(client, mock_agent):
     assert resp.status_code == 200
     content = resp.text
     assert "event: done" in content
-    done_line = next(line for line in content.splitlines() if line.startswith("data: {\"session_id\""))
-    data = json.loads(done_line.replace("data: ", ""))
-    assert "model" in data
-    assert data["model"] == "gemini-3.6-flash"
-    assert "reasoning" in data
-    assert data["reasoning"] == "high"
+
+    # Parse the data line immediately following `event: done` (not the earlier session event)
+    lines = content.splitlines()
+    done_data = None
+    for i, line in enumerate(lines):
+        if line.strip() == "event: done" and i + 1 < len(lines) and lines[i + 1].startswith("data:"):
+            done_data = json.loads(lines[i + 1].removeprefix("data:").strip())
+            break
+    assert done_data is not None, "done event missing data payload"
+    assert done_data.get("model") == "gemini-3.6-flash"
+    assert done_data.get("reasoning") == "high"
+    assert "session_id" in done_data
 
 
 def test_refresh_token(client):

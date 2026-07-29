@@ -18,17 +18,17 @@ from app.models.users import UserDB
 
 def _make_user(**kwargs) -> UserDB:
     now = datetime.now(timezone.utc)
-    defaults = dict(
-        email="test@example.com",
-        hashed_password="hashed",
-        tokens_used=0,
-        tokens_used_6h=0,
-        token_limit_6h=60_000,
-        reset_at=now + timedelta(hours=6),
-        tokens_used_weekly=0,
-        token_limit_weekly=300_000,
-        weekly_reset_at=now + timedelta(weeks=1),
-    )
+    defaults = {
+        "email": "test@example.com",
+        "hashed_password": "hashed",
+        "tokens_used": 0,
+        "tokens_used_6h": 0,
+        "token_limit_6h": 60_000,
+        "reset_at": now + timedelta(hours=6),
+        "tokens_used_weekly": 0,
+        "token_limit_weekly": 300_000,
+        "weekly_reset_at": now + timedelta(weeks=1),
+    }
     defaults.update(kwargs)
     return UserDB(**defaults)
 
@@ -230,7 +230,7 @@ class TestTokenQuotaEndpoints:
             MockRepo.return_value.get_by_id = AsyncMock(return_value=exhausted_user)
             resp = client.post("/agent/chat", headers=headers, json={"message": "hi"})
 
-        assert resp.status_code == 403
+        assert resp.status_code == 429
         assert "6-hour" in resp.json()["detail"]
 
     def test_chat_blocked_when_weekly_limit_reached(self, client, mock_agent):
@@ -248,7 +248,7 @@ class TestTokenQuotaEndpoints:
             MockRepo.return_value.get_by_id = AsyncMock(return_value=exhausted_user)
             resp = client.post("/agent/chat", headers=headers, json={"message": "hi"})
 
-        assert resp.status_code == 403
+        assert resp.status_code == 429
         assert "Weekly" in resp.json()["detail"]
 
     def test_chat_allowed_after_6h_window_expires(self, client, mock_agent):
@@ -263,8 +263,13 @@ class TestTokenQuotaEndpoints:
             reset_at=now - timedelta(seconds=1),  # expired
         )
 
-        with patch("app.api.dependencies.UserRepository") as MockRepo:
-            MockRepo.return_value.get_by_id = AsyncMock(return_value=user_past_reset)
+        with (
+            patch("app.api.dependencies.UserRepository") as MockAuthRepo,
+            patch("app.router.chats.UserRepository") as MockChatUserRepo,
+        ):
+            MockAuthRepo.return_value.get_by_id = AsyncMock(return_value=user_past_reset)
+            # AgentService uses a separate UserRepository instance for quota increment
+            MockChatUserRepo.return_value.atomic_increment_if_within_limit = AsyncMock(return_value=True)
             resp = client.post("/agent/chat", headers=headers, json={"message": "hi"})
 
         # Pre-gen check should pass (window expired → effective_6h = 0)

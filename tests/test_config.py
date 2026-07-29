@@ -17,7 +17,7 @@ def test_get_config_endpoint(client):
     assert "enable_text_generation" in data
     assert "enable_image_generation" in data
     assert "enable_video_generation" in data
-    assert "gemini-2.5-flash" in data["allowed_text_models"]
+    assert "gemini-3.6-flash" in data["allowed_text_models"]
 
 
 def test_chat_invalid_model_returns_400(client, mock_agent):
@@ -61,7 +61,7 @@ def test_chat_valid_model_and_reasoning_success(client, mock_agent):
     resp = client.post(
         "/agent/chat",
         headers=headers,
-        json={"message": "hello", "model": "gemini-2.5-pro", "reasoning": "high"},
+        json={"message": "hello", "model": "gemini-3.6-flash", "reasoning": "high"},
     )
     assert resp.status_code == 200
     assert "response" in resp.json()
