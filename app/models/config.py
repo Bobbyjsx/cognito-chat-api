@@ -38,11 +38,11 @@ class AppConfigDB(BaseModel):
     model_reasoning_modes: dict[str, list[str]] = Field(
         default_factory=lambda: {
             "gemini-3.6-flash": ["none", "minimal", "low", "medium", "high"],
-            "gemini-3.5-flash": ["none", "minimal", "low", "medium"],
-            "gemini-3.5-flash-lite": ["none"],
+            "gemini-3.5-flash": ["none", "minimal", "low", "medium", "high"],
+            "gemini-3.5-flash-lite": ["none", "minimal", "low", "medium", "high"],
             "gemini-3.1-pro-preview": ["none", "minimal", "low", "medium", "high"],
-            "gemini-3.1-flash-lite": ["none"],
-            "gemini-3-flash-preview": ["none", "minimal", "low", "medium"],
+            "gemini-3.1-flash-lite": ["none", "minimal", "low", "medium", "high"],
+            "gemini-3-flash-preview": ["none", "minimal", "low", "medium", "high"],
         }
     )
 

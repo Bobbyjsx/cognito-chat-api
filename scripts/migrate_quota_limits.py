@@ -34,15 +34,15 @@ async def migrate_global_config_and_users():
         for k, v in existing_data.items():
             print(f"  - {k}: {v}")
 
-        # Add missing default limit fields without modifying existing custom configuration
-        config_updates = {}
+        # Update model_reasoning_modes to ensure latest model mappings exist
+        config_updates = {"model_reasoning_modes": default_config.model_reasoning_modes}
         if "default_token_limit_6h" not in existing_data:
             config_updates["default_token_limit_6h"] = default_config.default_token_limit_6h
         if "default_token_limit_weekly" not in existing_data:
             config_updates["default_token_limit_weekly"] = default_config.default_token_limit_weekly
 
         if config_updates:
-            print(f"Applying missing global quota limits to app_config: {config_updates}")
+            print(f"Applying configuration updates to app_config: {list(config_updates.keys())}")
             await config_ref.update(config_updates)
         else:
             print("Global app_config already contains token limits. No updates required for app_config.")
