@@ -95,7 +95,7 @@ class AgentService:
                 "high": 8192,
             }
             budget = budget_map.get(reasoning, 2048)
-            thinking_config = types.ThinkingConfig(thinking_budget=budget)
+            thinking_config = types.ThinkingConfig(thinking_budget=budget, include_thoughts=True)
 
         tools: list[types.Tool] | None = None
         if cfg.allowed_tools and len(cfg.allowed_tools) > 0:
