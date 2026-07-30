@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import uuid
@@ -115,15 +116,18 @@ class AgentService:
                 "Summarize the following user prompt into a short, descriptive chat title (maximum 5 words, no quotes, plain text):\n\n"
                 f"{first_message[:300]}"
             )
-            resp = await self.client.aio.models.generate_content(
-                model="gemini-2.5-flash-lite",
-                contents=prompt,
+            resp = await asyncio.wait_for(
+                self.client.aio.models.generate_content(
+                    model="gemini-2.5-flash-lite",
+                    contents=prompt,
+                ),
+                timeout=1.5,
             )
             title = (resp.text or "").strip().strip('"').strip("'")
             if title and len(title) <= 60:
                 return title
         except Exception:
-            logger.warning("Fast title generation failed, falling back to message snippet.")
+            logger.warning("Fast title generation timed out or failed, falling back to message snippet.")
 
         words = first_message.strip().split()
         return " ".join(words[:5]) if words else "New Chat"
