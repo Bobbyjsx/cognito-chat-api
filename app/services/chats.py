@@ -118,7 +118,7 @@ class AgentService:
             )
             resp = await asyncio.wait_for(
                 self.client.aio.models.generate_content(
-                    model="gemini-2.5-flash-lite",
+                    model="gemini-3.5-flash-lite",
                     contents=prompt,
                 ),
                 timeout=1.5,
