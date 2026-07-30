@@ -1,4 +1,3 @@
-import asyncio
 import json
 import logging
 import uuid
@@ -110,25 +109,7 @@ class AgentService:
         return model, thinking_config, reasoning, tools
 
     async def _generate_title(self, first_message: str) -> str:
-        """Generates a concise title (3-5 words) for a new chat session."""
-        try:
-            prompt = (
-                "Summarize the following user prompt into a short, descriptive chat title (maximum 5 words, no quotes, plain text):\n\n"
-                f"{first_message[:300]}"
-            )
-            resp = await asyncio.wait_for(
-                self.client.aio.models.generate_content(
-                    model="gemini-3.5-flash-lite",
-                    contents=prompt,
-                ),
-                timeout=1.5,
-            )
-            title = (resp.text or "").strip().strip('"').strip("'")
-            if title and len(title) <= 60:
-                return title
-        except Exception:
-            logger.warning("Fast title generation timed out or failed, falling back to message snippet.")
-
+        """Instantly derives a concise title from the user prompt without network latency."""
         words = first_message.strip().split()
         return " ".join(words[:5]) if words else "New Chat"
 
