@@ -126,18 +126,19 @@ class UserRepository:
                 updates["weekly_reset_at"] = (now + timedelta(weeks=1)).isoformat()
 
             # Check quota limits
+            is_within_limit = True
             if tokens_used_6h + tokens_added > token_limit_6h:
-                return False
-            if tokens_used_weekly + tokens_added > token_limit_weekly:
-                return False
+                is_within_limit = False
+            elif tokens_used_weekly + tokens_added > token_limit_weekly:
+                is_within_limit = False
 
-            # Apply atomic increments
+            # Apply atomic increments regardless so they don't get free tokens
             updates["tokens_used"] = Increment(tokens_added)
             updates["tokens_used_6h"] = Increment(tokens_added)
             updates["tokens_used_weekly"] = Increment(tokens_added)
 
             transaction.update(doc_ref, updates)
-            return True
+            return is_within_limit
 
         return await _txn(self.db.transaction(), doc_ref)
 
