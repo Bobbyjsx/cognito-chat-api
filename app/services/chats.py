@@ -76,11 +76,12 @@ class AgentService:
                 detail=f"Model '{model}' is not in the allowed text models list: {cfg.allowed_text_models}",
             )
 
-        allowed_for_model = cfg.model_reasoning_modes.get(model, cfg.allowed_reasoning_levels)
+        allowed_for_model = cfg.get_reasoning_modes_for_model(model)
 
         reasoning = requested_reasoning or cfg.default_reasoning_level
         if requested_reasoning and (
-            requested_reasoning not in cfg.allowed_reasoning_levels or requested_reasoning not in allowed_for_model
+            requested_reasoning not in cfg.allowed_reasoning_levels
+            or requested_reasoning not in allowed_for_model
         ):
             raise HTTPException(
                 status_code=400,
