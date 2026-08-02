@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 
 from fastapi import HTTPException
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 
 from app.core.config import settings
@@ -22,6 +23,28 @@ from app.utils.datetime import ensure_utc
 logger = logging.getLogger(__name__)
 
 SAFE_GENERATION_ERROR = "Model generation failed. Please try again."
+
+ERROR_CODE_MODEL_NOT_FOUND = "MODEL_NOT_FOUND"
+ERROR_CODE_GENERATION_FAILED = "GENERATION_FAILED"
+
+
+def extract_genai_error(exc: Exception) -> tuple[int, str, str]:
+    """Extract (status_code, error_code, message) from a GenAI API error.
+
+    google.genai exposes ``code`` (HTTP status) and ``message`` directly on
+    ClientError/ServerError — there is no ``.error`` attribute. Anything else
+    falls back to a safe generic message.
+    """
+    if isinstance(exc, genai_errors.APIError):
+        status = exc.code or 500
+        message = exc.message or SAFE_GENERATION_ERROR
+        error_code = (
+            ERROR_CODE_MODEL_NOT_FOUND
+            if status == 404 or exc.status == "NOT_FOUND"
+            else ERROR_CODE_GENERATION_FAILED
+        )
+        return status, error_code, message
+    return 500, ERROR_CODE_GENERATION_FAILED, SAFE_GENERATION_ERROR
 
 
 def get_base_system_instructions() -> str:
@@ -53,9 +76,6 @@ class AgentService:
 
     async def get_active_config(self) -> AppConfigDB:
         cfg = await self.config_repo.get_config()
-        if not cfg:
-            cfg = AppConfigDB()
-            await self.config_repo.save_config(cfg)
         return cfg
 
     async def validate_and_resolve_config(
@@ -80,8 +100,7 @@ class AgentService:
 
         reasoning = requested_reasoning or cfg.default_reasoning_level
         if requested_reasoning and (
-            requested_reasoning not in cfg.allowed_reasoning_levels
-            or requested_reasoning not in allowed_for_model
+            requested_reasoning not in cfg.allowed_reasoning_levels or requested_reasoning not in allowed_for_model
         ):
             raise HTTPException(
                 status_code=400,
@@ -237,7 +256,7 @@ class AgentService:
         else:
             session = await self.chat_repo.get_session(session_id, user_id=user.id)
             if not session:
-                raise HTTPException(status_code=44, detail=f"Session {session_id} not found.")
+                raise HTTPException(status_code=404, detail=f"Session {session_id} not found.")
             if not session.title:
                 title = await self._generate_title(message_text)
                 await self.chat_repo.update_session_title(session_id, title)
@@ -258,10 +277,26 @@ class AgentService:
             )
             response_text = response.text or ""
             total_tokens = getattr(response.usage_metadata, "total_token_count", 0) if response.usage_metadata else 0
-        except Exception:
-            logger.exception("Model generation failed for session %s", session_id)
-            await self.chat_repo.add_message(session_id, role="agent", content="", error=SAFE_GENERATION_ERROR)
-            raise HTTPException(status_code=500, detail=SAFE_GENERATION_ERROR) from None
+        except Exception as exc:
+            status, error_code, message = extract_genai_error(exc)
+            logger.exception(
+                "Model generation failed session_id=%s model=%s error_code=%s status=%s message=%s",
+                session_id,
+                model,
+                error_code,
+                status,
+                message,
+            )
+            await self.chat_repo.add_message(
+                session_id,
+                role="agent",
+                content="",
+                error=f"[{error_code}] {message}",
+            )
+            raise HTTPException(
+                status_code=status,
+                detail={"code": error_code, "message": message},
+            ) from exc
 
         await self.chat_repo.add_message(session_id, role="agent", content=response_text)
         if total_tokens > 0:
@@ -362,12 +397,20 @@ class AgentService:
 
                 if getattr(chunk, "usage_metadata", None):
                     total_tokens = getattr(chunk.usage_metadata, "total_token_count", total_tokens)
-        except Exception:
-            logger.exception("Model generation failed for session %s", session_id)
-            await self.chat_repo.add_message(
-                session_id, role="agent", content=full_response, error=SAFE_GENERATION_ERROR
+        except Exception as exc:
+            status, error_code, message = extract_genai_error(exc)
+            logger.exception(
+                "Model generation failed session_id=%s model=%s error_code=%s status=%s message=%s",
+                session_id,
+                model,
+                error_code,
+                status,
+                message,
             )
-            yield f"event: error\ndata: {json.dumps({'detail': SAFE_GENERATION_ERROR})}\n\n"
+            await self.chat_repo.add_message(
+                session_id, role="agent", content=full_response, error=f"[{error_code}] {message}"
+            )
+            yield f"event: error\ndata: {json.dumps({'detail': message, 'code': error_code})}\n\n"
             return
 
         await self.chat_repo.add_message(session_id, role="agent", content=full_response)
