@@ -27,6 +27,13 @@ class AppConfigDB(BaseModel):
     enable_text_generation: bool = True
     enable_image_generation: bool = False
     enable_video_generation: bool = False
+    # When True: use backend AI model for STT (always show mic).
+    # When False: use browser Web Speech API (mic shown only on supported browsers).
+    enable_ai_stt: bool = False
+    # Gemini model used for AI STT transcription (cheapest audio-capable option).
+    # gemini-3.1-flash-lite natively accepts audio input ($0.50/1M tokens).
+    # Cheaper flash-lite tiers (e.g. gemini-2.0-flash-lite) do NOT support audio.
+    stt_model: str = "gemini-3.1-flash-lite"
 
     # ── Reasoning (Global Source of Truth) ────────────────────────────────────
     # If a mode is listed on a model but NOT here, it is silently ignored.
