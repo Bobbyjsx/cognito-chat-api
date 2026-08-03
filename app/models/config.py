@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 class TextModelConfig(BaseModel):
@@ -101,10 +101,40 @@ class AppConfigDB(BaseModel):
     )
     allowed_tools: list[str] = Field(default_factory=lambda: ["google_search", "code_execution"])
 
+    # ── Attachments ────────────────────────────────────────────────────────────
+    # Master switch for the attachment pipeline (upload endpoint + parts in chat).
+    enable_attachments: bool = True
+    # Maximum size of a single uploaded file, in bytes (default 20 MB).
+    attachment_max_size: int = 20_000_000
+    # Maximum number of attachments allowed per chat message.
+    attachment_max_count: int = 10
+    # Attachment types allowed to be uploaded, as AttachmentType values.
+    attachment_allowed_types: list[str] = Field(
+        default_factory=lambda: [
+            "image",
+            "pdf",
+            "document",
+            "audio",
+            "video",
+            "spreadsheet",
+            "json",
+            "text",
+        ]
+    )
+
+    # ── Context Management ─────────────────────────────────────────────────────
+    # Trim the conversation history sent to the model instead of sending it all.
+    context_trim_enabled: bool = True
+    # Approximate token budget for the retained history.
+    context_max_tokens: int = 400_000
+    # Always keep at least this many most-recent messages, even over budget.
+    context_keep_recent: int = 6
+
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     # ── Computed helpers (not stored, derived at runtime) ─────────────────────
 
+    @computed_field
     @property
     def allowed_text_models(self) -> list[str]:
         """All enabled model names — derived from models_list."""

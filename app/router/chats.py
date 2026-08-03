@@ -5,25 +5,51 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from google.cloud.firestore_v1.async_client import AsyncClient
 
-from app.api.dependencies import get_current_user
+from app.api.dependencies import (
+    get_current_user,
+    get_provider,
+    get_storage_backend,
+    get_tool_registry,
+)
 from app.database import get_db
 from app.models.chats import ChatRequest, ChatResponse, ChatSessionListSchema, ChatSessionSchema
 from app.models.users import UserDB
+from app.providers.base import BaseProvider
+from app.repositories.attachments import AttachmentRepository
 from app.repositories.chats import ChatRepository
 from app.repositories.config import ConfigRepository
 from app.repositories.users import UserRepository
+from app.services.attachments import AttachmentService
 from app.services.chats import AgentService
+from app.storage.base import StorageBackend
+from app.tools.executor import ToolExecutor
+from app.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
 
-def get_agent_service(db: AsyncClient = Depends(get_db)) -> AgentService:
+def get_agent_service(
+    db: AsyncClient = Depends(get_db),
+    provider: BaseProvider = Depends(get_provider),
+    storage: StorageBackend = Depends(get_storage_backend),
+    registry: ToolRegistry = Depends(get_tool_registry),
+) -> AgentService:
     chat_repo = ChatRepository(db)
     user_repo = UserRepository(db)
     config_repo = ConfigRepository(db)
-    return AgentService(chat_repo=chat_repo, user_repo=user_repo, config_repo=config_repo)
+    attachment_service = AttachmentService(AttachmentRepository(db), storage, provider)
+    executor = ToolExecutor(registry, provider)
+    return AgentService(
+        chat_repo=chat_repo,
+        user_repo=user_repo,
+        config_repo=config_repo,
+        attachment_service=attachment_service,
+        provider=provider,
+        registry=registry,
+        executor=executor,
+    )
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -40,6 +66,7 @@ async def chat_with_agent(
             session_id=session_id,
             requested_model=request.model,
             requested_reasoning=request.reasoning,
+            attachment_ids=request.attachments,
         )
         return response
     except ValueError as e:
@@ -65,6 +92,7 @@ async def stream_chat_with_agent(
             session_id=session_id,
             requested_model=request.model,
             requested_reasoning=request.reasoning,
+            attachment_ids=request.attachments,
         ),
         media_type="text/event-stream",
         headers={
