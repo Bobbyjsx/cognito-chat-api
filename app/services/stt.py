@@ -1,5 +1,6 @@
 import base64
 import logging
+from dataclasses import dataclass
 
 from fastapi import HTTPException
 from google import genai
@@ -17,6 +18,12 @@ TRANSCRIPTION_PROMPT = (
 )
 
 
+@dataclass
+class TranscriptionResult:
+    transcript: str
+    tokens_used: int
+
+
 class STTService:
     def __init__(self, config_repo: ConfigRepository, client: genai.Client | None = None):
         self.config_repo = config_repo
@@ -30,11 +37,9 @@ class STTService:
 
     async def get_active_config(self) -> AppConfigDB:
         cfg = await self.config_repo.get_config()
-        if cfg is None:
-            return AppConfigDB()
         return cfg
 
-    async def transcribe(self, audio_bytes: bytes, mime_type: str) -> str:
+    async def transcribe(self, audio_bytes: bytes, mime_type: str) -> TranscriptionResult:
         """Transcribe audio using the configured Gemini model.
 
         Args:
@@ -42,7 +47,7 @@ class STTService:
             mime_type: MIME type of the audio (e.g. 'audio/webm;codecs=opus')
 
         Returns:
-            The transcribed text.
+            A TranscriptionResult with the transcribed text and token usage.
         """
         cfg = await self.get_active_config()
 
@@ -73,11 +78,20 @@ class STTService:
                 ],
             )
             transcript = (response.text or "").strip()
-            logger.info("STT transcription successful: %d chars", len(transcript))
-            return transcript
-        except Exception as exc:
-            logger.exception("STT transcription failed: %s", exc)
+            tokens_used = (
+                getattr(response.usage_metadata, "total_token_count", 0)
+                if response.usage_metadata
+                else 0
+            )
+            logger.info(
+                "STT transcription successful: %d chars, %d tokens",
+                len(transcript),
+                tokens_used,
+            )
+            return TranscriptionResult(transcript=transcript, tokens_used=tokens_used)
+        except Exception:
+            logger.exception("STT transcription failed")
             raise HTTPException(
                 status_code=500,
                 detail="Transcription failed. Please try again.",
-            ) from exc
+            ) from None

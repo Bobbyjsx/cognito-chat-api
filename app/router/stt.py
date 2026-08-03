@@ -1,16 +1,24 @@
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+import logging
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from google.cloud.firestore_v1.async_client import AsyncClient
 from pydantic import BaseModel
 
+from app.api.dependencies import get_current_user
 from app.database import get_db
+from app.models.users import UserDB
 from app.repositories.config import ConfigRepository
+from app.repositories.users import UserRepository
 from app.services.stt import STTService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/stt", tags=["stt"])
 
 
 class TranscribeResponse(BaseModel):
     transcript: str
+    tokens_used: int = 0
 
 
 @router.post("/transcribe", response_model=TranscribeResponse)
@@ -20,9 +28,13 @@ async def transcribe_audio(
         default="audio/webm",
         description="MIME type of the uploaded audio (e.g. audio/webm;codecs=opus)",
     ),
+    current_user: UserDB = Depends(get_current_user),
     db: AsyncClient = Depends(get_db),
 ):
     """Transcribe uploaded audio using the configured AI STT model.
+
+    Token usage from the transcription is attributed to the calling user's
+    quota (tokens_used_6h / tokens_used_weekly) after a successful call.
 
     The client should send a multipart/form-data request with:
     - `audio`: the audio blob recorded via MediaRecorder
@@ -32,7 +44,30 @@ async def transcribe_audio(
     effective_mime = mime_type or audio.content_type or "audio/webm"
 
     config_repo = ConfigRepository(db)
+    cfg = await config_repo.get_config()
     service = STTService(config_repo=config_repo)
-    transcript = await service.transcribe(audio_bytes, effective_mime)
+    result = await service.transcribe(audio_bytes, effective_mime)
 
-    return TranscribeResponse(transcript=transcript)
+    if result.tokens_used > 0:
+        within_limit = await UserRepository(db).atomic_increment_if_within_limit(
+            current_user.id,
+            result.tokens_used,
+            default_limit_6h=cfg.default_token_limit_6h,
+            default_limit_weekly=cfg.default_token_limit_weekly,
+        )
+        logger.info(
+            "STT usage user=%s tokens=%d within_limit=%s",
+            current_user.id,
+            result.tokens_used,
+            within_limit,
+        )
+        if not within_limit:
+            raise HTTPException(
+                status_code=429,
+                detail="Token limit exceeded after transcription. Please upgrade your plan.",
+            )
+
+    return TranscribeResponse(
+        transcript=result.transcript,
+        tokens_used=result.tokens_used,
+    )
