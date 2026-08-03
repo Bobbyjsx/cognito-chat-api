@@ -1,58 +1,52 @@
+"""Chat agent service.
+
+Coordinates the full chat lifecycle by composing dedicated components —
+provider, tool registry/executor, attachment service, and context manager —
+instead of growing into one monolithic class.
+
+Provider-agnostic by design: no google-genai imports here. Everything the
+model needs (contents, tools, config) is expressed through
+``app.providers.base`` types; the provider translates them.
+"""
+
+from __future__ import annotations
+
 import json
 import logging
 import uuid
-from collections import deque
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
-from google import genai
-from google.genai import errors as genai_errors
-from google.genai import types
 
-from app.core.config import settings
 from app.models.chats import ChatResponse
 from app.models.config import AppConfigDB
 from app.models.users import UserDB
+from app.providers.base import (
+    BaseProvider,
+    ContentPart,
+    GenerationConfig,
+    GenerationEvent,
+    classify_provider_error,
+)
 from app.repositories.chats import ChatRepository
 from app.repositories.config import ConfigRepository
 from app.repositories.users import UserRepository
+from app.services.attachments import AttachmentService
+from app.services.context import ContextManager
 from app.services.quota import resolve_user_limits
+from app.tools.executor import ToolExecutor
+from app.tools.registry import ToolRegistry
 from app.utils.datetime import ensure_utc
+from app.utils.prompts import get_base_system_instructions
 
 logger = logging.getLogger(__name__)
 
-SAFE_GENERATION_ERROR = "Model generation failed. Please try again."
-
-ERROR_CODE_MODEL_NOT_FOUND = "MODEL_NOT_FOUND"
-ERROR_CODE_GENERATION_FAILED = "GENERATION_FAILED"
-
-
-def extract_genai_error(exc: Exception) -> tuple[int, str, str]:
-    """Extract (status_code, error_code, message) from a GenAI API error.
-
-    google.genai exposes ``code`` (HTTP status) and ``message`` directly on
-    ClientError/ServerError — there is no ``.error`` attribute. Anything else
-    falls back to a safe generic message.
-    """
-    if isinstance(exc, genai_errors.APIError):
-        status = exc.code or 500
-        message = exc.message or SAFE_GENERATION_ERROR
-        error_code = (
-            ERROR_CODE_MODEL_NOT_FOUND
-            if status == 404 or exc.status == "NOT_FOUND"
-            else ERROR_CODE_GENERATION_FAILED
-        )
-        return status, error_code, message
-    return 500, ERROR_CODE_GENERATION_FAILED, SAFE_GENERATION_ERROR
-
-
-def get_base_system_instructions() -> str:
-    """Standard system instructions for Gemini chat sessions."""
-    return (
-        "You are Cognito, an advanced AI assistant created to be helpful, concise, and clear. "
-        "Format responses cleanly with Markdown when applicable."
-    )
+_REASONING_BUDGETS = {
+    "low": 1024,
+    "medium": 4096,
+    "high": 8192,
+}
 
 
 class AgentService:
@@ -61,29 +55,44 @@ class AgentService:
         chat_repo: ChatRepository,
         user_repo: UserRepository,
         config_repo: ConfigRepository,
-        client: genai.Client | None = None,
+        attachment_service: AttachmentService,
+        provider: BaseProvider | None = None,
+        registry: ToolRegistry | None = None,
+        executor: ToolExecutor | None = None,
+        context_manager: ContextManager | None = None,
     ):
         self.chat_repo = chat_repo
         self.user_repo = user_repo
         self.config_repo = config_repo
+        self.attachment_service = attachment_service
 
-        if client is not None:
-            self.client = client
-        elif settings.gemini_api_key:
-            self.client = genai.Client(api_key=settings.gemini_api_key)
-        else:
-            self.client = genai.Client()
+        if provider is None:
+            from app.core.config import settings
+            from app.providers.gemini import GeminiProvider
+
+            provider = GeminiProvider(api_key=settings.gemini_api_key)
+        self.provider = provider
+
+        if registry is None:
+            registry = ToolRegistry()
+            registry.register_defaults()
+        self.registry = registry
+
+        self.executor = executor or ToolExecutor(self.registry, self.provider)
+        self.context_manager = context_manager or ContextManager()
+
+    # ── configuration ─────────────────────────────────────────────────────────
 
     async def get_active_config(self) -> AppConfigDB:
-        cfg = await self.config_repo.get_config()
-        return cfg
+        return await self.config_repo.get_config()
 
     async def validate_and_resolve_config(
         self,
         requested_model: str | None = None,
         requested_reasoning: str | None = None,
-    ) -> tuple[str, types.ThinkingConfig | None, str, list[types.Tool] | None]:
-
+    ) -> tuple[str, str, int | None, list[dict]]:
+        """Validate model/reasoning against runtime config and resolve the
+        thinking budget and enabled tool configs."""
         cfg = await self.get_active_config()
 
         if not cfg.enable_text_generation:
@@ -107,127 +116,17 @@ class AgentService:
                 detail=f"Reasoning level '{requested_reasoning}' is not allowed for model '{model}'. Allowed: {allowed_for_model}",
             )
 
-        thinking_config: types.ThinkingConfig | None = None
+        thinking_budget = None
         if reasoning != "none":
-            budget_map = {
-                "low": 1024,
-                "medium": 4096,
-                "high": 8192,
-            }
-            budget = budget_map.get(reasoning, 2048)
-            thinking_config = types.ThinkingConfig(thinking_budget=budget, include_thoughts=True)
+            thinking_budget = _REASONING_BUDGETS.get(reasoning, 2048)
 
-        tools: list[types.Tool] | None = None
-        if cfg.allowed_tools and len(cfg.allowed_tools) > 0:
-            tool_list = []
-            if "code_execution" in cfg.allowed_tools:
-                tool_list.append(types.Tool(code_execution=types.ToolCodeExecution()))
+        tool_configs = self.registry.to_provider_configs(cfg.allowed_tools)
 
-            if tool_list:
-                tools = tool_list
+        return model, reasoning, thinking_budget, tool_configs
 
-        return model, thinking_config, reasoning, tools
+    # ── quota ─────────────────────────────────────────────────────────────────
 
-    async def _generate_title(self, first_message: str) -> str:
-        """Instantly derives a concise title from the user prompt without network latency."""
-        words = first_message.strip().split()
-        return " ".join(words[:5]) if words else "New Chat"
-
-    def _build_generate_config(
-        self,
-        thinking_config: types.ThinkingConfig | None,
-        tools: list[types.Tool] | None,
-    ) -> types.GenerateContentConfig:
-        system_instructions = get_base_system_instructions()
-        return types.GenerateContentConfig(
-            system_instruction=system_instructions,
-            thinking_config=thinking_config,
-            tools=tools,
-        )
-
-    def _build_contents(self, history_messages: list, current_message: str) -> list[types.Content]:
-        contents: list[types.Content] = []
-        for msg in history_messages:
-            role = "user" if msg.role == "user" else "model"
-            contents.append(types.Content(role=role, parts=[types.Part.from_text(text=msg.content)]))
-        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=current_message)]))
-        return contents
-
-    def _extract_stream_events(self, chunk, code_tool_ids: deque[str] | None = None) -> list[dict]:
-        events: list[dict] = []
-        if code_tool_ids is None:
-            code_tool_ids = deque()
-
-        candidates = getattr(chunk, "candidates", None) or []
-        for candidate in candidates:
-            content = getattr(candidate, "content", None)
-            if not content:
-                continue
-
-            parts = getattr(content, "parts", None) or []
-            for part in parts:
-                text = getattr(part, "text", None)
-                thought = getattr(part, "thought", None)
-                executable_code = getattr(part, "executable_code", None)
-                code_execution_result = getattr(part, "code_execution_result", None)
-
-                if thought:
-                    thought_str = text if text else (thought if isinstance(thought, str) else "")
-                    if thought_str:
-                        events.append({"type": "reasoning", "token": thought_str})
-                elif text:
-                    events.append({"type": "text", "token": text})
-
-                if executable_code:
-                    tool_call_id = f"call_{uuid.uuid4().hex[:8]}"
-                    code_tool_ids.append(tool_call_id)
-                    language = getattr(executable_code, "language", None)
-                    lang_str = str(language).lower() if language else "python"
-                    events.append(
-                        {
-                            "type": "tool_call",
-                            "tool_name": "code_execution",
-                            "tool_call_id": tool_call_id,
-                            "input": {
-                                "language": lang_str,
-                                "code": getattr(executable_code, "code", ""),
-                            },
-                        }
-                    )
-
-                if code_execution_result:
-                    tool_call_id = code_tool_ids.popleft() if code_tool_ids else f"call_{uuid.uuid4().hex[:8]}"
-                    outcome = getattr(code_execution_result, "outcome", None)
-                    events.append(
-                        {
-                            "type": "tool_result",
-                            "tool_name": "code_execution",
-                            "tool_call_id": tool_call_id,
-                            "output": {
-                                "outcome": str(outcome) if outcome else "OUTCOME_OK",
-                                "output": getattr(code_execution_result, "output", ""),
-                            },
-                        }
-                    )
-
-        return events
-
-    async def process_chat(
-        self,
-        user: UserDB,
-        message_text: str,
-        session_id: uuid.UUID | None = None,
-        requested_model: str | None = None,
-        requested_reasoning: str | None = None,
-    ) -> ChatResponse:
-        """Non-streaming processing of chat messages."""
-        if not message_text or not message_text.strip():
-            raise HTTPException(status_code=400, detail="Message is empty.")
-
-        model, thinking_config, _reasoning, tools = await self.validate_and_resolve_config(
-            requested_model, requested_reasoning
-        )
-
+    async def _quota_precheck(self, user: UserDB, config: AppConfigDB) -> None:
         now = datetime.now(timezone.utc)
         reset_at = ensure_utc(user.reset_at)
         weekly_reset_at = ensure_utc(user.weekly_reset_at)
@@ -238,8 +137,7 @@ class AgentService:
         effective_6h = 0 if is_6h_expired else user.tokens_used_6h
         effective_weekly = 0 if is_weekly_expired else user.tokens_used_weekly
 
-        active_config = await self.get_active_config()
-        limit_6h, limit_weekly = resolve_user_limits(user, active_config)
+        limit_6h, limit_weekly = resolve_user_limits(user, config)
 
         if effective_6h >= limit_6h:
             reset_str = reset_at.isoformat() if reset_at else ""
@@ -248,6 +146,30 @@ class AgentService:
             reset_str = weekly_reset_at.isoformat() if weekly_reset_at else ""
             raise HTTPException(status_code=429, detail=f"Weekly token limit reached. Resets at {reset_str}")
 
+    async def _charge_usage(self, user: UserDB, tokens: int, config: AppConfigDB) -> bool:
+        if tokens <= 0:
+            return True
+        return await self.user_repo.atomic_increment_if_within_limit(
+            user.id,
+            tokens,
+            default_limit_6h=config.default_token_limit_6h,
+            default_limit_weekly=config.default_token_limit_weekly,
+        )
+
+    # ── session handling ──────────────────────────────────────────────────────
+
+    @staticmethod
+    async def _generate_title(first_message: str) -> str:
+        """Instantly derives a concise title from the user prompt without network latency."""
+        words = first_message.strip().split()
+        return " ".join(words[:5]) if words else "New Chat"
+
+    async def _resolve_session(
+        self,
+        user: UserDB,
+        session_id: uuid.UUID | None,
+        message_text: str,
+    ) -> tuple[object, uuid.UUID, str | None]:
         title = None
         if session_id is None:
             title = await self._generate_title(message_text)
@@ -262,30 +184,172 @@ class AgentService:
                 await self.chat_repo.update_session_title(session_id, title)
             else:
                 title = session.title
+        return session, session_id, title
 
-        await self.chat_repo.add_message(session_id, role="user", content=message_text)
+    # ── attachments ───────────────────────────────────────────────────────────
 
-        history_messages = session.messages if session and session.messages else []
-        contents = self._build_contents(history_messages, message_text)
-        config = self._build_generate_config(thinking_config, tools)
+    async def _prepare_attachments(
+        self,
+        user: UserDB,
+        config: AppConfigDB,
+        attachment_ids: list[uuid.UUID] | None,
+        session_id: uuid.UUID | None,
+    ) -> list:
+        if not attachment_ids:
+            return []
+        if len(attachment_ids) > config.attachment_max_count:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Too many attachments. Maximum is {config.attachment_max_count} per message.",
+            )
+        if not config.enable_attachments:
+            raise HTTPException(status_code=403, detail="Attachments are currently disabled by admin.")
+
+        attachments = await self.attachment_service.resolve_many(user.id, attachment_ids)
+        missing = {str(i) for i in attachment_ids} - {str(a.id) for a in attachments}
+        if missing:
+            raise HTTPException(status_code=400, detail=f"Attachment(s) not found: {sorted(missing)}")
+
+        for attachment in attachments:
+            if attachment.session_id is None and session_id is not None:
+                await self.attachment_service.bind_session(attachment, session_id)
+        return attachments
+
+    async def _prepare_current_parts(
+        self,
+        message_text: str,
+        attachments: list,
+    ) -> list[dict]:
+        parts = [{"text": message_text}]
+        for attachment in attachments:
+            parts.extend(await self.attachment_service.prepare_parts(attachment))
+        return parts
+
+    # ── history / context ─────────────────────────────────────────────────────
+
+    async def _build_contents(
+        self,
+        user: UserDB,
+        session: object | None,
+        config: AppConfigDB,
+        current_parts: list[dict],
+    ) -> list[ContentPart]:
+        history = session.messages if session is not None and session.messages else []
+        if config.context_trim_enabled:
+            history = self.context_manager.trim(
+                history,
+                max_tokens=config.context_max_tokens,
+                keep_recent=config.context_keep_recent,
+            )
+
+        attachment_ids = [a_id for msg in history for a_id in (msg.attachment_ids or [])]
+        attachment_map: dict[str, object] = {}
+        if attachment_ids:
+            try:
+                parsed = [uuid.UUID(str(i)) for i in attachment_ids]
+            except ValueError:
+                parsed = []
+            for meta in await self.attachment_service.resolve_many(user.id, parsed):
+                attachment_map[str(meta.id)] = meta
+
+        contents: list[ContentPart] = []
+        for msg in history:
+            parts: list[dict] = [{"text": msg.content}]
+            for a_id in msg.attachment_ids or []:
+                meta = attachment_map.get(str(a_id))
+                if meta is None:
+                    continue
+                try:
+                    parts.extend(await self.attachment_service.prepare_parts(meta))
+                except Exception:
+                    logger.exception("Failed to prepare historical attachment %s", a_id)
+            contents.append(ContentPart(role="user" if msg.role == "user" else "model", parts=parts))
+
+        contents.append(ContentPart(role="user", parts=current_parts))
+        return contents
+
+    # ── SSE helpers ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _serialize_event(event: GenerationEvent) -> dict:
+        if event.type in ("text", "reasoning"):
+            return {"type": event.type, "token": event.token}
+        if event.type == "tool_call" and event.tool_call is not None:
+            call = event.tool_call
+            return {
+                "type": "tool_call",
+                "tool_name": call.name,
+                "tool_call_id": call.id,
+                "input": call.args,
+            }
+        if event.type == "tool_result" and event.tool_result is not None:
+            result = event.tool_result
+            return {
+                "type": "tool_result",
+                "tool_name": result.name,
+                "tool_call_id": result.id,
+                "output": result.output,
+            }
+        if event.type == "usage":
+            return {"type": "usage", "tokens": event.total_tokens}
+        return {"type": event.type, "token": event.token}
+
+    @staticmethod
+    def _error_event(detail: str, code: str | None = None) -> str:
+        payload = {"detail": detail}
+        if code:
+            payload["code"] = code
+        return f"event: error\ndata: {json.dumps(payload)}\n\n"
+
+    # ── non-streaming ─────────────────────────────────────────────────────────
+
+    async def process_chat(
+        self,
+        user: UserDB,
+        message_text: str,
+        session_id: uuid.UUID | None = None,
+        requested_model: str | None = None,
+        requested_reasoning: str | None = None,
+        attachment_ids: list[uuid.UUID] | None = None,
+    ) -> ChatResponse:
+        if not message_text or not message_text.strip():
+            raise HTTPException(status_code=400, detail="Message is empty.")
+
+        model, _, thinking_budget, tool_configs = await self.validate_and_resolve_config(
+            requested_model, requested_reasoning
+        )
+
+        active_config = await self.get_active_config()
+        await self._quota_precheck(user, active_config)
+
+        session, session_id, title = await self._resolve_session(user, session_id, message_text)
+        attachments = await self._prepare_attachments(user, active_config, attachment_ids, session_id)
+        await self.chat_repo.add_message(
+            session_id,
+            role="user",
+            content=message_text,
+            attachment_ids=[str(a.id) for a in attachments],
+        )
+
+        current_parts = await self._prepare_current_parts(message_text, attachments)
+        contents = await self._build_contents(user, session, active_config, current_parts)
+        generation_config = GenerationConfig(
+            system_instruction=get_base_system_instructions(),
+            thinking_budget=thinking_budget,
+            include_thoughts=True,
+            tool_configs=tool_configs,
+        )
 
         try:
-            response = await self.client.aio.models.generate_content(
-                model=model,
-                contents=contents,
-                config=config,
-            )
-            response_text = response.text or ""
-            total_tokens = getattr(response.usage_metadata, "total_token_count", 0) if response.usage_metadata else 0
+            result = await self.executor.generate(model, contents, generation_config)
         except Exception as exc:
-            status, error_code, message = extract_genai_error(exc)
+            status, error_code, message = classify_provider_error(exc)
             logger.exception(
-                "Model generation failed session_id=%s model=%s error_code=%s status=%s message=%s",
+                "Model generation failed session_id=%s model=%s error_code=%s status=%s",
                 session_id,
                 model,
                 error_code,
                 status,
-                message,
             )
             await self.chat_repo.add_message(
                 session_id,
@@ -298,15 +362,17 @@ class AgentService:
                 detail={"code": error_code, "message": message},
             ) from exc
 
-        await self.chat_repo.add_message(session_id, role="agent", content=response_text)
-        if total_tokens > 0:
-            within_limit = await self.user_repo.atomic_increment_if_within_limit(user.id, total_tokens)
-            if not within_limit:
-                raise HTTPException(
-                    status_code=429, detail="Token limit exceeded after generation. Please upgrade your plan."
-                )
+        await self.chat_repo.add_message(session_id, role="agent", content=result.text)
 
-        return ChatResponse(session_id=session_id, title=title, response=response_text)
+        within_limit = await self._charge_usage(user, result.total_tokens, active_config)
+        if not within_limit:
+            raise HTTPException(
+                status_code=429, detail="Token limit exceeded after generation. Please upgrade your plan."
+            )
+
+        return ChatResponse(session_id=session_id, title=title, response=result.text)
+
+    # ── streaming ─────────────────────────────────────────────────────────────
 
     async def stream_chat(
         self,
@@ -315,117 +381,80 @@ class AgentService:
         session_id: uuid.UUID | None = None,
         requested_model: str | None = None,
         requested_reasoning: str | None = None,
+        attachment_ids: list[uuid.UUID] | None = None,
     ) -> AsyncGenerator[str, None]:
-        """Yields SSE-formatted chunks as Gemini responds, then persists the
-        full message and token usage once the stream is complete."""
-
+        """Yields SSE-formatted chunks as the provider responds, then persists
+        the full message and token usage once the stream is complete."""
         if not message_text or not message_text.strip():
-            yield f"event: error\ndata: {json.dumps({'detail': 'Message is empty.'})}\n\n"
+            yield self._error_event("Message is empty.")
             return
 
         try:
-            model, thinking_config, reasoning, tools = await self.validate_and_resolve_config(
+            model, reasoning, thinking_budget, tool_configs = await self.validate_and_resolve_config(
                 requested_model, requested_reasoning
             )
-        except HTTPException as e:
-            yield f"event: error\ndata: {json.dumps({'detail': e.detail})}\n\n"
+            active_config = await self.get_active_config()
+            await self._quota_precheck(user, active_config)
+            session, session_id, title = await self._resolve_session(user, session_id, message_text)
+            attachments = await self._prepare_attachments(user, active_config, attachment_ids, session_id)
+        except HTTPException as exc:
+            yield self._error_event(str(exc.detail))
             return
 
-        now = datetime.now(timezone.utc)
-        reset_at = ensure_utc(user.reset_at)
-        weekly_reset_at = ensure_utc(user.weekly_reset_at)
+        await self.chat_repo.add_message(
+            session_id,
+            role="user",
+            content=message_text,
+            attachment_ids=[str(a.id) for a in attachments],
+        )
 
-        is_6h_expired = reset_at is None or reset_at <= now
-        is_weekly_expired = weekly_reset_at is None or weekly_reset_at <= now
+        current_parts = await self._prepare_current_parts(message_text, attachments)
+        contents = await self._build_contents(user, session, active_config, current_parts)
+        generation_config = GenerationConfig(
+            system_instruction=get_base_system_instructions(),
+            thinking_budget=thinking_budget,
+            include_thoughts=True,
+            tool_configs=tool_configs,
+        )
 
-        effective_6h = 0 if is_6h_expired else user.tokens_used_6h
-        effective_weekly = 0 if is_weekly_expired else user.tokens_used_weekly
-
-        active_config = await self.get_active_config()
-        limit_6h, limit_weekly = resolve_user_limits(user, active_config)
-
-        if effective_6h >= limit_6h:
-            reset_str = reset_at.isoformat() if reset_at else ""
-            yield f"event: error\ndata: {json.dumps({'detail': f'6-hour token limit reached. Resets at {reset_str}'})}\n\n"
-            return
-        if effective_weekly >= limit_weekly:
-            reset_str = weekly_reset_at.isoformat() if weekly_reset_at else ""
-            yield f"event: error\ndata: {json.dumps({'detail': f'Weekly token limit reached. Resets at {reset_str}'})}\n\n"
-            return
-
-        session_title = None
-        if session_id is None:
-            session_title = await self._generate_title(message_text)
-            session = await self.chat_repo.create_session(user_id=user.id, title=session_title)
-            session_id = session.id
-        else:
-            session = await self.chat_repo.get_session(session_id, user_id=user.id)
-            if not session:
-                yield f"event: error\ndata: {json.dumps({'detail': f'Session {session_id} not found.'})}\n\n"
-                return
-            if not session.title:
-                session_title = await self._generate_title(message_text)
-                await self.chat_repo.update_session_title(session_id, session_title)
-            else:
-                session_title = session.title
-
-        await self.chat_repo.add_message(session_id, role="user", content=message_text)
-
-        history_messages = session.messages if session and session.messages else []
-        contents = self._build_contents(history_messages, message_text)
-        config = self._build_generate_config(thinking_config, tools)
-
-        yield f"event: session\ndata: {json.dumps({'session_id': str(session_id), 'title': session_title})}\n\n"
+        yield f"event: session\ndata: {json.dumps({'session_id': str(session_id), 'title': title})}\n\n"
 
         full_response = ""
         total_tokens = 0
-        code_tool_ids: deque[str] = deque()
 
         try:
-            response_stream = await self.client.aio.models.generate_content_stream(
-                model=model,
-                contents=contents,
-                config=config,
-            )
-
-            async for chunk in response_stream:
-                events = self._extract_stream_events(chunk, code_tool_ids)
-                for event in events:
-                    if event.get("type") == "text" and "token" in event:
-                        full_response += event["token"]
-                    yield f"event: chunk\ndata: {json.dumps(event)}\n\n"
-
-                if getattr(chunk, "usage_metadata", None):
-                    total_tokens = getattr(chunk.usage_metadata, "total_token_count", total_tokens)
+            async for event in self.executor.generate_stream(model, contents, generation_config):
+                if event.type == "text":
+                    full_response += event.token or ""
+                elif event.type == "usage" and event.total_tokens:
+                    total_tokens = event.total_tokens
+                yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
         except Exception as exc:
-            status, error_code, message = extract_genai_error(exc)
+            status, error_code, message = classify_provider_error(exc)
             logger.exception(
-                "Model generation failed session_id=%s model=%s error_code=%s status=%s message=%s",
+                "Model generation failed session_id=%s model=%s error_code=%s status=%s",
                 session_id,
                 model,
                 error_code,
                 status,
-                message,
             )
             await self.chat_repo.add_message(
-                session_id, role="agent", content=full_response, error=f"[{error_code}] {message}"
+                session_id,
+                role="agent",
+                content=full_response,
+                error=f"[{error_code}] {message}",
             )
-            yield f"event: error\ndata: {json.dumps({'detail': message, 'code': error_code})}\n\n"
+            yield self._error_event(message, error_code)
             return
 
         await self.chat_repo.add_message(session_id, role="agent", content=full_response)
-        if total_tokens > 0:
-            within_limit = await self.user_repo.atomic_increment_if_within_limit(
-                user.id,
-                total_tokens,
-                default_limit_6h=active_config.default_token_limit_6h,
-                default_limit_weekly=active_config.default_token_limit_weekly,
-            )
-            if not within_limit:
-                yield f"event: error\ndata: {json.dumps({'detail': 'Token limit exceeded after generation. Please upgrade your plan.'})}\n\n"
-                return
+
+        within_limit = await self._charge_usage(user, total_tokens, active_config)
+        if not within_limit:
+            yield self._error_event("Token limit exceeded after generation. Please upgrade your plan.")
+            return
 
         yield (
             "event: done\n"
-            f"data: {json.dumps({'session_id': str(session_id), 'title': session_title, 'tokens_used': total_tokens, 'model': model, 'reasoning': reasoning})}\n\n"
+            f"data: {json.dumps({'session_id': str(session_id), 'title': title, 'tokens_used': total_tokens, 'model': model, 'reasoning': reasoning})}\n\n"
         )

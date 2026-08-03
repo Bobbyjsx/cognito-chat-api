@@ -12,6 +12,7 @@ class ChatMessageDB(BaseModel):
     role: str
     content: str
     error: str | None = None
+    attachment_ids: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -34,6 +35,7 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=32_000)
     model: str | None = None
     reasoning: str | None = None
+    attachments: list[UUID] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
@@ -46,6 +48,7 @@ class MessageSchema(BaseModel):
     role: str
     content: str
     error: str | None = None
+    attachment_ids: list[str] = Field(default_factory=list)
 
 
 class ChatSessionSchema(BaseModel):
