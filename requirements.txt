@@ -8,6 +8,7 @@ PyJWT
 python-multipart
 firebase-admin
 google-cloud-firestore
+google-cloud-storage
 ruff
 pytest
 pytest-asyncio

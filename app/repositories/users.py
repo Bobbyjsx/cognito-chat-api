@@ -127,9 +127,7 @@ class UserRepository:
 
             # Check quota limits
             is_within_limit = True
-            if tokens_used_6h + tokens_added > token_limit_6h:
-                is_within_limit = False
-            elif tokens_used_weekly + tokens_added > token_limit_weekly:
+            if tokens_used_6h + tokens_added > token_limit_6h or tokens_used_weekly + tokens_added > token_limit_weekly:
                 is_within_limit = False
 
             # Apply atomic increments regardless so they don't get free tokens

@@ -5,13 +5,19 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.database import create_db_client, init_db
-from app.router import auth, chats, config, stt
+from app.providers.gemini import GeminiProvider
+from app.router import attachments, auth, chats, config, stt
+from app.tools.registry import ToolRegistry
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     app.state.db_client = create_db_client()
+    app.state.provider = GeminiProvider(api_key=settings.gemini_api_key)
+    registry = ToolRegistry()
+    registry.register_defaults()
+    app.state.tool_registry = registry
     yield
 
 
@@ -34,6 +40,7 @@ app.include_router(auth.router)
 app.include_router(chats.router)
 app.include_router(config.router)
 app.include_router(stt.router)
+app.include_router(attachments.router)
 
 
 @app.get("/health")

@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     firebase_credentials_path: str = ""
     firestore_database: str = ""
 
+    # Object Storage (attachments)
+    # backend: "" → auto (GCS when STORAGE_BUCKET is set, otherwise local disk)
+    storage_backend: str = ""
+    storage_bucket: str = ""
+    local_storage_dir: str = "./storage_data"
+
     # Auth Settings
     secret_key: str = "supersecretkey_please_change_in_production"
     algorithm: str = "HS256"
