@@ -9,6 +9,12 @@ os.environ["FIRESTORE_EMULATOR_HOST"] = "127.0.0.1:8080"
 os.environ["GOOGLE_CLOUD_PROJECT"] = "test-project"
 os.environ["FIRESTORE_DATABASE"] = "(default)"
 
+# Attachments use the local storage backend in tests
+os.environ["STORAGE_BACKEND"] = "local"
+os.environ["LOCAL_STORAGE_DIR"] = os.environ.get(
+    "TEST_STORAGE_DIR", "/tmp/cognito-test-storage"
+)
+
 # Bypass password hashing in tests to prevent bcrypt bugs with passlib
 patch("app.core.security.verify_password", return_value=True).start()
 patch("app.core.security.get_password_hash", return_value="hashed").start()
@@ -62,8 +68,8 @@ def client():
 
 @pytest.fixture
 def mock_agent():
-    # Mock the google-genai Client so we don't hit the real Gemini API
-    with patch("app.services.chats.genai.Client") as MockClientClass:
+    # Mock the google-genai Client (used by the GeminiProvider) so we don't hit the real Gemini API
+    with patch("app.providers.gemini.genai.Client") as MockClientClass:
         mock_client_instance = MockClientClass.return_value
 
         class MockPart:
@@ -88,6 +94,7 @@ def mock_agent():
             def __init__(self):
                 self.text = "Hello from mocked agent!"
                 self.usage_metadata = MagicMock(total_token_count=10)
+                self.candidates = []
 
         async def mock_generate_content(*args, **kwargs):
             return MockResponse()
@@ -101,6 +108,9 @@ def mock_agent():
             return _stream()
 
         mock_client_instance.aio.models.generate_content = AsyncMock(side_effect=mock_generate_content)
-        mock_client_instance.aio.models.generate_content_stream = AsyncMock(side_effect=mock_generate_content_stream)
+        mock_client_instance.aio.models.generate_content_stream = AsyncMock(
+            side_effect=mock_generate_content_stream
+        )
+        mock_client_instance.aio.files.upload = AsyncMock(return_value=MagicMock(uri="files/mock-upload"))
 
         yield mock_client_instance
