@@ -4,9 +4,10 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from google.cloud.firestore_v1.async_client import AsyncClient
 from pydantic import BaseModel
 
-from app.api.dependencies import get_current_user
+from app.api.dependencies import get_current_user, get_provider
 from app.database import get_db
 from app.models.users import UserDB
+from app.providers.base import BaseProvider
 from app.repositories.config import ConfigRepository
 from app.repositories.users import UserRepository
 from app.services.stt import STTService
@@ -21,6 +22,13 @@ class TranscribeResponse(BaseModel):
     tokens_used: int = 0
 
 
+def get_stt_service(
+    db: AsyncClient = Depends(get_db),
+    provider: BaseProvider = Depends(get_provider),
+) -> STTService:
+    return STTService(config_repo=ConfigRepository(db), provider=provider)
+
+
 @router.post("/transcribe", response_model=TranscribeResponse)
 async def transcribe_audio(
     audio: UploadFile = File(..., description="Audio file recorded by the browser"),
@@ -30,6 +38,7 @@ async def transcribe_audio(
     ),
     current_user: UserDB = Depends(get_current_user),
     db: AsyncClient = Depends(get_db),
+    service: STTService = Depends(get_stt_service),
 ):
     """Transcribe uploaded audio using the configured AI STT model.
 
@@ -45,7 +54,6 @@ async def transcribe_audio(
 
     config_repo = ConfigRepository(db)
     cfg = await config_repo.get_config()
-    service = STTService(config_repo=config_repo)
     result = await service.transcribe(audio_bytes, effective_mime)
 
     if result.tokens_used > 0:
