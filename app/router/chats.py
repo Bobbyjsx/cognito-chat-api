@@ -111,15 +111,27 @@ async def list_sessions(
     current_user: UserDB = Depends(get_current_user),
     db: AsyncClient = Depends(get_db),
 ):
+    from app.core.redis import redis_cache
+    from app.core.cache_keys import CacheKeys
+    
+    cache_key = CacheKeys.user_sessions(current_user.id, limit, offset, q)
+    cached_data = await redis_cache.get(cache_key)
+    if cached_data:
+        return cached_data
+
     repo = ChatRepository(db)
     sessions, has_more, total = await repo.get_user_sessions(current_user.id, search_query=q, limit=limit, offset=offset)
-    return PaginatedResponse(
+    
+    response = PaginatedResponse(
         items=sessions,
         total=total,
         limit=limit,
         offset=offset,
         has_more=has_more
     )
+    
+    await redis_cache.set(cache_key, response.model_dump(mode="json"), expire=300)
+    return response
 
 
 @router.get("/sessions/{session_id}")
@@ -130,6 +142,14 @@ async def get_session(
     current_user: UserDB = Depends(get_current_user),
     db: AsyncClient = Depends(get_db),
 ):
+    from app.core.redis import redis_cache
+    from app.core.cache_keys import CacheKeys
+    
+    cache_key = CacheKeys.session_details(session_id, limit, offset)
+    cached_data = await redis_cache.get(cache_key)
+    if cached_data:
+        return cached_data
+
     repo = ChatRepository(db)
     session, has_more = await repo.get_session(session_id, current_user.id, limit=limit, offset=offset)
     if not session:
@@ -141,15 +161,18 @@ async def get_session(
     messages = session.messages or []
     session.messages = None
 
-    return {
-        "session": session.model_dump(),
+    response = {
+        "session": session.model_dump(mode="json"),
         "messages": {
-            "items": [msg.model_dump() for msg in messages],
+            "items": [msg.model_dump(mode="json") for msg in messages],
             "limit": limit,
             "offset": offset,
             "has_more": has_more
         }
     }
+    
+    await redis_cache.set(cache_key, response, expire=300)
+    return response
 
 
 @router.delete("/sessions/{session_id}", status_code=200)
@@ -163,6 +186,11 @@ async def delete_session(
     success = await repo.soft_delete_session(session_id, current_user.id)
     if not success:
         raise HTTPException(status_code=404, detail="Session not found")
+        
+    from app.core.redis import redis_cache
+    await redis_cache.delete_by_prefix(f"sessions:{current_user.id}")
+    await redis_cache.delete_by_prefix(f"session:{session_id}")
+    
     return {"message": "Session deleted successfully"}
 
 
@@ -178,4 +206,9 @@ async def mark_as_read(
         raise HTTPException(status_code=404, detail="Session not found")
 
     await repo.mark_session_read(session_id)
+    
+    from app.core.redis import redis_cache
+    await redis_cache.delete_by_prefix(f"sessions:{current_user.id}")
+    await redis_cache.delete_by_prefix(f"session:{session_id}")
+    
     return {"message": "Session marked as read"}

@@ -37,6 +37,8 @@ async def _cleanup_loop(app: FastAPI):
         await asyncio.sleep(3600)  # Run every hour
 
 
+from app.core.redis import redis_cache
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
@@ -46,10 +48,12 @@ async def lifespan(app: FastAPI):
     registry.register_defaults()
     app.state.tool_registry = registry
     
+    await redis_cache.connect()
     cleanup_task = asyncio.create_task(_cleanup_loop(app))
     
     yield
     cleanup_task.cancel()
+    await redis_cache.disconnect()
 
 
 
