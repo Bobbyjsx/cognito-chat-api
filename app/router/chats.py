@@ -122,10 +122,10 @@ async def list_sessions(
     )
 
 
-@router.get("/sessions/{session_id}", response_model=PaginatedResponse[ChatSessionSchema])
+@router.get("/sessions/{session_id}")
 async def get_session(
     session_id: uuid.UUID,
-    limit: int = 20,
+    limit: int = 10,
     offset: int = 0,
     current_user: UserDB = Depends(get_current_user),
     db: AsyncClient = Depends(get_db),
@@ -137,13 +137,19 @@ async def get_session(
 
     await repo.mark_session_read(session_id)
     session.read_status = "read"
+    
+    messages = session.messages or []
+    session.messages = None
 
-    return PaginatedResponse(
-        items=[session],
-        limit=limit,
-        offset=offset,
-        has_more=has_more
-    )
+    return {
+        "session": session.model_dump(),
+        "messages": {
+            "items": [msg.model_dump() for msg in messages],
+            "limit": limit,
+            "offset": offset,
+            "has_more": has_more
+        }
+    }
 
 
 @router.delete("/sessions/{session_id}", status_code=200)

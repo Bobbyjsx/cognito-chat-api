@@ -38,7 +38,7 @@ class ChatRepository:
             return False
         return True
 
-    async def get_session(self, session_id: UUID, user_id: UUID, limit: int = 20, offset: int = 0) -> tuple[ChatSessionDB | None, bool]:
+    async def get_session(self, session_id: UUID, user_id: UUID, limit: int = 10, offset: int = 0) -> tuple[ChatSessionDB | None, bool]:
         doc_ref = self.collection.document(str(session_id))
         from google.cloud import firestore
         messages_ref = doc_ref.collection("messages").order_by("created_at", direction=firestore.Query.DESCENDING).offset(offset).limit(limit + 1)
