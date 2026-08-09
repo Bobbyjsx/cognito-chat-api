@@ -180,7 +180,7 @@ class AgentService:
             session = await self.chat_repo.create_session(user_id=user.id, title=title)
             session_id = session.id
         else:
-            session = await self.chat_repo.get_session(session_id, user_id=user.id)
+            session, _ = await self.chat_repo.get_session(session_id, user_id=user.id)
             if not session:
                 raise HTTPException(status_code=404, detail=f"Session {session_id} not found.")
             if not session.title:
