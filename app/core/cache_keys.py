@@ -11,8 +11,8 @@ class CacheKeys:
         return f"session:{session_id}:limit={limit}:offset={offset}"
 
     @staticmethod
-    def user_config(user_id: uuid.UUID | str) -> str:
-        return f"config:{user_id}"
+    def system_config() -> str:
+        return "config:system"
 
     @staticmethod
     def user_profile(user_id: uuid.UUID | str) -> str:

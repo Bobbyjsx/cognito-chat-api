@@ -149,12 +149,16 @@ class AgentService:
     async def _charge_usage(self, user: UserDB, tokens: int, config: AppConfigDB) -> bool:
         if tokens <= 0:
             return True
-        return await self.user_repo.atomic_increment_if_within_limit(
+        success = await self.user_repo.atomic_increment_if_within_limit(
             user.id,
             tokens,
             default_limit_6h=config.default_token_limit_6h,
             default_limit_weekly=config.default_token_limit_weekly,
         )
+        if success:
+            from app.core.redis import redis_cache
+            await redis_cache.delete(f"user:{user.id}")
+        return success
 
     # ── session handling ──────────────────────────────────────────────────────
 

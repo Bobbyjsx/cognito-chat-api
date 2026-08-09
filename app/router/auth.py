@@ -58,8 +58,19 @@ async def get_my_profile(
     current_user=Depends(get_current_user),
     config_repo: ConfigRepository = Depends(get_config_repo),
 ):
+    from app.core.redis import redis_cache
+    from app.core.cache_keys import CacheKeys
+    
+    cache_key = CacheKeys.user_profile(current_user.id)
+    cached_data = await redis_cache.get(cache_key)
+    if cached_data:
+        return cached_data
+
     config = await config_repo.get_config()
-    return QuotaService.build_user_response(current_user, config)
+    response = QuotaService.build_user_response(current_user, config)
+    
+    await redis_cache.set(cache_key, response.model_dump(mode="json"), expire=300)
+    return response
 
 
 @router.post("/refresh", response_model=TokenResponse)
