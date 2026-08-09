@@ -14,9 +14,6 @@ class RedisCache:
 
     async def connect(self):
         if not self.redis_client:
-            # Prefer UPSTASH_REDIS_REST_URL logic if standard redis_url isn't used,
-            # but Upstash also provides a standard redis:// URL which fits the python redis client best.
-            # We assume settings.redis_url holds the standard redis:// or rediss:// connection string.
             if settings.redis_url:
                 try:
                     self.redis_client = redis.from_url(settings.redis_url, decode_responses=True)

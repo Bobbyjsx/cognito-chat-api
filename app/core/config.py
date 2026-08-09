@@ -31,8 +31,6 @@ class Settings(BaseSettings):
     refresh_token_expire_days: int = 7
 
     # Cache (Redis)
-    upstash_redis_rest_url: str = ""
-    upstash_redis_rest_token: str = ""
     redis_url: str = ""
 
     class Config:
