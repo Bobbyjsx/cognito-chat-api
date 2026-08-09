@@ -40,8 +40,8 @@ class ChatRepository:
 
     async def get_session(self, session_id: UUID, user_id: UUID, limit: int = 20, offset: int = 0) -> tuple[ChatSessionDB | None, bool]:
         doc_ref = self.collection.document(str(session_id))
-        from google.cloud.firestore_v1.base_query import Direction
-        messages_ref = doc_ref.collection("messages").order_by("created_at", direction=Direction.DESCENDING).offset(offset).limit(limit + 1)
+        from google.cloud import firestore
+        messages_ref = doc_ref.collection("messages").order_by("created_at", direction=firestore.Query.DESCENDING).offset(offset).limit(limit + 1)
 
         doc = await doc_ref.get()
         if not doc.exists:
