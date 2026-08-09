@@ -1,5 +1,8 @@
 from contextlib import asynccontextmanager
 
+import asyncio
+from datetime import datetime, timedelta, timezone
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -8,6 +11,30 @@ from app.database import create_db_client, init_db
 from app.providers.gemini import GeminiProvider
 from app.router import attachments, auth, chats, config, stt
 from app.tools.registry import ToolRegistry
+from app.repositories.attachments import AttachmentRepository
+from app.services.attachments import AttachmentService
+from app.api.dependencies import get_storage_backend
+
+
+async def _cleanup_loop(app: FastAPI):
+    while True:
+        try:
+            # We cleanup attachments older than 24 hours
+            before = datetime.now(timezone.utc) - timedelta(hours=24)
+            db = app.state.db_client
+            provider = app.state.provider
+            storage = get_storage_backend()
+            repo = AttachmentRepository(db)
+            service = AttachmentService(repo, storage, provider)
+            count = await service.cleanup_abandoned_temporary(before)
+            if count > 0:
+                print(f"Cleaned up {count} abandoned temporary attachments.")
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"Error during attachment cleanup: {e}")
+            
+        await asyncio.sleep(3600)  # Run every hour
 
 
 @asynccontextmanager
@@ -18,7 +45,12 @@ async def lifespan(app: FastAPI):
     registry = ToolRegistry()
     registry.register_defaults()
     app.state.tool_registry = registry
+    
+    cleanup_task = asyncio.create_task(_cleanup_loop(app))
+    
     yield
+    cleanup_task.cancel()
+
 
 
 app = FastAPI(

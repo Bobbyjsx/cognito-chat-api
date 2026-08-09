@@ -26,6 +26,18 @@ class ChatRepository:
         doc_ref = self.collection.document(str(session_id))
         await doc_ref.update({"title": title})
 
+    async def session_exists(self, session_id: UUID, user_id: UUID) -> bool:
+        doc_ref = self.collection.document(str(session_id))
+        doc = await doc_ref.get()
+        if not doc.exists:
+            return False
+        data = doc.to_dict()
+        if data.get("user_id") != str(user_id):
+            return False
+        if data.get("is_deleted") is True:
+            return False
+        return True
+
     async def get_session(self, session_id: UUID, user_id: UUID) -> ChatSessionDB | None:
         doc_ref = self.collection.document(str(session_id))
         messages_ref = doc_ref.collection("messages").order_by("created_at")

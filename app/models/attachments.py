@@ -41,6 +41,7 @@ class AttachmentMetadata(BaseModel):
     # Cache of the provider-side file URI (Gemini Files API) so large media is
     # uploaded only once per attachment.
     gemini_file_uri: str | None = None
+    is_temporary: bool = True
     uploaded_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -54,4 +55,5 @@ class AttachmentSchema(BaseModel):
     type: AttachmentType
     session_id: UUID | None = None
     storage_uri: str | None = None
+    is_temporary: bool = True
     uploaded_at: datetime

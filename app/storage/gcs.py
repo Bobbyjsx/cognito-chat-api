@@ -6,6 +6,7 @@ the dependency (or without credentials) can still use the local backend.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from app.storage.base import StorageBackend
@@ -24,16 +25,11 @@ class GCSStorageBackend(StorageBackend):
     def __init__(self, bucket_name: str, client=None):
         if not bucket_name:
             raise ValueError("GCSStorageBackend requires a bucket name (STORAGE_BUCKET).")
-        from google.cloud.storage.async_client import AsyncClient
+        from google.cloud.storage import Client
 
         self.bucket_name = bucket_name
-        self._client = client or AsyncClient()
-        self._bucket = None
-
-    async def _get_bucket(self):
-        if self._bucket is None:
-            self._bucket = await self._client.bucket(self.bucket_name)
-        return self._bucket
+        self._client = client or Client()
+        self._bucket = self._client.bucket(self.bucket_name)
 
     @staticmethod
     def _key_from_uri(uri: str) -> str:
@@ -42,18 +38,53 @@ class GCSStorageBackend(StorageBackend):
         return uri
 
     async def upload_bytes(self, key: str, data: bytes, content_type: str) -> str:
-        bucket = await self._get_bucket()
-        blob = bucket.blob(key)
-        await blob.upload_from_string(data, content_type=content_type)
+        def _upload():
+            blob = self._bucket.blob(key)
+            blob.upload_from_string(data, content_type=content_type)
+        await asyncio.to_thread(_upload)
         logger.info("Uploaded object gs://%s/%s", self.bucket_name, key)
         return f"{GCS_URI_PREFIX}{self.bucket_name}/{key}"
 
     async def read_bytes(self, uri: str) -> bytes:
-        bucket = await self._get_bucket()
-        blob = bucket.blob(self._key_from_uri(uri))
-        return await blob.download_as_bytes()
+        def _download():
+            from google.cloud.exceptions import NotFound
+            blob = self._bucket.blob(self._key_from_uri(uri))
+            try:
+                return blob.download_as_bytes()
+            except NotFound:
+                # Fallback to permanent path if temp fails
+                if "/temp/" in uri:
+                    perm_uri = uri.replace("/temp/", "/")
+                    perm_blob = self._bucket.blob(self._key_from_uri(perm_uri))
+                    try:
+                        return perm_blob.download_as_bytes()
+                    except NotFound:
+                        pass
+                raise ValueError("Object not found in GCS")
+                
+        try:
+            return await asyncio.to_thread(_download)
+        except ValueError:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="Attachment content not found in storage.")
 
     async def delete(self, uri: str) -> None:
-        bucket = await self._get_bucket()
-        blob = bucket.blob(self._key_from_uri(uri))
-        await blob.delete()
+        def _delete():
+            blob = self._bucket.blob(self._key_from_uri(uri))
+            try:
+                blob.delete()
+            except Exception as e:
+                logger.warning(f"Delete failed for {uri}: {e}")
+        await asyncio.to_thread(_delete)
+
+    async def move(self, old_uri: str, new_key: str) -> str:
+        old_key = self._key_from_uri(old_uri)
+        
+        def _move():
+            source_blob = self._bucket.blob(old_key)
+            self._bucket.copy_blob(source_blob, self._bucket, new_key)
+            source_blob.delete()
+            
+        await asyncio.to_thread(_move)
+        logger.info("Moved object gs://%s/%s to %s", self.bucket_name, old_key, new_key)
+        return f"{GCS_URI_PREFIX}{self.bucket_name}/{new_key}"

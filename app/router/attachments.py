@@ -40,6 +40,7 @@ def get_attachment_service(
 async def upload_attachment(
     file: UploadFile = File(..., description="File to upload"),
     session_id: uuid.UUID | None = Form(default=None, description="Optional session this attachment belongs to"),
+    is_temporary: bool = Form(default=True, description="Whether this is a temporary upload"),
     current_user: UserDB = Depends(get_current_user),
     db: AsyncClient = Depends(get_db),
     service: AttachmentService = Depends(get_attachment_service),
@@ -54,6 +55,12 @@ async def upload_attachment(
     Pass the returned ``id`` in ``attachments`` on ``POST /agent/chat`` or
     ``POST /agent/chat/stream`` to attach it to a message.
     """
+    if session_id:
+        from app.repositories.chats import ChatRepository
+
+        if not await ChatRepository(db).session_exists(session_id, current_user.id):
+            raise HTTPException(status_code=404, detail="Session not found.")
+
     data = await file.read()
     config = await ConfigRepository(db).get_config()
 
@@ -71,6 +78,7 @@ async def upload_attachment(
             content_type=file.content_type,
             data=data,
             config=config,
+            is_temporary=is_temporary,
         )
     except HTTPException:
         raise
@@ -101,6 +109,25 @@ async def get_attachment(
     if metadata is None:
         raise HTTPException(status_code=404, detail="Attachment not found")
     return AttachmentSchema.model_validate(metadata, from_attributes=True)
+
+
+from fastapi import Response
+
+
+@router.get("/attachments/{attachment_id}/content")
+async def get_attachment_content(
+    attachment_id: uuid.UUID,
+    current_user: UserDB = Depends(get_current_user),
+    db: AsyncClient = Depends(get_db),
+    service: AttachmentService = Depends(get_attachment_service),
+):
+    repo = AttachmentRepository(db)
+    metadata = await repo.get(attachment_id, current_user.id)
+    if metadata is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    
+    content = await service.read_bytes(metadata)
+    return Response(content=content, media_type=metadata.mime_type)
 
 
 @router.delete("/attachments/{attachment_id}", status_code=200)
