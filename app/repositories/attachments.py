@@ -49,18 +49,41 @@ class AttachmentRepository:
                 found[str(meta.id)] = meta
         return [found[i] for i in unique_ids if i in found]
 
-    async def list_by_user(self, user_id: UUID, session_id: UUID | None = None) -> list[AttachmentMetadata]:
+    async def list_by_user(
+        self,
+        user_id: UUID,
+        session_id: UUID | None = None,
+        type: str | None = None,
+        limit: int = 20,
+        offset: int = 0
+    ) -> tuple[list[AttachmentMetadata], bool, int]:
+        from google.cloud import firestore
+        
         query = self.collection.where(filter=FieldFilter("user_id", "==", str(user_id)))
         if session_id is not None:
             query = query.where(filter=FieldFilter("session_id", "==", str(session_id)))
+        if type is not None:
+            query = query.where(filter=FieldFilter("type", "==", type))
+            
+        # For total count
+        count_query = query.count()
+        total_results = await count_query.get()
+        total = total_results[0][0].value if total_results else 0
+        
+        query = query.order_by("uploaded_at", direction=firestore.Query.DESCENDING)
+        query = query.offset(offset).limit(limit + 1)
             
         results: list[AttachmentMetadata] = []
         async for doc in query.stream():
             data = doc.to_dict()
             meta = AttachmentMetadata(**data)
             results.append(meta)
+        has_more = len(results) > limit
+        if has_more:
+            results.pop()
+        
         results.sort(key=lambda m: m.uploaded_at, reverse=True)
-        return results
+        return results, has_more, total
 
     async def list_abandoned_temporary(self, before: datetime) -> list[AttachmentMetadata]:
         query = self.collection.where(filter=FieldFilter("is_temporary", "==", True))

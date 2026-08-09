@@ -87,15 +87,27 @@ async def upload_attachment(
         raise HTTPException(status_code=500, detail="An unexpected error occurred.") from None
 
 
-@router.get("/attachments", response_model=list[AttachmentSchema])
+from app.models.pagination import PaginatedResponse
+
+@router.get("/attachments", response_model=PaginatedResponse[AttachmentSchema])
 async def list_attachments(
     session_id: uuid.UUID | None = None,
+    type: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
     current_user: UserDB = Depends(get_current_user),
     db: AsyncClient = Depends(get_db),
 ):
     repo = AttachmentRepository(db)
-    metadata = await repo.list_by_user(current_user.id, session_id)
-    return [AttachmentSchema.model_validate(m, from_attributes=True) for m in metadata]
+    metadata, has_more, total = await repo.list_by_user(current_user.id, session_id, type, limit, offset)
+    items = [AttachmentSchema.model_validate(m, from_attributes=True) for m in metadata]
+    return PaginatedResponse(
+        items=items,
+        total=total,
+        limit=limit,
+        offset=offset,
+        has_more=has_more
+    )
 
 
 @router.get("/attachments/{attachment_id}", response_model=AttachmentSchema)

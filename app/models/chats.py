@@ -1,7 +1,13 @@
 from datetime import datetime, timezone
+from enum import Enum
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
+
+
+class ReadStatus(str, Enum):
+    READ = "read"
+    UNREAD = "unread"
 
 
 class ChatMessageDB(BaseModel):
