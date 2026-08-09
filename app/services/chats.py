@@ -213,6 +213,10 @@ class AgentService:
         for attachment in attachments:
             if attachment.session_id is None and session_id is not None:
                 await self.attachment_service.bind_session(attachment, session_id)
+
+        if attachment_ids:
+            await self.attachment_service.make_permanent(user.id, attachment_ids)
+
         return attachments
 
     async def _prepare_current_parts(

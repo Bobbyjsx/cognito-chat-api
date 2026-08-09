@@ -20,3 +20,7 @@ class StorageBackend(ABC):
     @abstractmethod
     async def delete(self, uri: str) -> None:
         """Remove the object at ``uri`` (no-op if it does not exist)."""
+
+    @abstractmethod
+    async def move(self, old_uri: str, new_key: str) -> str:
+        """Move the object at ``old_uri`` to ``new_key`` and return the new URI."""

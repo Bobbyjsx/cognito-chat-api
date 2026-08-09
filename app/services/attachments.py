@@ -13,6 +13,7 @@ import io
 import logging
 import re
 import zipfile
+from datetime import datetime
 from uuid import UUID
 from xml.etree import ElementTree
 
@@ -53,6 +54,7 @@ class AttachmentService:
         content_type: str | None,
         data: bytes,
         config: AppConfigDB,
+        is_temporary: bool = True,
     ) -> AttachmentSchema:
         if not config.enable_attachments:
             raise HTTPException(status_code=403, detail="Attachments are currently disabled by admin.")
@@ -78,7 +80,8 @@ class AttachmentService:
                 ),
             )
 
-        key = f"attachments/{user.id}/{attachment_type.value}/{filename}"
+        key_prefix = "attachments/temp" if is_temporary else "attachments"
+        key = f"{key_prefix}/{user.id}/{attachment_type.value}/{filename}"
         storage_uri = await self.storage.upload_bytes(key, data, mime)
 
         metadata = AttachmentMetadata(
@@ -89,6 +92,7 @@ class AttachmentService:
             size=size,
             storage_uri=storage_uri,
             type=attachment_type,
+            is_temporary=is_temporary,
         )
         await self.repo.create(metadata)
         logger.info(
@@ -112,6 +116,24 @@ class AttachmentService:
         if metadata.session_id is None or str(metadata.session_id) != str(session_id):
             metadata.session_id = session_id
             await self.repo.update_session(metadata.id, session_id)
+
+    async def make_permanent(self, user_id: UUID, ids: list[UUID]) -> None:
+        """Mark a list of attachments as permanent (is_temporary = False) and move them out of temp."""
+        if not ids:
+            return
+        attachments = await self.resolve_many(user_id, ids)
+        for metadata in attachments:
+            if metadata.is_temporary:
+                if metadata.storage_uri and "temp/" in metadata.storage_uri:
+                    try:
+                        new_key = f"attachments/{user_id}/{metadata.type.value}/{metadata.filename}"
+                        new_uri = await self.storage.move(metadata.storage_uri, new_key)
+                        metadata.storage_uri = new_uri
+                        await self.repo.update_storage_uri(metadata.id, new_uri)
+                    except Exception:
+                        logger.exception("Failed to move attachment %s out of temp", metadata.id)
+                metadata.is_temporary = False
+                await self.repo.update_temporary_flag(metadata.id, False)
 
     async def read_bytes(self, metadata: AttachmentMetadata) -> bytes:
         if not metadata.storage_uri:
@@ -153,7 +175,31 @@ class AttachmentService:
         await self.repo.delete(attachment_id)
         return True
 
-    # ── text extraction ───────────────────────────────────────────────────────
+    async def cleanup_abandoned_temporary(self, before: datetime) -> int:
+        """Find and delete all temporary attachments older than the specified datetime."""
+        abandoned = await self.repo.list_abandoned_temporary(before)
+        count = 0
+        for meta in abandoned:
+            # Delete from storage
+            if meta.storage_uri:
+                try:
+                    await self.storage.delete(meta.storage_uri)
+                except Exception:
+                    logger.exception(f"Failed to delete {meta.storage_uri} from storage during cleanup")
+            
+            # Delete from gemini if applicable
+            if meta.gemini_file_uri:
+                try:
+                    await self.provider.delete_file(meta.gemini_file_uri)
+                except Exception:
+                    logger.exception(f"Failed to delete {meta.gemini_file_uri} from gemini during cleanup")
+                    
+            await self.repo.delete(meta.id)
+            count += 1
+            
+        return count
+
+    # ── content access ────────────────────────────────────────────────────────
 
     def _extract_text(self, metadata: AttachmentMetadata, data: bytes) -> str:
         try:

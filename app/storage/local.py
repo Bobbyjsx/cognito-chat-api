@@ -48,3 +48,13 @@ class LocalStorageBackend(StorageBackend):
         if path.exists():
             path.unlink()
             logger.info("Deleted local object %s", uri)
+
+    async def move(self, old_uri: str, new_key: str) -> str:
+        old_path = self._path_for(old_uri)
+        if not old_path.exists():
+            raise FileNotFoundError(f"Object not found: {old_uri}")
+        new_path = self._path_for(new_key)
+        new_path.parent.mkdir(parents=True, exist_ok=True)
+        old_path.rename(new_path)
+        logger.info("Moved local object %s to %s", old_uri, new_key)
+        return f"{LOCAL_URI_PREFIX}{new_key}"
