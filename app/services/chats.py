@@ -374,6 +374,10 @@ class AgentService:
                 status_code=429, detail="Token limit exceeded after generation. Please upgrade your plan."
             )
 
+        from app.core.redis import redis_cache
+        await redis_cache.delete_by_prefix(f"sessions:{user.id}")
+        await redis_cache.delete_by_prefix(f"session:{session_id}")
+
         return ChatResponse(session_id=session_id, title=title, response=result.text)
 
     # ── streaming ─────────────────────────────────────────────────────────────
@@ -457,6 +461,10 @@ class AgentService:
         if not within_limit:
             yield self._error_event("Token limit exceeded after generation. Please upgrade your plan.")
             return
+
+        from app.core.redis import redis_cache
+        await redis_cache.delete_by_prefix(f"sessions:{user.id}")
+        await redis_cache.delete_by_prefix(f"session:{session_id}")
 
         yield (
             "event: done\n"
