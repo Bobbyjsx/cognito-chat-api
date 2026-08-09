@@ -13,6 +13,7 @@ from app.api.dependencies import (
 )
 from app.database import get_db
 from app.models.chats import ChatRequest, ChatResponse, ChatSessionListSchema, ChatSessionSchema
+from app.models.pagination import PaginatedResponse
 from app.models.users import UserDB
 from app.providers.base import BaseProvider
 from app.repositories.attachments import AttachmentRepository
@@ -102,32 +103,47 @@ async def stream_chat_with_agent(
     )
 
 
-@router.get("/sessions", response_model=list[ChatSessionListSchema])
+@router.get("/sessions", response_model=PaginatedResponse[ChatSessionListSchema])
 async def list_sessions(
     q: str | None = None,
+    limit: int = 10,
+    offset: int = 0,
     current_user: UserDB = Depends(get_current_user),
     db: AsyncClient = Depends(get_db),
 ):
     repo = ChatRepository(db)
-    sessions = await repo.get_user_sessions(current_user.id, search_query=q)
-    return sessions
+    sessions, has_more, total = await repo.get_user_sessions(current_user.id, search_query=q, limit=limit, offset=offset)
+    return PaginatedResponse(
+        items=sessions,
+        total=total,
+        limit=limit,
+        offset=offset,
+        has_more=has_more
+    )
 
 
-@router.get("/sessions/{session_id}", response_model=ChatSessionSchema)
+@router.get("/sessions/{session_id}", response_model=PaginatedResponse[ChatSessionSchema])
 async def get_session(
     session_id: uuid.UUID,
+    limit: int = 20,
+    offset: int = 0,
     current_user: UserDB = Depends(get_current_user),
     db: AsyncClient = Depends(get_db),
 ):
     repo = ChatRepository(db)
-    session = await repo.get_session(session_id, current_user.id)
+    session, has_more = await repo.get_session(session_id, current_user.id, limit=limit, offset=offset)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
     await repo.mark_session_read(session_id)
     session.read_status = "read"
 
-    return session
+    return PaginatedResponse(
+        items=[session],
+        limit=limit,
+        offset=offset,
+        has_more=has_more
+    )
 
 
 @router.delete("/sessions/{session_id}", status_code=200)

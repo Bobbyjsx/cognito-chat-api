@@ -38,29 +38,39 @@ class ChatRepository:
             return False
         return True
 
-    async def get_session(self, session_id: UUID, user_id: UUID) -> ChatSessionDB | None:
+    async def get_session(self, session_id: UUID, user_id: UUID, limit: int = 20, offset: int = 0) -> tuple[ChatSessionDB | None, bool]:
         doc_ref = self.collection.document(str(session_id))
-        messages_ref = doc_ref.collection("messages").order_by("created_at")
+        from google.cloud.firestore_v1.base_query import Direction
+        messages_ref = doc_ref.collection("messages").order_by("created_at", direction=Direction.DESCENDING).offset(offset).limit(limit + 1)
 
         doc = await doc_ref.get()
         if not doc.exists:
-            return None
+            return None, False
 
         data = doc.to_dict()
         if data.get("user_id") != str(user_id):
-            return None
+            return None, False
         if data.get("is_deleted") is True:
-            return None
+            return None, False
 
         session = ChatSessionDB(**data)
 
+        msgs = []
         async for msg_doc in messages_ref.stream():
             msg_data = msg_doc.to_dict()
-            session.messages.append(ChatMessageDB(**msg_data))
+            msgs.append(ChatMessageDB(**msg_data))
 
-        return session
+        has_more = len(msgs) > limit
+        if has_more:
+            msgs.pop()
 
-    async def get_user_sessions(self, user_id: UUID, search_query: str | None = None) -> list[ChatSessionDB]:
+        # Reverse back to chronological order
+        msgs.reverse()
+        session.messages = msgs
+
+        return session, has_more
+
+    async def get_user_sessions(self, user_id: UUID, search_query: str | None = None, limit: int = 10, offset: int = 0) -> tuple[list[ChatSessionDB], bool, int]:
         sessions = []
         docs = self.collection.where(filter=FieldFilter("user_id", "==", str(user_id))).stream()
         q_lower = search_query.strip().lower() if search_query and search_query.strip() else None
@@ -92,7 +102,10 @@ class ChatRepository:
             sessions.append(session)
 
         sessions.sort(key=lambda s: s.updated_at, reverse=True)
-        return sessions
+        total = len(sessions)
+        paginated_sessions = sessions[offset : offset + limit]
+        has_more = offset + limit < total
+        return paginated_sessions, has_more, total
 
     async def soft_delete_session(self, session_id: UUID, user_id: UUID) -> bool:
         try:
