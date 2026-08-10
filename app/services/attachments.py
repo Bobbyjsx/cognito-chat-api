@@ -19,6 +19,7 @@ from xml.etree import ElementTree
 
 from fastapi import HTTPException
 
+from app.core.redis import redis_cache
 from app.models.attachments import AttachmentMetadata, AttachmentSchema
 from app.models.config import AppConfigDB
 from app.models.users import UserDB
@@ -102,6 +103,7 @@ class AttachmentService:
             attachment_type.value,
             size,
         )
+        await self._invalidate_cache(user.id)
         return AttachmentSchema.model_validate(metadata, from_attributes=True)
 
     # ── reads ─────────────────────────────────────────────────────────────────
@@ -116,6 +118,7 @@ class AttachmentService:
         if metadata.session_id is None or str(metadata.session_id) != str(session_id):
             metadata.session_id = session_id
             await self.repo.update_session(metadata.id, session_id)
+            await self._invalidate_cache(metadata.user_id)
 
     async def make_permanent(self, user_id: UUID, ids: list[UUID]) -> None:
         """Mark a list of attachments as permanent (is_temporary = False) and move them out of temp."""
@@ -134,6 +137,7 @@ class AttachmentService:
                         logger.exception("Failed to move attachment %s out of temp", metadata.id)
                 metadata.is_temporary = False
                 await self.repo.update_temporary_flag(metadata.id, False)
+        await self._invalidate_cache(user_id)
 
     async def read_bytes(self, metadata: AttachmentMetadata) -> bytes:
         if not metadata.storage_uri:
@@ -173,6 +177,7 @@ class AttachmentService:
             except Exception:
                 logger.exception("Failed to delete object %s", metadata.storage_uri)
         await self.repo.delete(attachment_id)
+        await self._invalidate_cache(user_id)
         return True
 
     async def cleanup_abandoned_temporary(self, before: datetime) -> int:
@@ -198,6 +203,12 @@ class AttachmentService:
             count += 1
             
         return count
+
+    # ── cache ─────────────────────────────────────────────────────────────────
+
+    async def _invalidate_cache(self, user_id) -> None:
+        """Bust all attachment list cache entries for this user."""
+        await redis_cache.delete_by_prefix(f"attachments:{user_id}:")
 
     # ── content access ────────────────────────────────────────────────────────
 

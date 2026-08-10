@@ -54,7 +54,8 @@ class AttachmentRepository:
         user_id: UUID,
         session_id: UUID | None = None,
         type: str | None = None,
-        limit: int = 20,
+        query_string: str | None = None,
+        limit: int = 15,
         offset: int = 0
     ) -> tuple[list[AttachmentMetadata], bool, int]:
         from google.cloud import firestore
@@ -62,28 +63,36 @@ class AttachmentRepository:
         query = self.collection.where(filter=FieldFilter("user_id", "==", str(user_id)))
         if session_id is not None:
             query = query.where(filter=FieldFilter("session_id", "==", str(session_id)))
-        if type is not None:
-            query = query.where(filter=FieldFilter("type", "==", type))
             
-        # For total count
-        count_query = query.count()
-        total_results = await count_query.get()
-        total = total_results[0][0].value if total_results else 0
-        
+        # Do not use offset/limit here if we are filtering in python to avoid losing matches
         query = query.order_by("uploaded_at", direction=firestore.Query.DESCENDING)
-        query = query.offset(offset).limit(limit + 1)
             
         results: list[AttachmentMetadata] = []
         async for doc in query.stream():
             data = doc.to_dict()
             meta = AttachmentMetadata(**data)
             results.append(meta)
-        has_more = len(results) > limit
-        if has_more:
-            results.pop()
+            
+        # Python-side filtering
+        if type:
+            if type == "image":
+                results = [r for r in results if r.mime_type.startswith("image/")]
+            elif type == "document":
+                results = [r for r in results if r.mime_type.startswith("application/pdf") or r.mime_type.startswith("text/")]
+            else:
+                results = [r for r in results if r.type == type]
+                
+        if query_string:
+            q = query_string.lower()
+            results = [r for r in results if q in r.filename.lower()]
+            
+        total = len(results)
         
-        results.sort(key=lambda m: m.uploaded_at, reverse=True)
-        return results, has_more, total
+        # Paginate results
+        paginated_results = results[offset:offset + limit]
+        has_more = offset + limit < total
+        
+        return paginated_results, has_more, total
 
     async def list_abandoned_temporary(self, before: datetime) -> list[AttachmentMetadata]:
         query = self.collection.where(filter=FieldFilter("is_temporary", "==", True))

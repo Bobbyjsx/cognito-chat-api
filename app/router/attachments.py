@@ -93,21 +93,40 @@ from app.models.pagination import PaginatedResponse
 async def list_attachments(
     session_id: uuid.UUID | None = None,
     type: str | None = None,
-    limit: int = 20,
+    query: str | None = None,
+    limit: int = 15,
     offset: int = 0,
     current_user: UserDB = Depends(get_current_user),
     db: AsyncClient = Depends(get_db),
 ):
+    from app.core.cache_keys import CacheKeys
+    from app.core.redis import redis_cache
+
+    cache_key = CacheKeys.user_attachments(current_user.id, limit, offset, session_id, type, query)
+    cached_data = await redis_cache.get(cache_key)
+    if cached_data:
+        return cached_data
+
     repo = AttachmentRepository(db)
-    metadata, has_more, total = await repo.list_by_user(current_user.id, session_id, type, limit, offset)
+    metadata, has_more, total = await repo.list_by_user(
+        user_id=current_user.id,
+        session_id=session_id,
+        type=type,
+        query_string=query,
+        limit=limit,
+        offset=offset
+    )
     items = [AttachmentSchema.model_validate(m, from_attributes=True) for m in metadata]
-    return PaginatedResponse(
+    response = PaginatedResponse(
         items=items,
         total=total,
         limit=limit,
         offset=offset,
         has_more=has_more
     )
+    
+    await redis_cache.set(cache_key, response.model_dump(mode="json"), expire=300)
+    return response
 
 
 @router.get("/attachments/{attachment_id}", response_model=AttachmentSchema)
