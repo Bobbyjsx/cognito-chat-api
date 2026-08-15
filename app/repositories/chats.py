@@ -34,14 +34,20 @@ class ChatRepository:
         data = doc.to_dict()
         if data.get("user_id") != str(user_id):
             return False
-        if data.get("is_deleted") is True:
-            return False
-        return True
+        return data.get("is_deleted") is False
 
-    async def get_session(self, session_id: UUID, user_id: UUID, limit: int = 10, offset: int = 0) -> tuple[ChatSessionDB | None, bool]:
+    async def get_session(
+        self, session_id: UUID, user_id: UUID, limit: int = 10, offset: int = 0
+    ) -> tuple[ChatSessionDB | None, bool]:
         doc_ref = self.collection.document(str(session_id))
         from google.cloud import firestore
-        messages_ref = doc_ref.collection("messages").order_by("created_at", direction=firestore.Query.DESCENDING).offset(offset).limit(limit + 1)
+
+        messages_ref = (
+            doc_ref.collection("messages")
+            .order_by("created_at", direction=firestore.Query.DESCENDING)
+            .offset(offset)
+            .limit(limit + 1)
+        )
 
         doc = await doc_ref.get()
         if not doc.exists:
@@ -70,7 +76,9 @@ class ChatRepository:
 
         return session, has_more
 
-    async def get_user_sessions(self, user_id: UUID, search_query: str | None = None, limit: int = 10, offset: int = 0) -> tuple[list[ChatSessionDB], bool, int]:
+    async def get_user_sessions(
+        self, user_id: UUID, search_query: str | None = None, limit: int = 10, offset: int = 0
+    ) -> tuple[list[ChatSessionDB], bool, int]:
         sessions = []
         docs = self.collection.where(filter=FieldFilter("user_id", "==", str(user_id))).stream()
         q_lower = search_query.strip().lower() if search_query and search_query.strip() else None

@@ -10,8 +10,8 @@ router = APIRouter(prefix="/config", tags=["config"])
 
 @router.get("", response_model=AppConfigDB)
 async def get_system_config(db: AsyncClient = Depends(get_db)):
-    from app.core.redis import redis_cache
     from app.core.cache_keys import CacheKeys
+    from app.core.redis import redis_cache
 
     cache_key = CacheKeys.system_config()
     cached_data = await redis_cache.get(cache_key)

@@ -1,5 +1,6 @@
 import uuid
 
+
 class CacheKeys:
     @staticmethod
     def user_sessions(user_id: uuid.UUID | str, limit: int, offset: int, search_query: str | None = None) -> str:

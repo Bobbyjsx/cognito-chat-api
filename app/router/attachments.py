@@ -89,6 +89,7 @@ async def upload_attachment(
 
 from app.models.pagination import PaginatedResponse
 
+
 @router.get("/attachments", response_model=PaginatedResponse[AttachmentSchema])
 async def list_attachments(
     session_id: uuid.UUID | None = None,

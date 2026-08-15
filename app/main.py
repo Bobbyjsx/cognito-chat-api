@@ -1,19 +1,18 @@
-from contextlib import asynccontextmanager
-
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.dependencies import get_storage_backend
 from app.core.config import settings
 from app.database import create_db_client, init_db
 from app.providers.gemini import GeminiProvider
-from app.router import attachments, auth, chats, config, stt
-from app.tools.registry import ToolRegistry
 from app.repositories.attachments import AttachmentRepository
+from app.router import attachments, auth, chats, config, stt
 from app.services.attachments import AttachmentService
-from app.api.dependencies import get_storage_backend
+from app.tools.registry import ToolRegistry
 
 
 async def _cleanup_loop(app: FastAPI):
@@ -33,11 +32,12 @@ async def _cleanup_loop(app: FastAPI):
             break
         except Exception as e:
             print(f"Error during attachment cleanup: {e}")
-            
+
         await asyncio.sleep(3600)  # Run every hour
 
 
 from app.core.redis import redis_cache
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -47,14 +47,13 @@ async def lifespan(app: FastAPI):
     registry = ToolRegistry()
     registry.register_defaults()
     app.state.tool_registry = registry
-    
+
     await redis_cache.connect()
     cleanup_task = asyncio.create_task(_cleanup_loop(app))
-    
+
     yield
     cleanup_task.cancel()
     await redis_cache.disconnect()
-
 
 
 app = FastAPI(

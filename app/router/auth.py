@@ -58,8 +58,8 @@ async def get_my_profile(
     current_user=Depends(get_current_user),
     config_repo: ConfigRepository = Depends(get_config_repo),
 ):
-    from app.core.redis import redis_cache
     from app.core.cache_keys import CacheKeys
+    from app.core.redis import redis_cache
     
     cache_key = CacheKeys.user_profile(current_user.id)
     cached_data = await redis_cache.get(cache_key)
