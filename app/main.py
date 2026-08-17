@@ -70,9 +70,13 @@ async def add_cache_control_header(request: Request, call_next):
     response = await call_next(request)
     if request.method == "GET" and response.status_code == 200:
         if "Cache-Control" not in response.headers:
-            # Instruct the browser to cache GET requests privately for 60 seconds
-            # with stale-while-revalidate for an additional 60 seconds
-            response.headers["Cache-Control"] = "private, max-age=60, stale-while-revalidate=60"
+            path = request.url.path
+            if path.startswith("/config") or path.startswith("/health"):
+                # Cache static configuration for 5 minutes
+                response.headers["Cache-Control"] = "public, max-age=300, stale-while-revalidate=300"
+            else:
+                # Explicitly prevent caching for dynamic user data (e.g., /auth/me, /agent/sessions)
+                response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return response
 
 app.add_middleware(
