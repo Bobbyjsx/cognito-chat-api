@@ -4,7 +4,7 @@ pydantic[email]
 pydantic-settings
 google-genai
 passlib[bcrypt]
-PyJWT
+PyJWT[crypto]
 python-multipart
 firebase-admin
 google-cloud-firestore
