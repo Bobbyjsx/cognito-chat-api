@@ -30,6 +30,13 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 7
 
+    # Identity Service / OAuth Resource Server Settings
+    identity_service_url: str = "http://localhost:8002"
+    identity_issuer: str = "http://localhost:8002"
+    identity_jwks_url: str = ""
+    identity_audience: str = "application_api"
+
+
     # Cache (Redis)
     redis_url: str = ""
 

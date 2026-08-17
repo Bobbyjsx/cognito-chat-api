@@ -26,7 +26,7 @@ class ChatSessionDB(BaseModel):
     """Pydantic model representing a Chat Session document in Firestore."""
 
     id: UUID = Field(default_factory=uuid4)
-    user_id: UUID
+    user_id: UUID | str
     title: str | None = None
     is_deleted: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -59,7 +59,7 @@ class MessageSchema(BaseModel):
 
 class ChatSessionSchema(BaseModel):
     id: UUID
-    user_id: UUID
+    user_id: UUID | str
     title: str | None = None
     messages: list[MessageSchema] = Field(default_factory=list)
     created_at: datetime
@@ -71,7 +71,7 @@ class ChatSessionSchema(BaseModel):
 
 class ChatSessionListSchema(BaseModel):
     id: UUID
-    user_id: UUID
+    user_id: UUID | str
     title: str | None = None
     created_at: datetime
     updated_at: datetime

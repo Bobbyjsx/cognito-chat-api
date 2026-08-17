@@ -15,7 +15,7 @@ def _next_weekly_reset() -> datetime:
 class UserDB(BaseModel):
     """Pydantic model representing a User document in Firestore."""
 
-    id: UUID = Field(default_factory=uuid4)
+    id: UUID | str = Field(default_factory=uuid4)
     email: EmailStr
     hashed_password: str
 
@@ -47,7 +47,7 @@ class LoginRequest(BaseModel):
 
 
 class UserResponse(BaseModel):
-    id: UUID
+    id: UUID | str
     email: EmailStr
     tokens_used: int
     tokens_used_6h: int
