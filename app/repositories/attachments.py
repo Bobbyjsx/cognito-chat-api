@@ -61,6 +61,7 @@ class AttachmentRepository:
         from google.cloud import firestore
         
         query = self.collection.where(filter=FieldFilter("user_id", "==", str(user_id)))
+        query = query.where(filter=FieldFilter("is_temporary", "==", False))
         if session_id is not None:
             query = query.where(filter=FieldFilter("session_id", "==", str(session_id)))
             
