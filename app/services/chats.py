@@ -180,14 +180,14 @@ class AgentService:
 
         thinking_budget = _REASONING_BUDGETS.get(reasoning, 0)
 
-        # Smart tool filtering: ensure mutually exclusive server tools are not sent together
+        # Smart tool filtering: only attach heavy external tools (code_exec / google_search) when explicitly required
         if decision and decision.analysis:
             analysis = decision.analysis
             from app.models.config import ToolName
 
             if analysis.coding_required >= 0.4 or analysis.task_type.value == "coding":
                 allowed_tools = [t for t in cfg.allowed_tools if t != ToolName.GOOGLE_SEARCH]
-            elif analysis.web_required or analysis.task_type.value in ("general_knowledge", "analysis"):
+            elif analysis.web_required:
                 allowed_tools = [t for t in cfg.allowed_tools if t != ToolName.CODE_EXECUTION]
             else:
                 allowed_tools = [
@@ -544,22 +544,21 @@ class AgentService:
             yield self._error_event("Message is empty.")
             return
 
-        import time
-
-        t_stream_start = time.perf_counter()
+        import asyncio
 
         try:
-            t_step = time.perf_counter()
-            active_config = await self.get_active_config()
+            # 1. Concurrently fetch active config and resolve chat session
+            active_config, (session, session_id, title) = await asyncio.gather(
+                self.get_active_config(),
+                self._resolve_session(user, session_id, message_text),
+            )
             await self._quota_precheck(user, active_config)
-            logger.info("[PERF][Stream] Step 1 (Config & Quota Precheck): %.2f ms", (time.perf_counter() - t_step) * 1000.0)
 
-            t_step = time.perf_counter()
-            session, session_id, title = await self._resolve_session(user, session_id, message_text)
+            # Flush session event immediately to establish SSE connection and stream headers (< 10ms)
+            yield f"event: session\ndata: {json.dumps({'session_id': str(session_id), 'title': title})}\n\n"
+
             attachments = await self._prepare_attachments(user, active_config, attachment_ids, session_id)
-            logger.info("[PERF][Stream] Step 2 (Session & Attachments): %.2f ms", (time.perf_counter() - t_step) * 1000.0)
 
-            t_step = time.perf_counter()
             from app.ai.router.schemas import RequestContext
             from app.models.chats import MessageRole
 
@@ -579,24 +578,17 @@ class AgentService:
                 routing_mode=routing_mode,
                 context=routing_context,
             )
-            logger.info(
-                "[PERF][Stream] Step 3 (Router & Model Resolution): %.2f ms | model='%s', reasoning='%s', thinking_budget=%s",
-                (time.perf_counter() - t_step) * 1000.0,
-                model,
-                reasoning,
-                thinking_budget,
+
+            # 2. Persist user message in the background concurrently without blocking stream start
+            user_msg_task = asyncio.create_task(
+                self.chat_repo.add_message(
+                    session_id,
+                    role=MessageRole.USER,
+                    content=message_text,
+                    attachment_ids=[str(a.id) for a in attachments],
+                )
             )
 
-            t_step = time.perf_counter()
-            await self.chat_repo.add_message(
-                session_id,
-                role=MessageRole.USER,
-                content=message_text,
-                attachment_ids=[str(a.id) for a in attachments],
-            )
-            logger.info("[PERF][Stream] Step 4 (Persist User Message): %.2f ms", (time.perf_counter() - t_step) * 1000.0)
-
-            t_step = time.perf_counter()
             current_parts = await self._prepare_current_parts(message_text, attachments)
             contents = await self._build_contents(user, session, active_config, current_parts)
             generation_config = GenerationConfig(
@@ -605,7 +597,6 @@ class AgentService:
                 include_thoughts=True,
                 tool_configs=tool_configs,
             )
-            logger.info("[PERF][Stream] Step 5 (Build Contents & Config): %.2f ms", (time.perf_counter() - t_step) * 1000.0)
         except HTTPException as exc:
             yield self._error_event(str(exc.detail))
             return
@@ -614,30 +605,16 @@ class AgentService:
             yield self._error_event(f"Internal error during stream setup: {exc}")
             return
 
-        yield f"event: session\ndata: {json.dumps({'session_id': str(session_id), 'title': title})}\n\n"
-
         full_response = ""
         total_tokens = 0
-        first_token_received = False
-        t_gen_start = time.perf_counter()
 
         try:
             logger.info(
-                "[PERF][Stream] Step 6: Invoking provider generate_stream for model='%s' with %d contents",
+                "[AgentService] Invoking provider generate_stream for model='%s' with %d contents",
                 model,
                 len(contents),
             )
             async for event in self.executor.generate_stream(model, contents, generation_config):
-                if not first_token_received and (event.type in ("text", "reasoning", "tool_call")):
-                    first_token_received = True
-                    ttft_ms = (time.perf_counter() - t_gen_start) * 1000.0
-                    total_req_ms = (time.perf_counter() - t_stream_start) * 1000.0
-                    logger.info(
-                        "[PERF][Stream] Step 7 (TTFT / Time To First Token): %.2f ms from generation start | %.2f ms total request time | type=%s",
-                        ttft_ms,
-                        total_req_ms,
-                        event.type,
-                    )
                 if event.type == "text":
                     full_response += event.token or ""
                 elif event.type == "usage" and event.total_tokens:
@@ -652,35 +629,42 @@ class AgentService:
                 error_code,
                 status,
             )
-            await self.chat_repo.add_message(
-                session_id,
-                role=MessageRole.AGENT,
-                content=full_response,
-                error=f"[{error_code}] {message}",
+            await asyncio.gather(
+                user_msg_task,
+                self.chat_repo.add_message(
+                    session_id,
+                    role=MessageRole.AGENT,
+                    content=full_response,
+                    error=f"[{error_code}] {message}",
+                ),
+                return_exceptions=True,
             )
             yield self._error_event(message, error_code)
             return
 
-        t_persist = time.perf_counter()
-        await self.chat_repo.add_message(session_id, role=MessageRole.AGENT, content=full_response)
+        from app.core.redis import redis_cache
 
-        within_limit = await self._charge_usage(user, total_tokens, active_config)
+        # Concurrently ensure user message is persisted, agent response is stored, quota is charged, and cache is evicted
+        persist_results = await asyncio.gather(
+            user_msg_task,
+            self.chat_repo.add_message(session_id, role=MessageRole.AGENT, content=full_response),
+            self._charge_usage(user, total_tokens, active_config),
+            redis_cache.delete_by_prefix(f"sessions:{user.id}"),
+            redis_cache.delete_by_prefix(f"session:{session_id}"),
+            return_exceptions=True,
+        )
+
+        within_limit = persist_results[2] if isinstance(persist_results[2], bool) else True
         if not within_limit:
             yield self._error_event("Token limit exceeded after generation. Please upgrade your plan.")
             return
 
-        from app.core.redis import redis_cache
-
-        await redis_cache.delete_by_prefix(f"sessions:{user.id}")
-        await redis_cache.delete_by_prefix(f"session:{session_id}")
-
-        total_duration_ms = (time.perf_counter() - t_stream_start) * 1000.0
         logger.info(
-            "[PERF][Stream] Step 8 (Stream Completed): total_time=%.2f ms, tokens=%d, model='%s', persist_time=%.2f ms",
-            total_duration_ms,
-            total_tokens,
+            "[AgentService] Stream chat completed: session_id=%s, model='%s', tokens=%d, full_response='%s...'",
+            session_id,
             model,
-            (time.perf_counter() - t_persist) * 1000.0,
+            total_tokens,
+            full_response[:80].replace("\n", " ") if full_response else "",
         )
 
         yield (
