@@ -7,6 +7,7 @@ ignore = [
     "DTZ003",  # datetime.datetime.utcnow() used (acceptable for our simple tracking)
     "BLE001",  # Do not catch blind exception (ok for our global error handler)
     "TRY201",  # Use raise without specifying exception name (ok for FastAPI handler)
+    "E402",    # Module level import not at top of file (used for setup before imports)
 ]
 
 [tool.pytest.ini_options]

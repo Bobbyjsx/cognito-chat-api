@@ -76,6 +76,14 @@ class UserRepository:
         """Atomically increments tokens_used using a server-side transform."""
         doc_ref = self.collection.document(str(user_id))
         await doc_ref.update({"tokens_used": Increment(tokens_added)})
+        from app.core.cache_keys import CacheKeys
+        from app.core.redis import redis_cache
+
+        try:
+            await redis_cache.delete(CacheKeys.user_profile(user_id))
+            await redis_cache.delete(CacheKeys.user_auth(user_id))
+        except Exception:
+            pass
 
     async def atomic_increment_if_within_limit(
         self,
@@ -143,3 +151,11 @@ class UserRepository:
     async def update_password(self, user_id: UUID | str, hashed_password: str) -> None:
         doc_ref = self.collection.document(str(user_id))
         await doc_ref.update({"hashed_password": hashed_password})
+        from app.core.cache_keys import CacheKeys
+        from app.core.redis import redis_cache
+
+        try:
+            await redis_cache.delete(CacheKeys.user_profile(user_id))
+            await redis_cache.delete(CacheKeys.user_auth(user_id))
+        except Exception:
+            pass

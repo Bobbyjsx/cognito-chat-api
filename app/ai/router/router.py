@@ -100,7 +100,9 @@ class SmartModelRouter:
         except Exception as exc:
             err_type = type(exc).__name__
             err_msg = getattr(exc, "message", None) or str(exc) or repr(exc)
-            logger.warning("[SmartRouter] Request analysis failed (%s: %s); using baseline heuristic.", err_type, err_msg)
+            logger.warning(
+                "[SmartRouter] Request analysis failed (%s: %s); using baseline heuristic.", err_type, err_msg
+            )
             fallback = HeuristicFallbackAnalyzer()
             analysis = await fallback.analyze(message, context)
         analysis_latency_ms = (time.perf_counter() - analysis_start) * 1000.0
@@ -251,7 +253,9 @@ class SmartModelRouter:
 
         is_explicit = requested_model and requested_model not in ("auto", "smart", "default")
         if is_explicit:
-            logger.info("[SmartRouter] Explicit model '%s' requested by user. Bypassing smart routing.", requested_model)
+            logger.info(
+                "[SmartRouter] Explicit model '%s' requested by user. Bypassing smart routing.", requested_model
+            )
             fallbacks = [m for m in config.allowed_text_models if m != requested_model]
             return requested_model, fallbacks, None
 
