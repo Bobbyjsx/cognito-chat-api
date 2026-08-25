@@ -10,12 +10,13 @@ from __future__ import annotations
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
 from google.cloud.firestore_v1.async_client import AsyncClient
 
 from app.api.dependencies import get_current_user, get_provider, get_storage_backend
 from app.database import get_db
 from app.models.attachments import AttachmentSchema
+from app.models.pagination import PaginatedResponse
 from app.models.users import UserDB
 from app.providers.base import BaseProvider
 from app.repositories.attachments import AttachmentRepository
@@ -87,9 +88,6 @@ async def upload_attachment(
         raise HTTPException(status_code=500, detail="An unexpected error occurred.") from None
 
 
-from app.models.pagination import PaginatedResponse
-
-
 @router.get("/attachments", response_model=PaginatedResponse[AttachmentSchema])
 async def list_attachments(
     session_id: uuid.UUID | None = None,
@@ -130,9 +128,6 @@ async def get_attachment(
     if metadata is None:
         raise HTTPException(status_code=404, detail="Attachment not found")
     return AttachmentSchema.model_validate(metadata, from_attributes=True)
-
-
-from fastapi import Response
 
 
 @router.get("/attachments/{attachment_id}/content")

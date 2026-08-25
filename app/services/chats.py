@@ -245,9 +245,11 @@ class AgentService:
             default_limit_weekly=config.default_token_limit_weekly,
         )
         if success:
+            from app.core.cache_keys import CacheKeys
             from app.core.redis import redis_cache
 
-            await redis_cache.delete(f"user:{user.id}")
+            await redis_cache.delete(CacheKeys.user_profile(user.id))
+            await redis_cache.delete(CacheKeys.user_auth(user.id))
         return success
 
     # ── session handling ──────────────────────────────────────────────────────

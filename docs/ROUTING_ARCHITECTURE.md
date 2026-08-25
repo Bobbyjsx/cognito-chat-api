@@ -19,21 +19,21 @@ The **Smart Model Router** is an intelligent, deterministic routing subsystem th
 flowchart TD
     UserReq[User Request + Context] --> Analyzer[Request Analyzer<br/>Gemini Flash-Lite / Heuristic Fallback]
     Analyzer --> Analysis[RequestAnalysis Signals<br/>task_type, complexity, capabilities]
-    
+
     ModelCatalog[(Canonical Models Repository<br/>AppConfigDB)] --> Filter[Candidate Filter]
     Analysis --> Filter
     Policy[Active Policy<br/>fast | balanced | quality] --> Filter
-    
+
     Filter --> Eligible[Eligible Candidate Models]
     Filter --> FilteredOut[Filtered Models + Reasons]
-    
+
     Eligible --> Scorer[Deterministic Scoring Engine]
     Analysis --> Scorer
     Policy --> Scorer
-    
+
     Scorer --> Ranked[Ranked Scored Candidates<br/>+ ScoreBreakdown]
     Ranked --> Decision[Routing Decision<br/>Selected Model + Fallbacks]
-    
+
     Decision --> Orchestrator[Agent Orchestrator Execution]
     Decision --> Telemetry[Telemetry Emitter<br/>Logging / In-Memory / APM]
 ```
