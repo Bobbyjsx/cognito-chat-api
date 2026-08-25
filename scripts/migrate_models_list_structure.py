@@ -49,19 +49,14 @@ async def migrate():
 
     # ── Step 1: Build models_list, preserving any custom data in old flat fields ──
     # Start from the canonical defaults
-    new_models_list: dict = {
-        name: cfg.model_dump(mode="json")
-        for name, cfg in default_config.models_list.items()
-    }
+    new_models_list: dict = {name: cfg.model_dump(mode="json") for name, cfg in default_config.models_list.items()}
 
     # Merge any existing models_list entries (e.g. admin toggled enabled=False)
     existing_models_list = existing.get("models_list", {})
     for model_name, existing_cfg in existing_models_list.items():
         if model_name in new_models_list:
             # Preserve enabled flag and any admin overrides
-            new_models_list[model_name].update(
-                {k: v for k, v in existing_cfg.items() if k in ("enabled",)}
-            )
+            new_models_list[model_name].update({k: v for k, v in existing_cfg.items() if k in ("enabled",)})
         else:
             # Unknown model — keep it as-is so we don't lose custom additions
             print(f"  Preserving unknown custom model entry: {model_name}")
