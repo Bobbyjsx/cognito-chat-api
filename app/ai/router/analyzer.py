@@ -171,14 +171,21 @@ class HeuristicFallbackAnalyzer(BaseRequestAnalyzer):
     # Web keywords
     _WEB_KEYWORDS: ClassVar[set[str]] = {
         "latest",
-        "news",
-        "today",
+        "current news",
+        "today's news",
         "current weather",
         "who is the current",
+        "who is ",
         "stock price",
-        "recent",
-        "yesterday",
+        "recent news",
         "search the web",
+        "google search",
+        "search google",
+        "search for",
+        "web search",
+        "look up",
+        "find online",
+        "browse the web",
     }
 
     # Summarization keywords
@@ -260,6 +267,11 @@ class HeuristicFallbackAnalyzer(BaseRequestAnalyzer):
         complexity = min(1.0, max(0.1, base_complexity))
 
         # 9. Task type assignment
+        is_greeting = word_count < 15 and (
+            any(w.strip(".,!?") in ("hello", "hi", "hey", "sup", "howdy") for w in lower_text.split())
+            or any(p in lower_text for p in ("how are you", "good morning", "good evening", "what's up"))
+        )
+
         if is_coding:
             task_type = TaskType.CODING
         elif is_math:
@@ -270,10 +282,13 @@ class HeuristicFallbackAnalyzer(BaseRequestAnalyzer):
             task_type = TaskType.CREATIVE_WRITING
         elif "analyze" in lower_text or "investigate" in lower_text:
             task_type = TaskType.ANALYSIS
-        elif word_count < 15 and ("hello" in lower_text or "hi" in lower_text or "how are you" in lower_text):
+        elif web_required:
+            task_type = TaskType.GENERAL_KNOWLEDGE
+        elif is_greeting:
             task_type = TaskType.CONVERSATION
             complexity = 0.15
             reasoning_score = 0.1
+            web_required = False
         else:
             task_type = TaskType.GENERAL_KNOWLEDGE
 
@@ -400,6 +415,7 @@ class GeminiFlashLiteAnalyzer(BaseRequestAnalyzer):
                 response_mime_type="application/json",
                 response_schema=ANALYSIS_JSON_SCHEMA,
                 temperature=0.0,
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             )
 
             import asyncio
@@ -459,7 +475,7 @@ class GeminiFlashLiteAnalyzer(BaseRequestAnalyzer):
 
 
 class CompositeRequestAnalyzer(BaseRequestAnalyzer):
-    """Resilient analyzer: runs primary Flash-Lite analyzer with automatic fallback to heuristics."""
+    """Resilient analyzer: runs fast heuristics on simple prompts, and Flash-Lite on complex requests."""
 
     def __init__(
         self,
@@ -474,6 +490,28 @@ class CompositeRequestAnalyzer(BaseRequestAnalyzer):
         message: str,
         context: RequestContext | None = None,
     ) -> RequestAnalysis:
+        words = message.strip().split()
+        is_short_prompt = len(words) <= 12
+        has_complex_cues = any(
+            kw in message.lower() for kw in ("def ", "class ", "import ", "select ", "```", "{", "}")
+        )
+        has_attachments = context.has_attachments if context else False
+        is_multi_turn = (context.conversation_message_count > 3) if context else False
+
+        # Fast-path for short single-sentence definitions, queries, and conversational messages
+        if is_short_prompt and not has_complex_cues and not has_attachments and not is_multi_turn:
+            start = time.perf_counter()
+            fast_res = await self.fallback_analyzer.analyze(message, context)
+            latency_ms = (time.perf_counter() - start) * 1000.0
+            logger.info(
+                "[SmartRouter][Analyzer] Fast-path heuristic analysis completed in %.2f ms | task_type=%s, complexity=%.2f, reasoning=%.2f",
+                latency_ms,
+                fast_res.task_type.value,
+                fast_res.complexity,
+                fast_res.reasoning_required,
+            )
+            return fast_res
+
         if self.primary_analyzer:
             try:
                 result = await self.primary_analyzer.analyze(message, context)
