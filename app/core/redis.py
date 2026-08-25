@@ -8,6 +8,7 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+
 class RedisCache:
     def __init__(self):
         self.redis_client = None
@@ -61,7 +62,7 @@ class RedisCache:
         if not self.redis_client:
             return
         try:
-            cursor = '0'
+            cursor = "0"
             while cursor != 0:
                 cursor, keys = await self.redis_client.scan(cursor=cursor, match=f"{prefix}*", count=100)
                 if keys:

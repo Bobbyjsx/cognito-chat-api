@@ -1,3 +1,5 @@
+import logging
+
 import jwt
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
@@ -12,6 +14,8 @@ from app.repositories.users import UserRepository
 from app.storage.base import StorageBackend
 from app.tools.registry import ToolRegistry
 
+logger = logging.getLogger(__name__)
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 _jwks_client: PyJWKClient | None = None
@@ -22,10 +26,10 @@ def get_jwks_client() -> PyJWKClient | None:
     if _jwks_client is None and settings.identity_service_url:
         jwks_url = settings.identity_jwks_url or f"{settings.identity_service_url.rstrip('/')}/.well-known/jwks.json"
         _jwks_client = PyJWKClient(
-            jwks_url, 
-            cache_jwk_set=True, 
+            jwks_url,
+            cache_jwk_set=True,
             lifespan=3600,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; cognito-chat-api)"}
+            headers={"User-Agent": "Mozilla/5.0 (compatible; cognito-chat-api)"},
         )
     return _jwks_client
 
@@ -38,6 +42,13 @@ def get_provider(request: Request) -> BaseProvider:
 def get_tool_registry(request: Request) -> ToolRegistry:
     """Return the shared tool registry (created at app startup)."""
     return request.app.state.tool_registry
+
+
+def get_smart_router(request: Request):
+    """Return the shared smart model router instance."""
+    from app.ai.router import SmartModelRouter
+
+    return getattr(request.app.state, "smart_router", None) or SmartModelRouter()
 
 
 def get_storage_backend() -> StorageBackend:
@@ -58,6 +69,10 @@ def build_storage_backend_instance() -> StorageBackend:
 
 
 async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncClient = Depends(get_db)) -> UserDB:
+    import time
+
+    auth_start = time.perf_counter()
+
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -66,6 +81,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncClient 
     payload = None
 
     # 1. Try JWKS / Identity Service token verification
+    jwks_start = time.perf_counter()
     try:
         jwk_client = get_jwks_client()
         if jwk_client:
@@ -76,8 +92,9 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncClient 
                 algorithms=["EdDSA", "RS256", "ES256", "HS256"],
                 options={"verify_aud": False},
             )
-    except Exception:
-        pass
+            logger.debug("[PERF][Auth] JWKS verification succeeded in %.2f ms", (time.perf_counter() - jwks_start) * 1000.0)
+    except Exception as exc:
+        logger.debug("[PERF][Auth] JWKS token verification bypassed in %.2f ms: %s", (time.perf_counter() - jwks_start) * 1000.0, exc)
 
     # 2. Fallback to symmetric secret key verification (local dev / tests)
     if payload is None:
@@ -97,6 +114,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncClient 
         raise credentials_exception
 
     import uuid
+
     try:
         # Normalize to standard dashed UUID string
         user_id = str(uuid.UUID(user_id))
@@ -104,28 +122,37 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncClient 
         pass
 
     # Always fetch fresh from Firestore so tokens_used reflects live state
+    db_user_start = time.perf_counter()
     user = await UserRepository(db).get_by_id(user_id)
+    logger.debug("[PERF][Auth] User DB lookup took %.2f ms", (time.perf_counter() - db_user_start) * 1000.0)
+
     if user is None:
         # Auto-provision user record in Firestore for Identity Service users
         email = payload.get("email")
         if not email and settings.identity_service_url:
             import httpx
+
             try:
-                # Need to verify exactly what the identity service URL should be. 
-                # If settings.identity_service_url is e.g. http://localhost:8002
                 me_url = f"{settings.identity_service_url.rstrip('/')}/api/v1/auth/me"
-                async with httpx.AsyncClient() as client:
+                async with httpx.AsyncClient(timeout=1.5) as client:
                     resp = await client.get(
                         me_url,
-                        headers={"Authorization": f"Bearer {token}", "User-Agent": "Mozilla/5.0 (compatible; cognito-chat-api)"}
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "User-Agent": "Mozilla/5.0 (compatible; cognito-chat-api)",
+                        },
                     )
                     if resp.status_code == 200:
                         email = resp.json().get("email")
             except Exception as e:
-                import logging
-                logging.error(f"Failed to fetch user email from identity service: {e}")
-                
-        email = email or f"{user_id}@auth.identity"
+                logger.debug("Failed to fetch user email from identity service (skipped): %s", e)
+
+        if not email:
+            import re
+
+            safe_local_part = re.sub(r"[^a-zA-Z0-9._-]", "_", str(user_id))
+            email = f"{safe_local_part}@auth.identity"
+
         new_user = UserDB(
             id=user_id,
             email=email,
@@ -133,5 +160,6 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncClient 
         )
         user = await UserRepository(db).create(new_user)
 
+    total_auth_ms = (time.perf_counter() - auth_start) * 1000.0
+    logger.info("[PERF][Auth] get_current_user completed in %.2f ms (user_id=%s)", total_auth_ms, user_id)
     return user
-

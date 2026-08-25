@@ -5,7 +5,7 @@ from uuid import UUID
 from google.cloud.firestore_v1.async_client import AsyncClient
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from app.models.chats import ChatMessageDB, ChatSessionDB
+from app.models.chats import ChatMessageDB, ChatSessionDB, MessageRole, ReadStatus
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +140,7 @@ class ChatRepository:
     async def add_message(
         self,
         session_id: UUID,
-        role: str,
+        role: MessageRole | str,
         content: str,
         error: str | None = None,
         attachment_ids: list[str] | None = None,
@@ -155,7 +155,8 @@ class ChatRepository:
         doc_ref = self.collection.document(str(session_id)).collection("messages").document(str(message_db.id))
         data = message_db.model_dump(mode="json")
 
-        read_status = "read" if role == "user" else "not read"
+        role_val = role.value if hasattr(role, "value") else str(role)
+        read_status = ReadStatus.READ if role_val == MessageRole.USER.value else ReadStatus.NOT_READ
         session_ref = self.collection.document(str(session_id))
 
         batch = self.db.batch()
@@ -165,8 +166,8 @@ class ChatRepository:
             {
                 "updated_at": datetime.now(timezone.utc).isoformat(),
                 "last_message_content": content or (error or "Error responding"),
-                "last_message_role": role,
-                "read_status": read_status,
+                "last_message_role": role_val,
+                "read_status": read_status.value,
             },
         )
         await batch.commit()
@@ -175,4 +176,4 @@ class ChatRepository:
 
     async def mark_session_read(self, session_id: UUID) -> None:
         session_ref = self.collection.document(str(session_id))
-        await session_ref.update({"read_status": "read"})
+        await session_ref.update({"read_status": ReadStatus.READ.value})

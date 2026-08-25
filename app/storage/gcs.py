@@ -34,13 +34,14 @@ class GCSStorageBackend(StorageBackend):
     @staticmethod
     def _key_from_uri(uri: str) -> str:
         if uri.startswith(GCS_URI_PREFIX):
-            return uri[len(GCS_URI_PREFIX):].split("/", 1)[1]
+            return uri[len(GCS_URI_PREFIX) :].split("/", 1)[1]
         return uri
 
     async def upload_bytes(self, key: str, data: bytes, content_type: str) -> str:
         def _upload():
             blob = self._bucket.blob(key)
             blob.upload_from_string(data, content_type=content_type)
+
         await asyncio.to_thread(_upload)
         logger.info("Uploaded object gs://%s/%s", self.bucket_name, key)
         return f"{GCS_URI_PREFIX}{self.bucket_name}/{key}"
@@ -48,6 +49,7 @@ class GCSStorageBackend(StorageBackend):
     async def read_bytes(self, uri: str) -> bytes:
         def _download():
             from google.cloud.exceptions import NotFound
+
             blob = self._bucket.blob(self._key_from_uri(uri))
             try:
                 return blob.download_as_bytes()
@@ -61,11 +63,12 @@ class GCSStorageBackend(StorageBackend):
                     except NotFound:
                         pass
                 raise ValueError("Object not found in GCS")
-                
+
         try:
             return await asyncio.to_thread(_download)
         except ValueError:
             from fastapi import HTTPException
+
             raise HTTPException(status_code=404, detail="Attachment content not found in storage.")
 
     async def delete(self, uri: str) -> None:
@@ -75,16 +78,17 @@ class GCSStorageBackend(StorageBackend):
                 blob.delete()
             except Exception as e:
                 logger.warning(f"Delete failed for {uri}: {e}")
+
         await asyncio.to_thread(_delete)
 
     async def move(self, old_uri: str, new_key: str) -> str:
         old_key = self._key_from_uri(old_uri)
-        
+
         def _move():
             source_blob = self._bucket.blob(old_key)
             self._bucket.copy_blob(source_blob, self._bucket, new_key)
             source_blob.delete()
-            
+
         await asyncio.to_thread(_move)
         logger.info("Moved object gs://%s/%s to %s", self.bucket_name, old_key, new_key)
         return f"{GCS_URI_PREFIX}{self.bucket_name}/{new_key}"

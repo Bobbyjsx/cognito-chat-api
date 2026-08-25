@@ -77,12 +77,7 @@ async def test_streaming_loop_feeds_results_back():
     registry.register(EchoTool())
     executor = ToolExecutor(registry, provider)
 
-    events = [
-        e
-        async for e in executor.generate_stream(
-            "gemini-x", [ContentPart(role="user", parts=[{"text": "go"}])]
-        )
-    ]
+    events = [e async for e in executor.generate_stream("gemini-x", [ContentPart(role="user", parts=[{"text": "go"}])])]
 
     assert [e.type for e in events] == ["tool_call", "tool_result", "text"]
 
@@ -92,9 +87,7 @@ async def test_streaming_loop_feeds_results_back():
     # Round 2 contents must contain the function_call + function_response parts
     round_two = provider.rounds[1]
     assert round_two[-2].role == "model"
-    assert round_two[-2].parts == [
-        {"function_call": {"id": "call_1", "name": "echo", "args": {"text": "hi"}}}
-    ]
+    assert round_two[-2].parts == [{"function_call": {"id": "call_1", "name": "echo", "args": {"text": "hi"}}}]
     assert round_two[-1].role == "user"
     assert round_two[-1].parts == [
         {"function_response": {"id": "call_1", "name": "echo", "response": {"echoed": "hi"}}}
@@ -157,10 +150,7 @@ async def test_max_iterations_guard_raises():
     registry = ToolRegistry()
     registry.register(EchoTool())
     always_calls = FakeProvider(
-        [
-            GenerationResult(text="", total_tokens=0, tool_calls=[_echo_call().tool_call])
-            for _ in range(10)
-        ]
+        [GenerationResult(text="", total_tokens=0, tool_calls=[_echo_call().tool_call]) for _ in range(10)]
     )
     executor = ToolExecutor(registry, always_calls, max_iterations=2)
 

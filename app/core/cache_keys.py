@@ -8,7 +8,14 @@ class CacheKeys:
         return f"sessions:{user_id}:limit={limit}:offset={offset}:q={q}"
 
     @staticmethod
-    def user_attachments(user_id: uuid.UUID | str, limit: int, offset: int, session_id: uuid.UUID | str | None = None, type_filter: str | None = None, search_query: str | None = None) -> str:
+    def user_attachments(
+        user_id: uuid.UUID | str,
+        limit: int,
+        offset: int,
+        session_id: uuid.UUID | str | None = None,
+        type_filter: str | None = None,
+        search_query: str | None = None,
+    ) -> str:
         s = session_id or "all"
         t = type_filter or "all"
         q = search_query.strip().lower() if search_query and search_query.strip() else ""
