@@ -5,9 +5,18 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field
 
 
+class MessageRole(str, Enum):
+    """Supported roles in a chat conversation."""
+
+    USER = "user"
+    AGENT = "agent"
+    SYSTEM = "system"
+    TOOL = "tool"
+
+
 class ReadStatus(str, Enum):
     READ = "read"
-    UNREAD = "unread"
+    NOT_READ = "not read"
 
 
 class ChatMessageDB(BaseModel):
@@ -15,7 +24,7 @@ class ChatMessageDB(BaseModel):
 
     id: UUID = Field(default_factory=uuid4)
     session_id: UUID
-    role: str
+    role: MessageRole = MessageRole.USER
     content: str
     error: str | None = None
     attachment_ids: list[str] = Field(default_factory=list)
@@ -32,8 +41,8 @@ class ChatSessionDB(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_message_content: str | None = None
-    last_message_role: str | None = None
-    read_status: str = "read"
+    last_message_role: MessageRole | None = None
+    read_status: ReadStatus = ReadStatus.READ
     messages: list[ChatMessageDB] = Field(default_factory=list)
 
 
@@ -41,6 +50,7 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=32_000)
     model: str | None = None
     reasoning: str | None = None
+    routing_mode: str | None = None
     attachments: list[UUID] = Field(default_factory=list)
 
 
@@ -48,10 +58,12 @@ class ChatResponse(BaseModel):
     session_id: UUID
     title: str | None = None
     response: str
+    model: str | None = None
+    reasoning: str | None = None
 
 
 class MessageSchema(BaseModel):
-    role: str
+    role: MessageRole
     content: str
     error: str | None = None
     attachment_ids: list[str] = Field(default_factory=list)

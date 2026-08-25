@@ -16,7 +16,7 @@ class UserDB(BaseModel):
     """Pydantic model representing a User document in Firestore."""
 
     id: UUID | str = Field(default_factory=uuid4)
-    email: EmailStr
+    email: str
     hashed_password: str
 
     # Lifetime / all-time cumulative tokens used across account history
@@ -48,7 +48,7 @@ class LoginRequest(BaseModel):
 
 class UserResponse(BaseModel):
     id: UUID | str
-    email: EmailStr
+    email: str
     tokens_used: int
     tokens_used_6h: int
     token_limit_6h: int

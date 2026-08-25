@@ -1,17 +1,95 @@
 from datetime import datetime, timezone
+from enum import Enum
 
 from pydantic import BaseModel, Field, computed_field
 
+from app.models.attachments import AttachmentType
+
+
+class ReasoningLevel(str, Enum):
+    """Supported model thinking / reasoning effort levels."""
+
+    NONE = "none"
+    MINIMAL = "minimal"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class ModelProvider(str, Enum):
+    """Supported AI model providers."""
+
+    GOOGLE = "google"
+    OPENAI = "openai"
+    ANTHROPIC = "anthropic"
+    MISTRAL = "mistral"
+    META = "meta"
+    OTHER = "other"
+
+
+class ModelStatus(str, Enum):
+    """Operational lifecycle status of a model."""
+
+    ACTIVE = "active"
+    DISABLED = "disabled"
+    TEMPORARILY_UNAVAILABLE = "temporarily_unavailable"
+    DEPRECATED = "deprecated"
+
+
+class RoutingMode(str, Enum):
+    """Routing optimization strategy modes."""
+
+    FAST = "fast"
+    BALANCED = "balanced"
+    QUALITY = "quality"
+    CUSTOM = "custom"
+
+
+class ToolName(str, Enum):
+    """Available runtime tools."""
+
+    GOOGLE_SEARCH = "google_search"
+    CODE_EXECUTION = "code_execution"
+
 
 class TextModelConfig(BaseModel):
-    """Configuration for a single text model."""
+    """Configuration and routing metadata for a single text model."""
 
     description: str
     enabled: bool = True
     # Reasoning modes this model supports. Must be a subset of the global
     # allowed_reasoning_levels. If a level appears here but NOT in the
     # global list, the global list takes precedence (it won't be offered).
-    reasoning_modes: list[str]
+    reasoning_modes: list[ReasoningLevel]
+
+    # ── Routing Scores (Scale: 0.0 - 1.0) ─────────────────────────────────────
+    complexity_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    reasoning_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    coding_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    creative_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    context_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    vision_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    tool_calling_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    structured_output_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    speed_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    quality_score: float = Field(default=0.5, ge=0.0, le=1.0)
+
+    # ── Economics & Limits ───────────────────────────────────────────────────
+    input_cost_per_million: float = Field(default=0.10, ge=0.0)
+    output_cost_per_million: float = Field(default=0.40, ge=0.0)
+    context_window_tokens: int = Field(default=1_000_000, ge=1)
+
+    # ── Modality & Feature Capabilities ───────────────────────────────────────
+    supports_vision: bool = True
+    supports_tools: bool = True
+    supports_structured_output: bool = True
+    supports_audio: bool = False
+    supports_web_search: bool = True
+    supports_code_execution: bool = True
+
+    # ── Operational State ────────────────────────────────────────────────────
+    provider: ModelProvider = ModelProvider.GOOGLE
+    status: ModelStatus = ModelStatus.ACTIVE
 
 
 class AppConfigDB(BaseModel):
@@ -35,51 +113,207 @@ class AppConfigDB(BaseModel):
     # Cheaper flash-lite tiers (e.g. gemini-2.0-flash-lite) do NOT support audio.
     stt_model: str = "gemini-3.1-flash-lite"
 
+    # ── Smart Model Router Config ─────────────────────────────────────────────
+    enable_smart_routing: bool = True
+    router_model: str = "gemini-3.1-flash-lite"
+    default_routing_mode: RoutingMode = RoutingMode.BALANCED
+
     # ── Reasoning (Global Source of Truth) ────────────────────────────────────
     # If a mode is listed on a model but NOT here, it is silently ignored.
-    allowed_reasoning_levels: list[str] = Field(
-        default_factory=lambda: ["none", "minimal", "low", "medium", "high"]
+    allowed_reasoning_levels: list[ReasoningLevel] = Field(
+        default_factory=lambda: [
+            ReasoningLevel.NONE,
+            ReasoningLevel.MINIMAL,
+            ReasoningLevel.LOW,
+            ReasoningLevel.MEDIUM,
+            ReasoningLevel.HIGH,
+        ]
     )
-    default_reasoning_level: str = "medium"
+    default_reasoning_level: ReasoningLevel = ReasoningLevel.MEDIUM
     default_text_model: str = "gemini-3.6-flash"
 
     # ── Structured Text Models ─────────────────────────────────────────────────
-    # Single source of truth for model availability, descriptions, and
-    # per-model reasoning support.  Replaces the old flat lists:
-    #   - allowed_text_models  → derived as [k for k,v in models_list if v.enabled]
-    #   - model_reasoning_modes → moved into each model's reasoning_modes field
-    #   - model_descriptions    → moved into each model's description field
+    # Single source of truth for model availability, descriptions, capabilities,
+    # and routing parameters.
     models_list: dict[str, TextModelConfig] = Field(
         default_factory=lambda: {
             "gemini-3.6-flash": TextModelConfig(
                 description="Latest Flash model with full thinking support and highest intelligence",
                 enabled=True,
-                reasoning_modes=["none", "minimal", "low", "medium", "high"],
+                reasoning_modes=[
+                    ReasoningLevel.NONE,
+                    ReasoningLevel.MINIMAL,
+                    ReasoningLevel.LOW,
+                    ReasoningLevel.MEDIUM,
+                    ReasoningLevel.HIGH,
+                ],
+                complexity_score=0.85,
+                reasoning_score=0.88,
+                coding_score=0.88,
+                creative_score=0.85,
+                context_score=0.90,
+                vision_score=0.90,
+                tool_calling_score=0.92,
+                structured_output_score=0.90,
+                speed_score=0.85,
+                quality_score=0.88,
+                input_cost_per_million=0.15,
+                output_cost_per_million=0.60,
+                context_window_tokens=1_000_000,
+                supports_vision=True,
+                supports_tools=True,
+                supports_structured_output=True,
+                supports_audio=True,
+                supports_web_search=True,
+                supports_code_execution=True,
+                provider=ModelProvider.GOOGLE,
+                status=ModelStatus.ACTIVE,
             ),
             "gemini-3.5-flash": TextModelConfig(
                 description="Fast and capable model with thinking modes for complex tasks",
                 enabled=True,
-                reasoning_modes=["none", "low", "medium", "high"],
+                reasoning_modes=[
+                    ReasoningLevel.NONE,
+                    ReasoningLevel.LOW,
+                    ReasoningLevel.MEDIUM,
+                    ReasoningLevel.HIGH,
+                ],
+                complexity_score=0.75,
+                reasoning_score=0.75,
+                coding_score=0.78,
+                creative_score=0.80,
+                context_score=0.85,
+                vision_score=0.85,
+                tool_calling_score=0.85,
+                structured_output_score=0.85,
+                speed_score=0.90,
+                quality_score=0.80,
+                input_cost_per_million=0.075,
+                output_cost_per_million=0.30,
+                context_window_tokens=1_000_000,
+                supports_vision=True,
+                supports_tools=True,
+                supports_structured_output=True,
+                supports_audio=True,
+                supports_web_search=True,
+                supports_code_execution=True,
+                provider=ModelProvider.GOOGLE,
+                status=ModelStatus.ACTIVE,
             ),
             "gemini-3.5-flash-lite": TextModelConfig(
                 description="Ultra-fast lightweight model, best for simple and quick queries",
                 enabled=True,
-                reasoning_modes=["none", "minimal"],
+                reasoning_modes=[ReasoningLevel.NONE, ReasoningLevel.MINIMAL],
+                complexity_score=0.40,
+                reasoning_score=0.35,
+                coding_score=0.50,
+                creative_score=0.50,
+                context_score=0.80,
+                vision_score=0.80,
+                tool_calling_score=0.80,
+                structured_output_score=0.80,
+                speed_score=0.98,
+                quality_score=0.65,
+                input_cost_per_million=0.0375,
+                output_cost_per_million=0.15,
+                context_window_tokens=1_000_000,
+                supports_vision=True,
+                supports_tools=True,
+                supports_structured_output=True,
+                supports_audio=False,
+                supports_web_search=True,
+                supports_code_execution=True,
+                provider=ModelProvider.GOOGLE,
+                status=ModelStatus.ACTIVE,
             ),
             "gemini-3.1-pro-preview": TextModelConfig(
                 description="Advanced Pro model with deep reasoning for complex code and analysis",
                 enabled=True,
-                reasoning_modes=["none", "minimal", "low", "medium", "high"],
+                reasoning_modes=[
+                    ReasoningLevel.NONE,
+                    ReasoningLevel.MINIMAL,
+                    ReasoningLevel.LOW,
+                    ReasoningLevel.MEDIUM,
+                    ReasoningLevel.HIGH,
+                ],
+                complexity_score=0.95,
+                reasoning_score=0.98,
+                coding_score=0.95,
+                creative_score=0.92,
+                context_score=0.98,
+                vision_score=0.95,
+                tool_calling_score=0.95,
+                structured_output_score=0.95,
+                speed_score=0.60,
+                quality_score=0.98,
+                input_cost_per_million=1.25,
+                output_cost_per_million=5.00,
+                context_window_tokens=2_000_000,
+                supports_vision=True,
+                supports_tools=True,
+                supports_structured_output=True,
+                supports_audio=True,
+                supports_web_search=True,
+                supports_code_execution=True,
+                provider=ModelProvider.GOOGLE,
+                status=ModelStatus.ACTIVE,
             ),
             "gemini-3.1-flash-lite": TextModelConfig(
                 description="Minimal-latency compact model, no thinking overhead",
                 enabled=True,
-                reasoning_modes=["none"],
+                reasoning_modes=[ReasoningLevel.NONE],
+                complexity_score=0.25,
+                reasoning_score=0.20,
+                coding_score=0.35,
+                creative_score=0.40,
+                context_score=0.80,
+                vision_score=0.80,
+                tool_calling_score=0.75,
+                structured_output_score=0.75,
+                speed_score=1.00,
+                quality_score=0.55,
+                input_cost_per_million=0.025,
+                output_cost_per_million=0.10,
+                context_window_tokens=1_000_000,
+                supports_vision=True,
+                supports_tools=True,
+                supports_structured_output=True,
+                supports_audio=True,
+                supports_web_search=True,
+                supports_code_execution=True,
+                provider=ModelProvider.GOOGLE,
+                status=ModelStatus.ACTIVE,
             ),
             "gemini-3-flash-preview": TextModelConfig(
                 description="Balanced preview model with reasoning options",
                 enabled=True,
-                reasoning_modes=["none", "low", "medium", "high"],
+                reasoning_modes=[
+                    ReasoningLevel.NONE,
+                    ReasoningLevel.LOW,
+                    ReasoningLevel.MEDIUM,
+                    ReasoningLevel.HIGH,
+                ],
+                complexity_score=0.70,
+                reasoning_score=0.70,
+                coding_score=0.72,
+                creative_score=0.75,
+                context_score=0.85,
+                vision_score=0.85,
+                tool_calling_score=0.82,
+                structured_output_score=0.82,
+                speed_score=0.88,
+                quality_score=0.75,
+                input_cost_per_million=0.075,
+                output_cost_per_million=0.30,
+                context_window_tokens=1_000_000,
+                supports_vision=True,
+                supports_tools=True,
+                supports_structured_output=True,
+                supports_audio=True,
+                supports_web_search=True,
+                supports_code_execution=True,
+                provider=ModelProvider.GOOGLE,
+                status=ModelStatus.ACTIVE,
             ),
         }
     )
@@ -99,7 +333,12 @@ class AppConfigDB(BaseModel):
             "veo-1.0-fast-generate-001",
         ]
     )
-    allowed_tools: list[str] = Field(default_factory=lambda: ["google_search", "code_execution"])
+    allowed_tools: list[ToolName] = Field(
+        default_factory=lambda: [
+            ToolName.GOOGLE_SEARCH,
+            ToolName.CODE_EXECUTION,
+        ]
+    )
 
     # ── Attachments ────────────────────────────────────────────────────────────
     # Master switch for the attachment pipeline (upload endpoint + parts in chat).
@@ -109,16 +348,16 @@ class AppConfigDB(BaseModel):
     # Maximum number of attachments allowed per chat message.
     attachment_max_count: int = 10
     # Attachment types allowed to be uploaded, as AttachmentType values.
-    attachment_allowed_types: list[str] = Field(
+    attachment_allowed_types: list[AttachmentType] = Field(
         default_factory=lambda: [
-            "image",
-            "pdf",
-            "document",
-            "audio",
-            "video",
-            "spreadsheet",
-            "json",
-            "text",
+            AttachmentType.image,
+            AttachmentType.pdf,
+            AttachmentType.document,
+            AttachmentType.audio,
+            AttachmentType.video,
+            AttachmentType.spreadsheet,
+            AttachmentType.json,
+            AttachmentType.text,
         ]
     )
 
