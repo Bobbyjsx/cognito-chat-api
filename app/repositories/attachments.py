@@ -56,49 +56,51 @@ class AttachmentRepository:
         type: str | None = None,
         query_string: str | None = None,
         limit: int = 15,
-        offset: int = 0
+        offset: int = 0,
     ) -> tuple[list[AttachmentMetadata], bool, int]:
         from google.cloud import firestore
-        
+
         query = self.collection.where(filter=FieldFilter("user_id", "==", str(user_id)))
         query = query.where(filter=FieldFilter("is_temporary", "==", False))
         if session_id is not None:
             query = query.where(filter=FieldFilter("session_id", "==", str(session_id)))
-            
+
         # Do not use offset/limit here if we are filtering in python to avoid losing matches
         query = query.order_by("uploaded_at", direction=firestore.Query.DESCENDING)
-            
+
         results: list[AttachmentMetadata] = []
         async for doc in query.stream():
             data = doc.to_dict()
             meta = AttachmentMetadata(**data)
             results.append(meta)
-            
+
         # Python-side filtering
         if type:
             if type == "image":
                 results = [r for r in results if r.mime_type.startswith("image/")]
             elif type == "document":
-                results = [r for r in results if r.mime_type.startswith("application/pdf") or r.mime_type.startswith("text/")]
+                results = [
+                    r for r in results if r.mime_type.startswith("application/pdf") or r.mime_type.startswith("text/")
+                ]
             else:
                 results = [r for r in results if r.type == type]
-                
+
         if query_string:
             q = query_string.lower()
             results = [r for r in results if q in r.filename.lower()]
-            
+
         total = len(results)
-        
+
         # Paginate results
-        paginated_results = results[offset:offset + limit]
+        paginated_results = results[offset : offset + limit]
         has_more = offset + limit < total
-        
+
         return paginated_results, has_more, total
 
     async def list_abandoned_temporary(self, before: datetime) -> list[AttachmentMetadata]:
         query = self.collection.where(filter=FieldFilter("is_temporary", "==", True))
         query = query.where(filter=FieldFilter("uploaded_at", "<", before))
-        
+
         results: list[AttachmentMetadata] = []
         async for doc in query.stream():
             data = doc.to_dict()

@@ -110,22 +110,11 @@ async def list_attachments(
 
     repo = AttachmentRepository(db)
     metadata, has_more, total = await repo.list_by_user(
-        user_id=current_user.id,
-        session_id=session_id,
-        type=type,
-        query_string=query,
-        limit=limit,
-        offset=offset
+        user_id=current_user.id, session_id=session_id, type=type, query_string=query, limit=limit, offset=offset
     )
     items = [AttachmentSchema.model_validate(m, from_attributes=True) for m in metadata]
-    response = PaginatedResponse(
-        items=items,
-        total=total,
-        limit=limit,
-        offset=offset,
-        has_more=has_more
-    )
-    
+    response = PaginatedResponse(items=items, total=total, limit=limit, offset=offset, has_more=has_more)
+
     await redis_cache.set(cache_key, response.model_dump(mode="json"), expire=300)
     return response
 
@@ -157,7 +146,7 @@ async def get_attachment_content(
     metadata = await repo.get(attachment_id, current_user.id)
     if metadata is None:
         raise HTTPException(status_code=404, detail="Attachment not found")
-    
+
     content = await service.read_bytes(metadata)
     return Response(content=content, media_type=metadata.mime_type)
 

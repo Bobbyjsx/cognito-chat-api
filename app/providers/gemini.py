@@ -122,16 +122,23 @@ class GeminiProvider(BaseProvider):
             config = GenerationConfig()
 
         thinking_config = None
-        if config.thinking_budget is not None:
+        if config.thinking_budget is not None and config.thinking_budget > 0:
             thinking_config = types.ThinkingConfig(
                 thinking_budget=config.thinking_budget,
                 include_thoughts=config.include_thoughts,
             )
 
+        tools = self.build_tools(config.tool_configs) if config.tool_configs else None
+
+        # Disable SDK-level Automatic Function Calling (AFC) because ToolExecutor
+        # explicitly handles tool calls, SSE event streaming, and conversational tool execution.
+        afc_config = types.AutomaticFunctionCallingConfig(disable=True) if tools else None
+
         return types.GenerateContentConfig(
             system_instruction=config.system_instruction,
             thinking_config=thinking_config,
-            tools=self.build_tools(config.tool_configs) if config.tool_configs else None,
+            tools=tools,
+            automatic_function_calling=afc_config,
         )
 
     def _extract_function_calls(self, content: Any) -> list[ToolCall]:
@@ -153,7 +160,7 @@ class GeminiProvider(BaseProvider):
     def _wrap_error(self, exc: Exception) -> Exception:
         if isinstance(exc, genai_errors.APIError):
             status = getattr(exc, "code", None) or 500
-            message = getattr(exc, "message", None) or ""
+            message = getattr(exc, "message", None) or str(exc) or ""
             if status == 404 or getattr(exc, "status", None) == "NOT_FOUND":
                 return ProviderModelNotFoundError(message or "Model not found.")
             return ProviderGenerationError(message or "Model generation failed.", status_code=int(status))
@@ -234,18 +241,34 @@ class GeminiProvider(BaseProvider):
         contents: list[ContentPart],
         config: GenerationConfig | None = None,
     ) -> AsyncIterator[GenerationEvent]:
+        import time
+
+        stream_init_start = time.perf_counter()
         try:
             stream = await self.client.aio.models.generate_content_stream(
                 model=model,
                 contents=self._to_sdk_contents(contents),
                 config=self._to_sdk_config(config),
             )
+            logger.info(
+                "[PERF][GeminiProvider] generate_content_stream initialized in %.2f ms for model='%s'",
+                (time.perf_counter() - stream_init_start) * 1000.0,
+                model,
+            )
         except _GEMINI_ERROR_HANDLED as exc:
             raise self._wrap_error(exc) from exc
 
         search_announced = False
+        first_chunk_received = False
+        chunk_wait_start = time.perf_counter()
         try:
             async for chunk in stream:
+                if not first_chunk_received:
+                    first_chunk_received = True
+                    logger.info(
+                        "[PERF][GeminiProvider] First raw chunk received from Google in %.2f ms",
+                        (time.perf_counter() - chunk_wait_start) * 1000.0,
+                    )
                 for event in self._extract_stream_events(chunk, search_announced):
                     if event.type == "tool_call" and event.tool_call and event.tool_call.name == "google_search":
                         search_announced = True
@@ -409,9 +432,7 @@ class GeminiProvider(BaseProvider):
             file_uri = await self._ensure_file_uri(attachment, data, mime_type)
             return [self._file_data_part(file_uri, mime_type)]
 
-        logger.warning(
-            "Attachment type %s not handled by provider; sending as text fallback", attachment.type
-        )
+        logger.warning("Attachment type %s not handled by provider; sending as text fallback", attachment.type)
         return [{"text": ""}]
 
     def _inline_part(self, data: bytes, mime_type: str) -> dict[str, Any]:

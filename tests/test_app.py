@@ -123,7 +123,8 @@ def test_sessions(client, mock_agent):
 
     list_resp = client.get("/agent/sessions", headers=headers)
     assert list_resp.status_code == 200
-    sessions = list_resp.json()
+    sessions_data = list_resp.json()
+    sessions = sessions_data.get("items", sessions_data) if isinstance(sessions_data, dict) else sessions_data
     assert len(sessions) > 0
 
     my_session = next(s for s in sessions if s["id"] == session_id)
@@ -136,22 +137,36 @@ def test_sessions(client, mock_agent):
     assert get_resp.status_code == 200
     session_detail = get_resp.json()
     assert "messages" in session_detail
-    assert len(session_detail["messages"]) == 2
-    assert session_detail["read_status"] == "read"
+    msgs = (
+        session_detail["messages"]["items"]
+        if isinstance(session_detail["messages"], dict)
+        else session_detail["messages"]
+    )
+    assert len(msgs) == 2
+    assert (
+        session_detail["session"]["read_status"] == "read"
+        if "session" in session_detail
+        else session_detail["read_status"] == "read"
+    )
 
     list_resp2 = client.get("/agent/sessions", headers=headers)
-    sessions2 = list_resp2.json()
+    sessions_data2 = list_resp2.json()
+    sessions2 = sessions_data2.get("items", sessions_data2) if isinstance(sessions_data2, dict) else sessions_data2
     my_session2 = next(s for s in sessions2 if s["id"] == session_id)
     assert my_session2["read_status"] == "read"
 
     client.post("/agent/chat", headers=headers, json={"message": "Second message"}, params={"session_id": session_id})
     list_resp3 = client.get("/agent/sessions", headers=headers)
-    my_session3 = next(s for s in list_resp3.json() if s["id"] == session_id)
+    sessions_data3 = list_resp3.json()
+    sessions3 = sessions_data3.get("items", sessions_data3) if isinstance(sessions_data3, dict) else sessions_data3
+    my_session3 = next(s for s in sessions3 if s["id"] == session_id)
     assert my_session3["read_status"] == "not read"
 
     read_resp = client.post(f"/agent/sessions/{session_id}/read", headers=headers)
     assert read_resp.status_code == 200
 
     list_resp4 = client.get("/agent/sessions", headers=headers)
-    my_session4 = next(s for s in list_resp4.json() if s["id"] == session_id)
+    sessions_data4 = list_resp4.json()
+    sessions4 = sessions_data4.get("items", sessions_data4) if isinstance(sessions_data4, dict) else sessions_data4
+    my_session4 = next(s for s in sessions4 if s["id"] == session_id)
     assert my_session4["read_status"] == "read"

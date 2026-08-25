@@ -1,9 +1,22 @@
 import asyncio
+import logging
+import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+
+# Initialize application root logger with INFO level so all app logs stream to stdout
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    stream=sys.stdout,
+    force=True,
+)
+
+logger = logging.getLogger(__name__)
 
 from app.api.dependencies import get_storage_backend
 from app.core.config import settings
@@ -48,6 +61,18 @@ async def lifespan(app: FastAPI):
     registry.register_defaults()
     app.state.tool_registry = registry
 
+    from app.ai.router import (
+        CompositeRequestAnalyzer,
+        GeminiFlashLiteAnalyzer,
+        HeuristicFallbackAnalyzer,
+        SmartModelRouter,
+    )
+
+    flash_analyzer = GeminiFlashLiteAnalyzer(api_key=settings.gemini_api_key)
+    heuristic_analyzer = HeuristicFallbackAnalyzer()
+    composite_analyzer = CompositeRequestAnalyzer(primary_analyzer=flash_analyzer, fallback_analyzer=heuristic_analyzer)
+    app.state.smart_router = SmartModelRouter(analyzer=composite_analyzer)
+
     await redis_cache.connect()
     cleanup_task = asyncio.create_task(_cleanup_loop(app))
 
@@ -63,16 +88,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-from fastapi import Request
 
 @app.middleware("http")
 async def add_cache_control_header(request: Request, call_next):
     response = await call_next(request)
-    if request.method == "GET" and response.status_code == 200:
-        if "Cache-Control" not in response.headers:
-            # Cache all GET requests for 60 seconds, allowing stale-while-revalidate for smooth reloads
-            response.headers["Cache-Control"] = "private, max-age=60, stale-while-revalidate=60"
+    if request.method == "GET" and response.status_code == 200 and "Cache-Control" not in response.headers:
+        # Cache all GET requests for 60 seconds, allowing stale-while-revalidate for smooth reloads
+        response.headers["Cache-Control"] = "private, max-age=60, stale-while-revalidate=60"
     return response
+
 
 app.add_middleware(
     CORSMiddleware,

@@ -43,9 +43,11 @@ from app.utils.prompts import get_base_system_instructions
 logger = logging.getLogger(__name__)
 
 _REASONING_BUDGETS = {
+    "none": 0,
+    "minimal": 512,
     "low": 1024,
-    "medium": 4096,
-    "high": 8192,
+    "medium": 2048,
+    "high": 4096,
 }
 
 
@@ -60,6 +62,7 @@ class AgentService:
         registry: ToolRegistry | None = None,
         executor: ToolExecutor | None = None,
         context_manager: ContextManager | None = None,
+        router=None,
     ):
         self.chat_repo = chat_repo
         self.user_repo = user_repo
@@ -81,6 +84,12 @@ class AgentService:
         self.executor = executor or ToolExecutor(self.registry, self.provider)
         self.context_manager = context_manager or ContextManager()
 
+        if router is None:
+            from app.ai.router import SmartModelRouter
+
+            router = SmartModelRouter()
+        self.router = router
+
     # ── configuration ─────────────────────────────────────────────────────────
 
     async def get_active_config(self) -> AppConfigDB:
@@ -90,39 +99,119 @@ class AgentService:
         self,
         requested_model: str | None = None,
         requested_reasoning: str | None = None,
-    ) -> tuple[str, str, int | None, list[dict]]:
-        """Validate model/reasoning against runtime config and resolve the
-        thinking budget and enabled tool configs."""
+        message_text: str | None = None,
+        routing_mode: str | None = None,
+        context=None,
+    ) -> tuple[str, str, int | None, list[dict], list[str]]:
+        """Validate model/reasoning against runtime config, invoking smart routing
+
+        if no specific model is requested, and resolve the thinking budget, enabled tools,
+        and fallback model candidates.
+        """
         cfg = await self.get_active_config()
 
         if not cfg.enable_text_generation:
             raise HTTPException(status_code=403, detail="Text generation is currently disabled by admin.")
 
-        model = requested_model or cfg.default_text_model
-        if model not in cfg.allowed_text_models:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Model '{model}' is not in the allowed text models list: {cfg.allowed_text_models}",
+        is_explicit = requested_model and requested_model not in ("auto", "smart", "default")
+        decision = None
+        fallbacks: list[str] = []
+
+        if is_explicit:
+            model = requested_model
+            if model not in cfg.allowed_text_models:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Model '{model}' is not in the allowed text models list: {cfg.allowed_text_models}",
+                )
+            fallbacks = [m for m in cfg.allowed_text_models if m != model]
+        elif cfg.enable_smart_routing and self.router and message_text:
+            model, fallbacks, decision = await self.router.route_or_default(
+                message=message_text,
+                context=context,
+                requested_model=requested_model,
+                policy=routing_mode,
+                config=cfg,
             )
+        else:
+            model = cfg.default_text_model
+            fallbacks = [m for m in cfg.allowed_text_models if m != model]
 
         allowed_for_model = cfg.get_reasoning_modes_for_model(model)
 
-        reasoning = requested_reasoning or cfg.default_reasoning_level
-        if requested_reasoning and (
-            requested_reasoning not in cfg.allowed_reasoning_levels or requested_reasoning not in allowed_for_model
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=f"Reasoning level '{requested_reasoning}' is not allowed for model '{model}'. Allowed: {allowed_for_model}",
+        # Resolve reasoning mode
+        if requested_reasoning:
+            req_reasoning_val = (
+                requested_reasoning.value if hasattr(requested_reasoning, "value") else str(requested_reasoning)
             )
+            allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in allowed_for_model]
+            global_allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in cfg.allowed_reasoning_levels]
+            if req_reasoning_val not in global_allowed_vals or req_reasoning_val not in allowed_vals:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Reasoning level '{requested_reasoning}' is not allowed for model '{model}'. Allowed: {allowed_vals}",
+                )
+            reasoning = req_reasoning_val
+        elif decision and decision.analysis:
+            # Dynamically right-size reasoning based on request complexity and reasoning signals
+            analysis = decision.analysis
+            allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in allowed_for_model]
 
-        thinking_budget = None
-        if reasoning != "none":
-            thinking_budget = _REASONING_BUDGETS.get(reasoning, 2048)
+            if (analysis.reasoning_required >= 0.75 or analysis.complexity >= 0.8) and "high" in allowed_vals:
+                reasoning = "high"
+            elif (analysis.reasoning_required >= 0.45 or analysis.complexity >= 0.55) and "medium" in allowed_vals:
+                reasoning = "medium"
+            elif (analysis.reasoning_required >= 0.20 or analysis.complexity >= 0.35) and "low" in allowed_vals:
+                reasoning = "low"
+            elif "none" in allowed_vals:
+                reasoning = "none"
+            elif "minimal" in allowed_vals:
+                reasoning = "minimal"
+            else:
+                reasoning = allowed_vals[0] if allowed_vals else "none"
+        else:
+            default_val = (
+                cfg.default_reasoning_level.value
+                if hasattr(cfg.default_reasoning_level, "value")
+                else str(cfg.default_reasoning_level)
+            )
+            allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in allowed_for_model]
+            reasoning = default_val if default_val in allowed_vals else (allowed_vals[0] if allowed_vals else "none")
 
-        tool_configs = self.registry.to_provider_configs(cfg.allowed_tools)
+        thinking_budget = _REASONING_BUDGETS.get(reasoning, 0)
 
-        return model, reasoning, thinking_budget, tool_configs
+        # Smart tool filtering: ensure mutually exclusive server tools are not sent together
+        if decision and decision.analysis:
+            analysis = decision.analysis
+            from app.models.config import ToolName
+
+            if analysis.coding_required >= 0.4 or analysis.task_type.value == "coding":
+                allowed_tools = [t for t in cfg.allowed_tools if t != ToolName.GOOGLE_SEARCH]
+            elif analysis.web_required or analysis.task_type.value in ("general_knowledge", "analysis"):
+                allowed_tools = [t for t in cfg.allowed_tools if t != ToolName.CODE_EXECUTION]
+            else:
+                allowed_tools = [
+                    t for t in cfg.allowed_tools if t not in (ToolName.CODE_EXECUTION, ToolName.GOOGLE_SEARCH)
+                ]
+            tool_configs = self.registry.to_provider_configs(allowed_tools)
+        else:
+            from app.models.config import ToolName
+
+            allowed_tools = list(cfg.allowed_tools)
+            if ToolName.CODE_EXECUTION in allowed_tools and ToolName.GOOGLE_SEARCH in allowed_tools:
+                allowed_tools = [t for t in allowed_tools if t != ToolName.CODE_EXECUTION]
+            tool_configs = self.registry.to_provider_configs(allowed_tools)
+
+        logger.info(
+            "[AgentService] Resolved model config: model='%s', reasoning='%s', thinking_budget=%s, tools=%s, fallbacks=%s",
+            model,
+            reasoning,
+            thinking_budget,
+            [c.get("kind") or c.get("name") for c in tool_configs],
+            fallbacks,
+        )
+
+        return model, reasoning, thinking_budget, tool_configs, fallbacks
 
     # ── quota ─────────────────────────────────────────────────────────────────
 
@@ -157,6 +246,7 @@ class AgentService:
         )
         if success:
             from app.core.redis import redis_cache
+
             await redis_cache.delete(f"user:{user.id}")
         return success
 
@@ -220,6 +310,7 @@ class AgentService:
 
         if attachment_ids:
             await self.attachment_service.make_permanent(user.id, attachment_ids)
+            attachments = await self.attachment_service.resolve_many(user.id, attachment_ids)
 
         return attachments
 
@@ -319,22 +410,40 @@ class AgentService:
         requested_model: str | None = None,
         requested_reasoning: str | None = None,
         attachment_ids: list[uuid.UUID] | None = None,
+        routing_mode: str | None = None,
     ) -> ChatResponse:
         if not message_text or not message_text.strip():
             raise HTTPException(status_code=400, detail="Message is empty.")
-
-        model, _, thinking_budget, tool_configs = await self.validate_and_resolve_config(
-            requested_model, requested_reasoning
-        )
 
         active_config = await self.get_active_config()
         await self._quota_precheck(user, active_config)
 
         session, session_id, title = await self._resolve_session(user, session_id, message_text)
         attachments = await self._prepare_attachments(user, active_config, attachment_ids, session_id)
+
+        from app.ai.router.schemas import RequestContext
+        from app.models.chats import MessageRole
+
+        routing_context = RequestContext(
+            conversation_message_count=len(session.messages) if session and session.messages else 0,
+            approximate_context_tokens=len(message_text) // 4,
+            has_attachments=bool(attachments),
+            attachment_types=[a.type for a in attachments],
+            user_id=str(user.id),
+            session_id=str(session_id),
+        )
+
+        model, reasoning, thinking_budget, tool_configs, fallbacks = await self.validate_and_resolve_config(
+            requested_model=requested_model,
+            requested_reasoning=requested_reasoning,
+            message_text=message_text,
+            routing_mode=routing_mode,
+            context=routing_context,
+        )
+
         await self.chat_repo.add_message(
             session_id,
-            role="user",
+            role=MessageRole.USER,
             content=message_text,
             attachment_ids=[str(a.id) for a in attachments],
         )
@@ -348,29 +457,47 @@ class AgentService:
             tool_configs=tool_configs,
         )
 
-        try:
-            result = await self.executor.generate(model, contents, generation_config)
-        except Exception as exc:
-            status, error_code, message = classify_provider_error(exc)
-            logger.exception(
-                "Model generation failed session_id=%s model=%s error_code=%s status=%s",
-                session_id,
-                model,
-                error_code,
-                status,
-            )
+        # Attempt primary model with fallback candidates if available
+        models_to_attempt = [model] + [m for m in fallbacks if m != model]
+        result = None
+        used_model = model
+        last_exc = None
+
+        for attempt_idx, candidate_model in enumerate(models_to_attempt):
+            try:
+                result = await self.executor.generate(candidate_model, contents, generation_config)
+                used_model = candidate_model
+                break
+            except Exception as exc:
+                last_exc = exc
+                if attempt_idx < len(models_to_attempt) - 1:
+                    logger.warning(
+                        "Generation with model '%s' failed (%s). Attempting fallback '%s'.",
+                        candidate_model,
+                        exc,
+                        models_to_attempt[attempt_idx + 1],
+                    )
+                else:
+                    logger.exception(
+                        "Model generation failed session_id=%s model=%s",
+                        session_id,
+                        candidate_model,
+                    )
+
+        if result is None and last_exc is not None:
+            status, error_code, message = classify_provider_error(last_exc)
             await self.chat_repo.add_message(
                 session_id,
-                role="agent",
+                role=MessageRole.AGENT,
                 content="",
                 error=f"[{error_code}] {message}",
             )
             raise HTTPException(
                 status_code=status,
                 detail={"code": error_code, "message": message},
-            ) from exc
+            ) from last_exc
 
-        await self.chat_repo.add_message(session_id, role="agent", content=result.text)
+        await self.chat_repo.add_message(session_id, role=MessageRole.AGENT, content=result.text)
 
         within_limit = await self._charge_usage(user, result.total_tokens, active_config)
         if not within_limit:
@@ -379,10 +506,25 @@ class AgentService:
             )
 
         from app.core.redis import redis_cache
+
         await redis_cache.delete_by_prefix(f"sessions:{user.id}")
         await redis_cache.delete_by_prefix(f"session:{session_id}")
 
-        return ChatResponse(session_id=session_id, title=title, response=result.text)
+        logger.info(
+            "[AgentService] Chat completed: session_id=%s, model='%s', tokens=%d, response='%s...'",
+            session_id,
+            used_model,
+            result.total_tokens,
+            result.text[:80].replace("\n", " ") if result.text else "",
+        )
+
+        return ChatResponse(
+            session_id=session_id,
+            title=title,
+            response=result.text,
+            model=used_model,
+            reasoning=reasoning,
+        )
 
     # ── streaming ─────────────────────────────────────────────────────────────
 
@@ -394,6 +536,7 @@ class AgentService:
         requested_model: str | None = None,
         requested_reasoning: str | None = None,
         attachment_ids: list[uuid.UUID] | None = None,
+        routing_mode: str | None = None,
     ) -> AsyncGenerator[str, None]:
         """Yields SSE-formatted chunks as the provider responds, then persists
         the full message and token usage once the stream is complete."""
@@ -401,41 +544,100 @@ class AgentService:
             yield self._error_event("Message is empty.")
             return
 
+        import time
+
+        t_stream_start = time.perf_counter()
+
         try:
-            model, reasoning, thinking_budget, tool_configs = await self.validate_and_resolve_config(
-                requested_model, requested_reasoning
-            )
+            t_step = time.perf_counter()
             active_config = await self.get_active_config()
             await self._quota_precheck(user, active_config)
+            logger.info("[PERF][Stream] Step 1 (Config & Quota Precheck): %.2f ms", (time.perf_counter() - t_step) * 1000.0)
+
+            t_step = time.perf_counter()
             session, session_id, title = await self._resolve_session(user, session_id, message_text)
             attachments = await self._prepare_attachments(user, active_config, attachment_ids, session_id)
+            logger.info("[PERF][Stream] Step 2 (Session & Attachments): %.2f ms", (time.perf_counter() - t_step) * 1000.0)
+
+            t_step = time.perf_counter()
+            from app.ai.router.schemas import RequestContext
+            from app.models.chats import MessageRole
+
+            routing_context = RequestContext(
+                conversation_message_count=len(session.messages) if session and session.messages else 0,
+                approximate_context_tokens=len(message_text) // 4,
+                has_attachments=bool(attachments),
+                attachment_types=[a.type for a in attachments],
+                user_id=str(user.id),
+                session_id=str(session_id),
+            )
+
+            model, reasoning, thinking_budget, tool_configs, _ = await self.validate_and_resolve_config(
+                requested_model=requested_model,
+                requested_reasoning=requested_reasoning,
+                message_text=message_text,
+                routing_mode=routing_mode,
+                context=routing_context,
+            )
+            logger.info(
+                "[PERF][Stream] Step 3 (Router & Model Resolution): %.2f ms | model='%s', reasoning='%s', thinking_budget=%s",
+                (time.perf_counter() - t_step) * 1000.0,
+                model,
+                reasoning,
+                thinking_budget,
+            )
+
+            t_step = time.perf_counter()
+            await self.chat_repo.add_message(
+                session_id,
+                role=MessageRole.USER,
+                content=message_text,
+                attachment_ids=[str(a.id) for a in attachments],
+            )
+            logger.info("[PERF][Stream] Step 4 (Persist User Message): %.2f ms", (time.perf_counter() - t_step) * 1000.0)
+
+            t_step = time.perf_counter()
+            current_parts = await self._prepare_current_parts(message_text, attachments)
+            contents = await self._build_contents(user, session, active_config, current_parts)
+            generation_config = GenerationConfig(
+                system_instruction=get_base_system_instructions(),
+                thinking_budget=thinking_budget,
+                include_thoughts=True,
+                tool_configs=tool_configs,
+            )
+            logger.info("[PERF][Stream] Step 5 (Build Contents & Config): %.2f ms", (time.perf_counter() - t_step) * 1000.0)
         except HTTPException as exc:
             yield self._error_event(str(exc.detail))
             return
-
-        await self.chat_repo.add_message(
-            session_id,
-            role="user",
-            content=message_text,
-            attachment_ids=[str(a.id) for a in attachments],
-        )
-
-        current_parts = await self._prepare_current_parts(message_text, attachments)
-        contents = await self._build_contents(user, session, active_config, current_parts)
-        generation_config = GenerationConfig(
-            system_instruction=get_base_system_instructions(),
-            thinking_budget=thinking_budget,
-            include_thoughts=True,
-            tool_configs=tool_configs,
-        )
+        except Exception as exc:
+            logger.exception("[AgentService] Stream setup failed for session_id=%s", session_id)
+            yield self._error_event(f"Internal error during stream setup: {exc}")
+            return
 
         yield f"event: session\ndata: {json.dumps({'session_id': str(session_id), 'title': title})}\n\n"
 
         full_response = ""
         total_tokens = 0
+        first_token_received = False
+        t_gen_start = time.perf_counter()
 
         try:
+            logger.info(
+                "[PERF][Stream] Step 6: Invoking provider generate_stream for model='%s' with %d contents",
+                model,
+                len(contents),
+            )
             async for event in self.executor.generate_stream(model, contents, generation_config):
+                if not first_token_received and (event.type in ("text", "reasoning", "tool_call")):
+                    first_token_received = True
+                    ttft_ms = (time.perf_counter() - t_gen_start) * 1000.0
+                    total_req_ms = (time.perf_counter() - t_stream_start) * 1000.0
+                    logger.info(
+                        "[PERF][Stream] Step 7 (TTFT / Time To First Token): %.2f ms from generation start | %.2f ms total request time | type=%s",
+                        ttft_ms,
+                        total_req_ms,
+                        event.type,
+                    )
                 if event.type == "text":
                     full_response += event.token or ""
                 elif event.type == "usage" and event.total_tokens:
@@ -452,14 +654,15 @@ class AgentService:
             )
             await self.chat_repo.add_message(
                 session_id,
-                role="agent",
+                role=MessageRole.AGENT,
                 content=full_response,
                 error=f"[{error_code}] {message}",
             )
             yield self._error_event(message, error_code)
             return
 
-        await self.chat_repo.add_message(session_id, role="agent", content=full_response)
+        t_persist = time.perf_counter()
+        await self.chat_repo.add_message(session_id, role=MessageRole.AGENT, content=full_response)
 
         within_limit = await self._charge_usage(user, total_tokens, active_config)
         if not within_limit:
@@ -467,8 +670,18 @@ class AgentService:
             return
 
         from app.core.redis import redis_cache
+
         await redis_cache.delete_by_prefix(f"sessions:{user.id}")
         await redis_cache.delete_by_prefix(f"session:{session_id}")
+
+        total_duration_ms = (time.perf_counter() - t_stream_start) * 1000.0
+        logger.info(
+            "[PERF][Stream] Step 8 (Stream Completed): total_time=%.2f ms, tokens=%d, model='%s', persist_time=%.2f ms",
+            total_duration_ms,
+            total_tokens,
+            model,
+            (time.perf_counter() - t_persist) * 1000.0,
+        )
 
         yield (
             "event: done\n"

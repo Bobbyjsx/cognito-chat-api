@@ -36,7 +36,6 @@ class Settings(BaseSettings):
     identity_jwks_url: str = ""
     identity_audience: str = "application_api"
 
-
     # Cache (Redis)
     redis_url: str = ""
 

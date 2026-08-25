@@ -32,8 +32,14 @@ def test_classify_attachment_types():
     assert classify_attachment("a.webm", "video/webm").value == "video"
     assert classify_attachment("a.mp3", "audio/mpeg").value == "audio"
     assert classify_attachment("a.pdf", "application/pdf").value == "pdf"
-    assert classify_attachment("a.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document").value == "document"
-    assert classify_attachment("a.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet").value == "spreadsheet"
+    assert (
+        classify_attachment("a.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document").value
+        == "document"
+    )
+    assert (
+        classify_attachment("a.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet").value
+        == "spreadsheet"
+    )
     assert classify_attachment("a.json", "application/json").value == "json"
     assert classify_attachment("a.txt", "text/plain").value == "text"
     assert classify_attachment("a.py", "text/x-python").value == "document"
@@ -127,12 +133,14 @@ def test_chat_with_attachment_persists_and_prepares_text(client, auth_headers, a
     session_id = chat.json()["session_id"]
 
     detail = client.get(f"/agent/sessions/{session_id}", headers=auth_headers).json()
-    user_message = detail["messages"][0]
+    msgs = detail["messages"]["items"] if isinstance(detail["messages"], dict) else detail["messages"]
+    user_message = msgs[0]
     assert user_message["role"] == "user"
     assert attachment_id in user_message["attachment_ids"]
 
     # Attachment is now bound to the session
-    listing = client.get(f"/agent/attachments?session_id={session_id}", headers=auth_headers).json()
+    listing_data = client.get(f"/agent/attachments?session_id={session_id}", headers=auth_headers).json()
+    listing = listing_data.get("items", listing_data) if isinstance(listing_data, dict) else listing_data
     assert listing[0]["id"] == attachment_id
 
 

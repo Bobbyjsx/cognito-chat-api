@@ -191,17 +191,17 @@ class AttachmentService:
                     await self.storage.delete(meta.storage_uri)
                 except Exception:
                     logger.exception(f"Failed to delete {meta.storage_uri} from storage during cleanup")
-            
+
             # Delete from gemini if applicable
             if meta.gemini_file_uri:
                 try:
                     await self.provider.delete_file(meta.gemini_file_uri)
                 except Exception:
                     logger.exception(f"Failed to delete {meta.gemini_file_uri} from gemini during cleanup")
-                    
+
             await self.repo.delete(meta.id)
             count += 1
-            
+
         return count
 
     # ── cache ─────────────────────────────────────────────────────────────────
@@ -254,11 +254,7 @@ def _extract_xlsx_text(data: bytes) -> str:
             for si in root.findall("m:si", _XLSX_NAMESPACE):
                 shared_strings.append("".join(t.text or "" for t in si.findall(".//m:t", _XLSX_NAMESPACE)))
 
-        sheets = sorted(
-            n
-            for n in names
-            if n.startswith("xl/worksheets/") and n.endswith(".xml")
-        )
+        sheets = sorted(n for n in names if n.startswith("xl/worksheets/") and n.endswith(".xml"))
         if not sheets:
             return ""
         root = ElementTree.fromstring(archive.read(sheets[0]))

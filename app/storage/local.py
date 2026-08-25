@@ -23,7 +23,7 @@ class LocalStorageBackend(StorageBackend):
 
     def _path_for(self, uri: str) -> Path:
         if uri.startswith(LOCAL_URI_PREFIX):
-            rel = uri[len(LOCAL_URI_PREFIX):]
+            rel = uri[len(LOCAL_URI_PREFIX) :]
         else:
             rel = uri
         path = (self.root / rel).resolve()

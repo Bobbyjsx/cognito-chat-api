@@ -1,7 +1,6 @@
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import pytest
 
 # Set environment variables for the Firestore emulator
@@ -11,9 +10,7 @@ os.environ["FIRESTORE_DATABASE"] = "(default)"
 
 # Attachments use the local storage backend in tests
 os.environ["STORAGE_BACKEND"] = "local"
-os.environ["LOCAL_STORAGE_DIR"] = os.environ.get(
-    "TEST_STORAGE_DIR", "/tmp/cognito-test-storage"
-)
+os.environ["LOCAL_STORAGE_DIR"] = os.environ.get("TEST_STORAGE_DIR", "/tmp/cognito-test-storage")
 
 # Bypass password hashing in tests to prevent bcrypt bugs with passlib
 patch("app.core.security.verify_password", return_value=True).start()
@@ -39,11 +36,15 @@ from app.main import app
 def clear_database():
     """Clear the Firestore emulator database and re-seed app_config between tests."""
     try:
+        import urllib.request
+
         # Emulator REST API for wiping the database
-        httpx.delete(
-            "http://127.0.0.1:8080/emulator/v1/projects/test-project/databases/(default)/documents", timeout=2.0
+        req = urllib.request.Request(
+            "http://127.0.0.1:8080/emulator/v1/projects/test-project/databases/(default)/documents",
+            method="DELETE",
         )
-    except httpx.RequestError:
+        urllib.request.urlopen(req, timeout=2.0)
+    except Exception:
         print("Warning: Could not connect to Firestore emulator at 127.0.0.1:8080. Is it running?")
 
     # Chat/config paths require configs/app_config; seed defaults after wipe.
@@ -108,9 +109,7 @@ def mock_agent():
             return _stream()
 
         mock_client_instance.aio.models.generate_content = AsyncMock(side_effect=mock_generate_content)
-        mock_client_instance.aio.models.generate_content_stream = AsyncMock(
-            side_effect=mock_generate_content_stream
-        )
+        mock_client_instance.aio.models.generate_content_stream = AsyncMock(side_effect=mock_generate_content_stream)
         mock_client_instance.aio.files.upload = AsyncMock(return_value=MagicMock(uri="files/mock-upload"))
 
         yield mock_client_instance

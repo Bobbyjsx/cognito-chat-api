@@ -8,6 +8,7 @@ from google.cloud.firestore_v1.async_client import AsyncClient
 from app.api.dependencies import (
     get_current_user,
     get_provider,
+    get_smart_router,
     get_storage_backend,
     get_tool_registry,
 )
@@ -36,6 +37,7 @@ def get_agent_service(
     provider: BaseProvider = Depends(get_provider),
     storage: StorageBackend = Depends(get_storage_backend),
     registry: ToolRegistry = Depends(get_tool_registry),
+    smart_router=Depends(get_smart_router),
 ) -> AgentService:
     chat_repo = ChatRepository(db)
     user_repo = UserRepository(db)
@@ -50,6 +52,7 @@ def get_agent_service(
         provider=provider,
         registry=registry,
         executor=executor,
+        router=smart_router,
     )
 
 
@@ -68,6 +71,7 @@ async def chat_with_agent(
             requested_model=request.model,
             requested_reasoning=request.reasoning,
             attachment_ids=request.attachments,
+            routing_mode=request.routing_mode,
         )
         return response
     except ValueError as e:
@@ -94,6 +98,7 @@ async def stream_chat_with_agent(
             requested_model=request.model,
             requested_reasoning=request.reasoning,
             attachment_ids=request.attachments,
+            routing_mode=request.routing_mode,
         ),
         media_type="text/event-stream",
         headers={
