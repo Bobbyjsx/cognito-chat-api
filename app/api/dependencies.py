@@ -69,10 +69,6 @@ def build_storage_backend_instance() -> StorageBackend:
 
 
 async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncClient = Depends(get_db)) -> UserDB:
-    import time
-
-    auth_start = time.perf_counter()
-
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -81,7 +77,6 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncClient 
     payload = None
 
     # 1. Try JWKS / Identity Service token verification
-    jwks_start = time.perf_counter()
     try:
         jwk_client = get_jwks_client()
         if jwk_client:
@@ -92,9 +87,8 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncClient 
                 algorithms=["EdDSA", "RS256", "ES256", "HS256"],
                 options={"verify_aud": False},
             )
-            logger.debug("[PERF][Auth] JWKS verification succeeded in %.2f ms", (time.perf_counter() - jwks_start) * 1000.0)
     except Exception as exc:
-        logger.debug("[PERF][Auth] JWKS token verification bypassed in %.2f ms: %s", (time.perf_counter() - jwks_start) * 1000.0, exc)
+        logger.debug("JWKS token verification bypassed: %s", exc)
 
     # 2. Fallback to symmetric secret key verification (local dev / tests)
     if payload is None:
@@ -121,32 +115,22 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncClient 
     except ValueError:
         pass
 
-    # Always fetch fresh from Firestore so tokens_used reflects live state
-    db_user_start = time.perf_counter()
+    # 1. Check Redis cache first for fast user resolution
+    from app.core.cache_keys import CacheKeys
+    from app.core.redis import redis_cache
+
+    try:
+        cached_user = await redis_cache.get(CacheKeys.user_auth(user_id), model_cls=UserDB)
+        if cached_user:
+            return cached_user
+    except Exception as exc:
+        logger.debug("Redis user cache check failed: %s", exc)
+
+    # 2. Fetch fresh from Firestore
     user = await UserRepository(db).get_by_id(user_id)
-    logger.debug("[PERF][Auth] User DB lookup took %.2f ms", (time.perf_counter() - db_user_start) * 1000.0)
 
     if user is None:
-        # Auto-provision user record in Firestore for Identity Service users
         email = payload.get("email")
-        if not email and settings.identity_service_url:
-            import httpx
-
-            try:
-                me_url = f"{settings.identity_service_url.rstrip('/')}/api/v1/auth/me"
-                async with httpx.AsyncClient(timeout=1.5) as client:
-                    resp = await client.get(
-                        me_url,
-                        headers={
-                            "Authorization": f"Bearer {token}",
-                            "User-Agent": "Mozilla/5.0 (compatible; cognito-chat-api)",
-                        },
-                    )
-                    if resp.status_code == 200:
-                        email = resp.json().get("email")
-            except Exception as e:
-                logger.debug("Failed to fetch user email from identity service (skipped): %s", e)
-
         if not email:
             import re
 
@@ -160,6 +144,10 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncClient 
         )
         user = await UserRepository(db).create(new_user)
 
-    total_auth_ms = (time.perf_counter() - auth_start) * 1000.0
-    logger.info("[PERF][Auth] get_current_user completed in %.2f ms (user_id=%s)", total_auth_ms, user_id)
+    # Cache user auth for 120 seconds
+    try:
+        await redis_cache.set(CacheKeys.user_auth(user_id), user, expire=120)
+    except Exception as exc:
+        logger.debug("Failed to cache user in Redis: %s", exc)
+
     return user
