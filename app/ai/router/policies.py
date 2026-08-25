@@ -27,6 +27,17 @@ class PolicyRegistry:
                 reliability_weight=0.00,
             ),
         ),
+        RoutingMode.SPEED: RoutingPolicy(
+            mode=RoutingMode.SPEED,
+            weights=PolicyWeights(
+                speed_weight=0.40,
+                cost_weight=0.25,
+                capability_weight=0.15,
+                complexity_weight=0.15,
+                quality_weight=0.05,
+                reliability_weight=0.00,
+            ),
+        ),
         RoutingMode.BALANCED: RoutingPolicy(
             mode=RoutingMode.BALANCED,
             weights=PolicyWeights(
@@ -46,6 +57,17 @@ class PolicyRegistry:
                 complexity_weight=0.25,
                 speed_weight=0.05,
                 cost_weight=0.05,
+                reliability_weight=0.00,
+            ),
+        ),
+        RoutingMode.COST: RoutingPolicy(
+            mode=RoutingMode.COST,
+            weights=PolicyWeights(
+                cost_weight=0.45,
+                speed_weight=0.25,
+                capability_weight=0.15,
+                complexity_weight=0.10,
+                quality_weight=0.05,
                 reliability_weight=0.00,
             ),
         ),

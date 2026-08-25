@@ -40,8 +40,10 @@ class RoutingMode(str, Enum):
     """Routing optimization strategy modes."""
 
     FAST = "fast"
+    SPEED = "speed"
     BALANCED = "balanced"
     QUALITY = "quality"
+    COST = "cost"
     CUSTOM = "custom"
 
 

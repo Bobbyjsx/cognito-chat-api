@@ -113,9 +113,20 @@ class AgentService:
         if not cfg.enable_text_generation:
             raise HTTPException(status_code=403, detail="Text generation is currently disabled by admin.")
 
-        is_explicit = requested_model and requested_model not in ("auto", "smart", "default")
+        is_explicit = bool(requested_model and requested_model.lower() not in ("auto", "smart", "default", "none"))
         decision = None
         fallbacks: list[str] = []
+        effective_routing_mode = routing_mode
+        effective_reasoning = requested_reasoning
+
+        # When smart routing is used, if client sent a routing policy in reasoning (e.g. 'speed', 'cost', 'quality', 'balanced')
+        # treat it as the routing policy and let the router right-size model reasoning.
+        ROUTING_POLICY_NAMES = ("speed", "fast", "cost", "quality", "balanced")
+        if not is_explicit and requested_reasoning:
+            req_str = str(requested_reasoning).lower().strip()
+            if req_str in ROUTING_POLICY_NAMES:
+                effective_routing_mode = effective_routing_mode or req_str
+                effective_reasoning = None
 
         if is_explicit:
             model = requested_model
@@ -130,7 +141,7 @@ class AgentService:
                 message=message_text,
                 context=context,
                 requested_model=requested_model,
-                policy=routing_mode,
+                policy=effective_routing_mode,
                 config=cfg,
             )
         else:
@@ -142,14 +153,14 @@ class AgentService:
         global_allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in cfg.allowed_reasoning_levels]
 
         # Resolve reasoning mode
-        if requested_reasoning:
+        if effective_reasoning:
             req_reasoning_val = (
-                requested_reasoning.value if hasattr(requested_reasoning, "value") else str(requested_reasoning)
+                effective_reasoning.value if hasattr(effective_reasoning, "value") else str(effective_reasoning)
             )
             if req_reasoning_val not in global_allowed_vals:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Reasoning level '{requested_reasoning}' is not allowed in global system config. Allowed: {global_allowed_vals}",
+                    detail=f"Reasoning level '{effective_reasoning}' is not allowed in global system config. Allowed: {global_allowed_vals}",
                 )
 
             if req_reasoning_val in allowed_vals:
@@ -157,7 +168,7 @@ class AgentService:
             elif is_explicit:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Reasoning level '{requested_reasoning}' is not allowed for model '{model}'. Allowed: {allowed_vals}",
+                    detail=f"Reasoning level '{effective_reasoning}' is not allowed for model '{model}'. Allowed: {allowed_vals}",
                 )
             elif decision and decision.analysis:
                 analysis = decision.analysis
