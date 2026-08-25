@@ -49,6 +49,30 @@ async def _cleanup_loop(app: FastAPI):
         await asyncio.sleep(3600)  # Run every hour
 
 
+async def _prewarm_services(app: FastAPI):
+    """Background task on startup to pre-warm network connections and caches
+    so that the very first user request avoids TLS handshake and cold lookup penalties.
+    """
+    try:
+        from app.repositories.config import ConfigRepository
+
+        # 1. Warm Firestore connection & populate system config cache
+        config_repo = ConfigRepository(app.state.db_client)
+        await config_repo.get_config()
+
+        # 2. Pre-warm Google API TLS connection pool
+        import httpx
+
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            try:
+                await client.get("https://generativelanguage.googleapis.com", follow_redirects=True)
+            except Exception:
+                pass
+        logger.info("Cold-start dependency pre-warming completed successfully.")
+    except Exception as exc:
+        logger.debug("Pre-warming background task encountered non-critical error: %s", exc)
+
+
 from app.core.redis import redis_cache
 
 
@@ -75,9 +99,11 @@ async def lifespan(app: FastAPI):
 
     await redis_cache.connect()
     cleanup_task = asyncio.create_task(_cleanup_loop(app))
+    prewarm_task = asyncio.create_task(_prewarm_services(app))
 
     yield
     cleanup_task.cancel()
+    prewarm_task.cancel()
     await redis_cache.disconnect()
 
 
