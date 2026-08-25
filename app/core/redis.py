@@ -46,7 +46,11 @@ class RedisCache:
         if not self.redis_client:
             return
         try:
-            await self.redis_client.set(key, json.dumps(value), ex=expire)
+            if hasattr(value, "model_dump"):
+                payload = value.model_dump(mode="json")
+            else:
+                payload = value
+            await self.redis_client.set(key, json.dumps(payload, default=str), ex=expire)
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
 

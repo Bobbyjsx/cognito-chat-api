@@ -32,3 +32,7 @@ class CacheKeys:
     @staticmethod
     def user_profile(user_id: uuid.UUID | str) -> str:
         return f"user:{user_id}"
+
+    @staticmethod
+    def user_auth(user_id: uuid.UUID | str) -> str:
+        return f"auth:user:{user_id}"
