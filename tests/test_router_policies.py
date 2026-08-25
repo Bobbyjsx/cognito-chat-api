@@ -10,9 +10,9 @@ def test_policy_registry_presets():
     assert fast.mode == RoutingMode.FAST
     assert fast.weights.speed_weight > fast.weights.quality_weight
 
-    quality = PolicyRegistry.get(RoutingMode.QUALITY)
-    assert quality.mode == RoutingMode.QUALITY
-    assert quality.weights.quality_weight > quality.weights.speed_weight
+    extended = PolicyRegistry.get(RoutingMode.EXTENDED)
+    assert extended.mode == RoutingMode.EXTENDED
+    assert extended.weights.quality_weight > extended.weights.speed_weight
 
     balanced = PolicyRegistry.get("balanced")
     assert balanced.mode == RoutingMode.BALANCED

@@ -34,7 +34,7 @@ def test_scorer_prefers_powerful_model_for_complex_reasoning_task():
         reasoning_required=0.95,
         coding_required=0.95,
     )
-    policy = PolicyRegistry.get(RoutingMode.QUALITY)
+    policy = PolicyRegistry.get(RoutingMode.EXTENDED)
 
     ranked = scorer.score_candidates(cfg.models_list, analysis, policy)
     assert len(ranked) > 0

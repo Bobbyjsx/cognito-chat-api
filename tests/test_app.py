@@ -66,7 +66,7 @@ def test_stream_done_event_includes_model_and_reasoning(client, mock_agent):
     resp = client.post(
         "/agent/chat/stream",
         headers=headers,
-        json={"message": "hello", "model": "gemini-3.6-flash", "reasoning": "high"},
+        json={"message": "hello", "model": "gemini-3.6-flash", "reasoning": "extended"},
     )
     assert resp.status_code == 200
     content = resp.text
@@ -81,7 +81,7 @@ def test_stream_done_event_includes_model_and_reasoning(client, mock_agent):
             break
     assert done_data is not None, "done event missing data payload"
     assert done_data.get("model") == "gemini-3.6-flash"
-    assert done_data.get("reasoning") == "high"
+    assert done_data.get("reasoning") == "extended"
     assert "session_id" in done_data
 
 

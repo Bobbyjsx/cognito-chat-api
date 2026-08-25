@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from typing import ClassVar
 
-from app.ai.router.exceptions import InvalidPolicyError
 from app.ai.router.schemas import PolicyWeights, RoutingPolicy
 from app.models.config import RoutingMode
 
@@ -19,21 +18,10 @@ class PolicyRegistry:
         RoutingMode.FAST: RoutingPolicy(
             mode=RoutingMode.FAST,
             weights=PolicyWeights(
-                speed_weight=0.35,
+                speed_weight=0.40,
                 cost_weight=0.30,
                 capability_weight=0.15,
-                complexity_weight=0.15,
-                quality_weight=0.05,
-                reliability_weight=0.00,
-            ),
-        ),
-        RoutingMode.SPEED: RoutingPolicy(
-            mode=RoutingMode.SPEED,
-            weights=PolicyWeights(
-                speed_weight=0.40,
-                cost_weight=0.25,
-                capability_weight=0.15,
-                complexity_weight=0.15,
+                complexity_weight=0.10,
                 quality_weight=0.05,
                 reliability_weight=0.00,
             ),
@@ -49,8 +37,8 @@ class PolicyRegistry:
                 reliability_weight=0.00,
             ),
         ),
-        RoutingMode.QUALITY: RoutingPolicy(
-            mode=RoutingMode.QUALITY,
+        RoutingMode.EXTENDED: RoutingPolicy(
+            mode=RoutingMode.EXTENDED,
             weights=PolicyWeights(
                 quality_weight=0.35,
                 capability_weight=0.30,
@@ -60,17 +48,19 @@ class PolicyRegistry:
                 reliability_weight=0.00,
             ),
         ),
-        RoutingMode.COST: RoutingPolicy(
-            mode=RoutingMode.COST,
-            weights=PolicyWeights(
-                cost_weight=0.45,
-                speed_weight=0.25,
-                capability_weight=0.15,
-                complexity_weight=0.10,
-                quality_weight=0.05,
-                reliability_weight=0.00,
-            ),
-        ),
+    }
+
+    # Aliases mapping legacy names to unified modes
+    _ALIASES: ClassVar[dict[str, RoutingMode]] = {
+        "speed": RoutingMode.FAST,
+        "cost": RoutingMode.FAST,
+        "fast": RoutingMode.FAST,
+        "balanced": RoutingMode.BALANCED,
+        "medium": RoutingMode.BALANCED,
+        "quality": RoutingMode.EXTENDED,
+        "extended": RoutingMode.EXTENDED,
+        "high": RoutingMode.EXTENDED,
+        "deep": RoutingMode.EXTENDED,
     }
 
     @classmethod
@@ -89,6 +79,11 @@ class PolicyRegistry:
             (default_mode.value if isinstance(default_mode, RoutingMode) else str(default_mode)).lower().strip()
         )
 
+        # Check aliases first
+        if mode_val in cls._ALIASES:
+            enum_mode = cls._ALIASES[mode_val]
+            return cls.PRESETS[enum_mode].model_copy(deep=True)
+
         try:
             enum_mode = RoutingMode(mode_val)
             if enum_mode in cls.PRESETS:
@@ -96,11 +91,6 @@ class PolicyRegistry:
         except ValueError:
             logger.warning("Unrecognized routing policy mode '%s'. Defaulting to '%s'.", mode_val, default_val)
 
-        try:
-            fallback_enum = RoutingMode(default_val)
-            if fallback_enum in cls.PRESETS:
-                return cls.PRESETS[fallback_enum].model_copy(deep=True)
-        except ValueError:
-            pass
-
-        raise InvalidPolicyError(f"Invalid routing mode '{mode_val}' and default '{default_val}'")
+        # Fallback to default
+        fallback_mode = cls._ALIASES.get(default_val, RoutingMode.BALANCED)
+        return cls.PRESETS[fallback_mode].model_copy(deep=True)
