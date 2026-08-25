@@ -40,14 +40,22 @@ from app.tools.registry import ToolRegistry
 from app.utils.datetime import ensure_utc
 from app.utils.prompts import get_base_system_instructions
 
+from app.models.config import normalize_reasoning_level
+
 logger = logging.getLogger(__name__)
 
 _REASONING_BUDGETS = {
+    "fast": 0,
+    "balanced": 8_192,
+    "extended": 24_576,
+    # Backwards compatibility fallbacks
     "none": 0,
     "minimal": 512,
-    "low": 1024,
-    "medium": 2048,
-    "high": 4096,
+    "low": 2_048,
+    "medium": 8_192,
+    "high": 24_576,
+    "speed": 0,
+    "quality": 24_576,
 }
 
 
@@ -113,9 +121,18 @@ class AgentService:
         if not cfg.enable_text_generation:
             raise HTTPException(status_code=403, detail="Text generation is currently disabled by admin.")
 
-        is_explicit = requested_model and requested_model not in ("auto", "smart", "default")
+        is_explicit = bool(requested_model and requested_model.lower() not in ("auto", "smart", "default", "none"))
         decision = None
         fallbacks: list[str] = []
+        effective_routing_mode = routing_mode
+        effective_reasoning = requested_reasoning
+
+        # When smart routing is used, normalize any policy/effort passed
+        if not is_explicit and requested_reasoning:
+            norm_policy = normalize_reasoning_level(requested_reasoning)
+            if norm_policy:
+                effective_routing_mode = effective_routing_mode or norm_policy.value
+                effective_reasoning = None
 
         if is_explicit:
             model = requested_model
@@ -130,7 +147,7 @@ class AgentService:
                 message=message_text,
                 context=context,
                 requested_model=requested_model,
-                policy=routing_mode,
+                policy=effective_routing_mode,
                 config=cfg,
             )
         else:
@@ -138,45 +155,59 @@ class AgentService:
             fallbacks = [m for m in cfg.allowed_text_models if m != model]
 
         allowed_for_model = cfg.get_reasoning_modes_for_model(model)
+        allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in allowed_for_model]
+        global_allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in cfg.allowed_reasoning_levels]
 
         # Resolve reasoning mode
-        if requested_reasoning:
-            req_reasoning_val = (
-                requested_reasoning.value if hasattr(requested_reasoning, "value") else str(requested_reasoning)
-            )
-            allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in allowed_for_model]
-            global_allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in cfg.allowed_reasoning_levels]
-            if req_reasoning_val not in global_allowed_vals or req_reasoning_val not in allowed_vals:
+        if effective_reasoning:
+            norm_reasoning = normalize_reasoning_level(effective_reasoning)
+            req_str = norm_reasoning.value if norm_reasoning else str(effective_reasoning).lower().strip()
+
+            if req_str not in global_allowed_vals and str(effective_reasoning) not in global_allowed_vals:
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Reasoning level '{requested_reasoning}' is not allowed for model '{model}'. Allowed: {allowed_vals}",
+                    detail=f"Reasoning level '{effective_reasoning}' is not allowed in global system config. Allowed: {global_allowed_vals}",
                 )
-            reasoning = req_reasoning_val
+
+            if req_str in allowed_vals:
+                reasoning = req_str
+            elif is_explicit:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Reasoning level '{effective_reasoning}' is not allowed for model '{model}'. Allowed: {allowed_vals}",
+                )
+            elif decision and decision.analysis:
+                analysis = decision.analysis
+                if (analysis.reasoning_required >= 0.70 or analysis.complexity >= 0.75) and "extended" in allowed_vals:
+                    reasoning = "extended"
+                elif (
+                    analysis.reasoning_required >= 0.35 or analysis.complexity >= 0.45
+                ) and "balanced" in allowed_vals:
+                    reasoning = "balanced"
+                elif "fast" in allowed_vals:
+                    reasoning = "fast"
+                else:
+                    reasoning = allowed_vals[0] if allowed_vals else "fast"
+            else:
+                reasoning = allowed_vals[0] if allowed_vals else "fast"
         elif decision and decision.analysis:
             # Dynamically right-size reasoning based on request complexity and reasoning signals
             analysis = decision.analysis
-            allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in allowed_for_model]
-
-            if (analysis.reasoning_required >= 0.75 or analysis.complexity >= 0.8) and "high" in allowed_vals:
-                reasoning = "high"
-            elif (analysis.reasoning_required >= 0.45 or analysis.complexity >= 0.55) and "medium" in allowed_vals:
-                reasoning = "medium"
-            elif (analysis.reasoning_required >= 0.20 or analysis.complexity >= 0.35) and "low" in allowed_vals:
-                reasoning = "low"
-            elif "none" in allowed_vals:
-                reasoning = "none"
-            elif "minimal" in allowed_vals:
-                reasoning = "minimal"
+            if (analysis.reasoning_required >= 0.70 or analysis.complexity >= 0.75) and "extended" in allowed_vals:
+                reasoning = "extended"
+            elif (analysis.reasoning_required >= 0.35 or analysis.complexity >= 0.45) and "balanced" in allowed_vals:
+                reasoning = "balanced"
+            elif "fast" in allowed_vals:
+                reasoning = "fast"
             else:
-                reasoning = allowed_vals[0] if allowed_vals else "none"
+                reasoning = allowed_vals[0] if allowed_vals else "fast"
         else:
             default_val = (
                 cfg.default_reasoning_level.value
                 if hasattr(cfg.default_reasoning_level, "value")
                 else str(cfg.default_reasoning_level)
             )
-            allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in allowed_for_model]
-            reasoning = default_val if default_val in allowed_vals else (allowed_vals[0] if allowed_vals else "none")
+            reasoning = default_val if default_val in allowed_vals else (allowed_vals[0] if allowed_vals else "fast")
 
         thinking_budget = _REASONING_BUDGETS.get(reasoning, 0)
 

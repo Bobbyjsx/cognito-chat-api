@@ -8,13 +8,13 @@ from app.models.config import AppConfigDB, ModelStatus, ReasoningLevel, TextMode
 def test_filter_disabled_and_inactive_models():
     models = {
         "active-model": TextModelConfig(
-            description="", enabled=True, reasoning_modes=[ReasoningLevel.NONE], status=ModelStatus.ACTIVE
+            description="", enabled=True, reasoning_modes=[ReasoningLevel.FAST], status=ModelStatus.ACTIVE
         ),
         "disabled-model": TextModelConfig(
-            description="", enabled=False, reasoning_modes=[ReasoningLevel.NONE], status=ModelStatus.ACTIVE
+            description="", enabled=False, reasoning_modes=[ReasoningLevel.FAST], status=ModelStatus.ACTIVE
         ),
         "deprecated-model": TextModelConfig(
-            description="", enabled=True, reasoning_modes=[ReasoningLevel.NONE], status=ModelStatus.DEPRECATED
+            description="", enabled=True, reasoning_modes=[ReasoningLevel.FAST], status=ModelStatus.DEPRECATED
         ),
     }
     filter_engine = CandidateFilter()
@@ -42,9 +42,9 @@ def test_filter_allowed_models_policy():
 
 def test_filter_vision_requirement():
     models = {
-        "vision-model": TextModelConfig(description="", enabled=True, reasoning_modes=["none"], supports_vision=True),
+        "vision-model": TextModelConfig(description="", enabled=True, reasoning_modes=["fast"], supports_vision=True),
         "text-only-model": TextModelConfig(
-            description="", enabled=True, reasoning_modes=["none"], supports_vision=False
+            description="", enabled=True, reasoning_modes=["fast"], supports_vision=False
         ),
     }
     filter_engine = CandidateFilter()
@@ -59,8 +59,8 @@ def test_filter_vision_requirement():
 
 def test_filter_tools_requirement():
     models = {
-        "tool-model": TextModelConfig(description="", enabled=True, reasoning_modes=["none"], supports_tools=True),
-        "no-tool-model": TextModelConfig(description="", enabled=True, reasoning_modes=["none"], supports_tools=False),
+        "tool-model": TextModelConfig(description="", enabled=True, reasoning_modes=["fast"], supports_tools=True),
+        "no-tool-model": TextModelConfig(description="", enabled=True, reasoning_modes=["fast"], supports_tools=False),
     }
     filter_engine = CandidateFilter()
     analysis = RequestAnalysis(tool_calling_required=True)
@@ -74,10 +74,10 @@ def test_filter_tools_requirement():
 def test_filter_context_window_limit():
     models = {
         "big-window": TextModelConfig(
-            description="", enabled=True, reasoning_modes=["none"], context_window_tokens=1_000_000
+            description="", enabled=True, reasoning_modes=["fast"], context_window_tokens=1_000_000
         ),
         "small-window": TextModelConfig(
-            description="", enabled=True, reasoning_modes=["none"], context_window_tokens=32_000
+            description="", enabled=True, reasoning_modes=["fast"], context_window_tokens=32_000
         ),
     }
     filter_engine = CandidateFilter()
@@ -93,10 +93,10 @@ def test_filter_context_window_limit():
 def test_filter_max_cost_limit():
     models = {
         "cheap-model": TextModelConfig(
-            description="", enabled=True, reasoning_modes=["none"], input_cost_per_million=0.05
+            description="", enabled=True, reasoning_modes=["fast"], input_cost_per_million=0.05
         ),
         "expensive-model": TextModelConfig(
-            description="", enabled=True, reasoning_modes=["none"], input_cost_per_million=2.50
+            description="", enabled=True, reasoning_modes=["fast"], input_cost_per_million=2.50
         ),
     }
     filter_engine = CandidateFilter()

@@ -7,13 +7,11 @@ from app.models.attachments import AttachmentType
 
 
 class ReasoningLevel(str, Enum):
-    """Supported model thinking / reasoning effort levels."""
+    """Unified thinking / reasoning effort levels."""
 
-    NONE = "none"
-    MINIMAL = "minimal"
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
+    FAST = "fast"
+    BALANCED = "balanced"
+    EXTENDED = "extended"
 
 
 class ModelProvider(str, Enum):
@@ -37,12 +35,26 @@ class ModelStatus(str, Enum):
 
 
 class RoutingMode(str, Enum):
-    """Routing optimization strategy modes."""
+    """Unified routing optimization strategy modes."""
 
     FAST = "fast"
     BALANCED = "balanced"
-    QUALITY = "quality"
+    EXTENDED = "extended"
     CUSTOM = "custom"
+
+
+def normalize_reasoning_level(val: str | ReasoningLevel | None) -> ReasoningLevel | None:
+    """Normalize any raw reasoning or policy string into canonical ReasoningLevel."""
+    if val is None:
+        return None
+    raw = (val.value if isinstance(val, ReasoningLevel) else str(val)).lower().strip()
+    if raw in ("fast", "none", "minimal", "low", "speed"):
+        return ReasoningLevel.FAST
+    if raw in ("balanced", "medium"):
+        return ReasoningLevel.BALANCED
+    if raw in ("extended", "high", "quality", "deep"):
+        return ReasoningLevel.EXTENDED
+    return None
 
 
 class ToolName(str, Enum):
@@ -122,14 +134,12 @@ class AppConfigDB(BaseModel):
     # If a mode is listed on a model but NOT here, it is silently ignored.
     allowed_reasoning_levels: list[ReasoningLevel] = Field(
         default_factory=lambda: [
-            ReasoningLevel.NONE,
-            ReasoningLevel.MINIMAL,
-            ReasoningLevel.LOW,
-            ReasoningLevel.MEDIUM,
-            ReasoningLevel.HIGH,
+            ReasoningLevel.FAST,
+            ReasoningLevel.BALANCED,
+            ReasoningLevel.EXTENDED,
         ]
     )
-    default_reasoning_level: ReasoningLevel = ReasoningLevel.MEDIUM
+    default_reasoning_level: ReasoningLevel = ReasoningLevel.BALANCED
     default_text_model: str = "gemini-3.6-flash"
 
     # ── Structured Text Models ─────────────────────────────────────────────────
@@ -141,11 +151,9 @@ class AppConfigDB(BaseModel):
                 description="Latest Flash model with full thinking support and highest intelligence",
                 enabled=True,
                 reasoning_modes=[
-                    ReasoningLevel.NONE,
-                    ReasoningLevel.MINIMAL,
-                    ReasoningLevel.LOW,
-                    ReasoningLevel.MEDIUM,
-                    ReasoningLevel.HIGH,
+                    ReasoningLevel.FAST,
+                    ReasoningLevel.BALANCED,
+                    ReasoningLevel.EXTENDED,
                 ],
                 complexity_score=0.85,
                 reasoning_score=0.88,
@@ -173,10 +181,9 @@ class AppConfigDB(BaseModel):
                 description="Fast and capable model with thinking modes for complex tasks",
                 enabled=True,
                 reasoning_modes=[
-                    ReasoningLevel.NONE,
-                    ReasoningLevel.LOW,
-                    ReasoningLevel.MEDIUM,
-                    ReasoningLevel.HIGH,
+                    ReasoningLevel.FAST,
+                    ReasoningLevel.BALANCED,
+                    ReasoningLevel.EXTENDED,
                 ],
                 complexity_score=0.75,
                 reasoning_score=0.75,
@@ -203,7 +210,7 @@ class AppConfigDB(BaseModel):
             "gemini-3.5-flash-lite": TextModelConfig(
                 description="Ultra-fast lightweight model, best for simple and quick queries",
                 enabled=True,
-                reasoning_modes=[ReasoningLevel.NONE, ReasoningLevel.MINIMAL],
+                reasoning_modes=[ReasoningLevel.FAST],
                 complexity_score=0.40,
                 reasoning_score=0.35,
                 coding_score=0.50,
@@ -230,11 +237,9 @@ class AppConfigDB(BaseModel):
                 description="Advanced Pro model with deep reasoning for complex code and analysis",
                 enabled=True,
                 reasoning_modes=[
-                    ReasoningLevel.NONE,
-                    ReasoningLevel.MINIMAL,
-                    ReasoningLevel.LOW,
-                    ReasoningLevel.MEDIUM,
-                    ReasoningLevel.HIGH,
+                    ReasoningLevel.FAST,
+                    ReasoningLevel.BALANCED,
+                    ReasoningLevel.EXTENDED,
                 ],
                 complexity_score=0.95,
                 reasoning_score=0.98,
@@ -261,7 +266,7 @@ class AppConfigDB(BaseModel):
             "gemini-3.1-flash-lite": TextModelConfig(
                 description="Minimal-latency compact model, no thinking overhead",
                 enabled=True,
-                reasoning_modes=[ReasoningLevel.NONE],
+                reasoning_modes=[ReasoningLevel.FAST],
                 complexity_score=0.25,
                 reasoning_score=0.20,
                 coding_score=0.35,
@@ -288,10 +293,9 @@ class AppConfigDB(BaseModel):
                 description="Balanced preview model with reasoning options",
                 enabled=True,
                 reasoning_modes=[
-                    ReasoningLevel.NONE,
-                    ReasoningLevel.LOW,
-                    ReasoningLevel.MEDIUM,
-                    ReasoningLevel.HIGH,
+                    ReasoningLevel.FAST,
+                    ReasoningLevel.BALANCED,
+                    ReasoningLevel.EXTENDED,
                 ],
                 complexity_score=0.70,
                 reasoning_score=0.70,

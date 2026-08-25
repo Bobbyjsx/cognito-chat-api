@@ -34,7 +34,7 @@ async def test_router_end_to_end_complex_coding():
     router = SmartModelRouter(analyzer=HeuristicFallbackAnalyzer())
     decision = await router.route(
         "Can you refactor this complex microservice architecture and write the python async code? ```def process(): pass```",
-        policy=RoutingMode.QUALITY,
+        policy=RoutingMode.EXTENDED,
     )
     assert decision.selected_model_id in ("gemini-3.6-flash", "gemini-3.1-pro-preview")
     assert decision.task_type == TaskType.CODING
@@ -137,10 +137,10 @@ def test_http_chat_with_explicit_model_override(client: TestClient, mock_agent):
     payload = {
         "message": "Hello from manual selection",
         "model": "gemini-3.5-flash",
-        "reasoning": "low",
+        "reasoning": "balanced",
     }
     response = client.post("/agent/chat", json=payload, headers=headers)
     assert response.status_code == 200
     data = response.json()
     assert data["model"] == "gemini-3.5-flash"
-    assert data["reasoning"] == "low"
+    assert data["reasoning"] == "balanced"

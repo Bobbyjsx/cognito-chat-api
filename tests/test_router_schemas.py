@@ -64,7 +64,7 @@ def test_score_breakdown_and_candidate():
     model_cfg = TextModelConfig(
         description="Test model",
         enabled=True,
-        reasoning_modes=[ReasoningLevel.NONE, ReasoningLevel.LOW],
+        reasoning_modes=[ReasoningLevel.FAST, ReasoningLevel.BALANCED],
     )
     candidate = ScoredCandidate(
         model_id="test-model",
