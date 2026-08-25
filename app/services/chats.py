@@ -138,24 +138,46 @@ class AgentService:
             fallbacks = [m for m in cfg.allowed_text_models if m != model]
 
         allowed_for_model = cfg.get_reasoning_modes_for_model(model)
+        allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in allowed_for_model]
+        global_allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in cfg.allowed_reasoning_levels]
 
         # Resolve reasoning mode
         if requested_reasoning:
             req_reasoning_val = (
                 requested_reasoning.value if hasattr(requested_reasoning, "value") else str(requested_reasoning)
             )
-            allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in allowed_for_model]
-            global_allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in cfg.allowed_reasoning_levels]
-            if req_reasoning_val not in global_allowed_vals or req_reasoning_val not in allowed_vals:
+            if req_reasoning_val not in global_allowed_vals:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Reasoning level '{requested_reasoning}' is not allowed in global system config. Allowed: {global_allowed_vals}",
+                )
+
+            if req_reasoning_val in allowed_vals:
+                reasoning = req_reasoning_val
+            elif is_explicit:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Reasoning level '{requested_reasoning}' is not allowed for model '{model}'. Allowed: {allowed_vals}",
                 )
-            reasoning = req_reasoning_val
+            elif decision and decision.analysis:
+                analysis = decision.analysis
+                if (analysis.reasoning_required >= 0.75 or analysis.complexity >= 0.8) and "high" in allowed_vals:
+                    reasoning = "high"
+                elif (analysis.reasoning_required >= 0.45 or analysis.complexity >= 0.55) and "medium" in allowed_vals:
+                    reasoning = "medium"
+                elif (analysis.reasoning_required >= 0.20 or analysis.complexity >= 0.35) and "low" in allowed_vals:
+                    reasoning = "low"
+                elif "none" in allowed_vals:
+                    reasoning = "none"
+                elif "minimal" in allowed_vals:
+                    reasoning = "minimal"
+                else:
+                    reasoning = allowed_vals[0] if allowed_vals else "none"
+            else:
+                reasoning = allowed_vals[0] if allowed_vals else "none"
         elif decision and decision.analysis:
             # Dynamically right-size reasoning based on request complexity and reasoning signals
             analysis = decision.analysis
-            allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in allowed_for_model]
 
             if (analysis.reasoning_required >= 0.75 or analysis.complexity >= 0.8) and "high" in allowed_vals:
                 reasoning = "high"
@@ -175,7 +197,6 @@ class AgentService:
                 if hasattr(cfg.default_reasoning_level, "value")
                 else str(cfg.default_reasoning_level)
             )
-            allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in allowed_for_model]
             reasoning = default_val if default_val in allowed_vals else (allowed_vals[0] if allowed_vals else "none")
 
         thinking_budget = _REASONING_BUDGETS.get(reasoning, 0)
