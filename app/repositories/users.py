@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
@@ -8,6 +9,8 @@ from google.cloud.firestore_v1.transforms import Increment
 
 from app.models.users import UserDB
 from app.utils.datetime import ensure_utc
+
+logger = logging.getLogger(__name__)
 
 
 class UserRepository:
@@ -82,8 +85,8 @@ class UserRepository:
         try:
             await redis_cache.delete(CacheKeys.user_profile(user_id))
             await redis_cache.delete(CacheKeys.user_auth(user_id))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Redis cache invalidation skipped for user %s: %s", user_id, exc)
 
     async def atomic_increment_if_within_limit(
         self,
@@ -157,5 +160,5 @@ class UserRepository:
         try:
             await redis_cache.delete(CacheKeys.user_profile(user_id))
             await redis_cache.delete(CacheKeys.user_auth(user_id))
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Redis cache invalidation skipped for user %s: %s", user_id, exc)
