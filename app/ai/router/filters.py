@@ -34,6 +34,11 @@ class CandidateFilter:
         approx_context_tokens = context.approximate_context_tokens if context else 0
 
         for model_id, model in models.items():
+            # 0. Routing pseudo-models
+            if model_id.lower() in ("auto", "smart", "default", "none"):
+                filtered[model_id] = "Auto is a routing selector, not an underlying physical model."
+                continue
+
             # 1. Operational status and enabled toggle
             if not model.enabled:
                 filtered[model_id] = "Model is disabled in system configuration."

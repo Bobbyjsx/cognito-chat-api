@@ -32,16 +32,23 @@ async def migrate():
     existing = config_doc.to_dict() or {}
     models_list = existing.get("models_list", {})
 
+    ordered_models_list = {}
     for model_name, default_model_cfg in default_config.models_list.items():
         if model_name in models_list:
-            if not models_list[model_name].get("description"):
-                models_list[model_name]["description"] = default_model_cfg.description
+            item = models_list[model_name]
+            if not item.get("description"):
+                item["description"] = default_model_cfg.description
+            ordered_models_list[model_name] = item
         else:
-            models_list[model_name] = default_model_cfg.model_dump(mode="json")
+            ordered_models_list[model_name] = default_model_cfg.model_dump(mode="json")
 
-    await config_ref.update({"models_list": models_list})
+    for model_name, custom_cfg in models_list.items():
+        if model_name not in ordered_models_list:
+            ordered_models_list[model_name] = custom_cfg
+
+    await config_ref.update({"models_list": ordered_models_list})
     print(
-        f"  [002_migrate_model_descriptions] ✓ Model descriptions & capabilities verified across {len(models_list)} models."
+        f"  [002_migrate_model_descriptions] ✓ Model descriptions & capabilities verified across {len(ordered_models_list)} models (including 'auto')."
     )
 
 
