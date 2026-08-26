@@ -47,7 +47,12 @@ class AuthService:
         access_token = create_access_token(data=payload)
         refresh_token = create_refresh_token(data=payload)
 
-        return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+        expires_in = settings.access_token_expire_minutes * 60
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_in=expires_in,
+        )
 
     async def change_password(self, email: str, new_password: str) -> None:
         user = await self.user_repo.get_by_email(email)
@@ -76,6 +81,11 @@ class AuthService:
             }
             access_token = create_access_token(data=new_payload)
             refresh_token = create_refresh_token(data=new_payload)
-            return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+            expires_in = settings.access_token_expire_minutes * 60
+            return TokenResponse(
+                access_token=access_token,
+                refresh_token=refresh_token,
+                expires_in=expires_in,
+            )
         except jwt.PyJWTError:
             raise HTTPException(status_code=401, detail="Invalid refresh token")
