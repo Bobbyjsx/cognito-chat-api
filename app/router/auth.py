@@ -78,6 +78,8 @@ async def get_my_profile(
 
 
 @router.post("/refresh", response_model=TokenResponse)
-async def refresh_tokens(request: RefreshRequest, auth_service: AuthService = Depends(get_auth_service)):
+async def refresh_tokens(request: RefreshRequest, db: AsyncClient = Depends(get_db)):
+    from app.core.token_manager import server_token_manager
+
     logger.info("POST /auth/refresh: Received direct client token refresh request")
-    return await auth_service.refresh_tokens(request.refresh_token)
+    return await server_token_manager.refresh_tokens(request.refresh_token, db)
