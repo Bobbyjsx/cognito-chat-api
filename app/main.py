@@ -66,8 +66,8 @@ async def _prewarm_services(app: FastAPI):
         async with httpx.AsyncClient(timeout=3.0) as client:
             try:
                 await client.get("https://generativelanguage.googleapis.com", follow_redirects=True)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("TLS pool pre-warming connection ignored: %s", exc)
         logger.info("Cold-start dependency pre-warming completed successfully.")
     except Exception as exc:
         logger.debug("Pre-warming background task encountered non-critical error: %s", exc)
