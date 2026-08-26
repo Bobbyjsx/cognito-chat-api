@@ -39,25 +39,34 @@ async def migrate():
     ]
 
     models_list = existing.get("models_list", {})
+    ordered_models_list = {}
     for model_name, default_model_cfg in default_config.models_list.items():
         if model_name in models_list:
-            models_list[model_name]["reasoning_modes"] = [
+            item = dict(models_list[model_name])
+            item["reasoning_modes"] = [
                 mode.value if isinstance(mode, ReasoningLevel) else str(mode)
                 for mode in default_model_cfg.reasoning_modes
             ]
+            if not item.get("description"):
+                item["description"] = default_model_cfg.description
+            ordered_models_list[model_name] = item
         else:
-            models_list[model_name] = default_model_cfg.model_dump(mode="json")
+            ordered_models_list[model_name] = default_model_cfg.model_dump(mode="json")
+
+    for model_name, custom_cfg in models_list.items():
+        if model_name not in ordered_models_list:
+            ordered_models_list[model_name] = custom_cfg
 
     updates = {
         "allowed_reasoning_levels": canonical_effort_levels,
         "default_reasoning_level": ReasoningLevel.BALANCED.value,
         "default_routing_mode": RoutingMode.BALANCED.value,
-        "models_list": models_list,
+        "models_list": ordered_models_list,
     }
 
     await config_ref.update(updates)
     print(
-        f"  [003_migrate_unified_effort_modes] ✓ Updated {len(models_list)} models to canonical reasoning levels: {canonical_effort_levels}"
+        f"  [003_migrate_unified_effort_modes] ✓ Updated {len(ordered_models_list)} models to canonical reasoning levels: {canonical_effort_levels}"
     )
 
     # Invalidate Redis cache if available

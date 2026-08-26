@@ -147,6 +147,36 @@ class AppConfigDB(BaseModel):
     # and routing parameters.
     models_list: dict[str, TextModelConfig] = Field(
         default_factory=lambda: {
+            "auto": TextModelConfig(
+                description="Automatically selects the optimal model based on prompt complexity and requirements",
+                enabled=True,
+                reasoning_modes=[
+                    ReasoningLevel.FAST,
+                    ReasoningLevel.BALANCED,
+                    ReasoningLevel.EXTENDED,
+                ],
+                complexity_score=1.0,
+                reasoning_score=1.0,
+                coding_score=1.0,
+                creative_score=1.0,
+                context_score=1.0,
+                vision_score=1.0,
+                tool_calling_score=1.0,
+                structured_output_score=1.0,
+                speed_score=1.0,
+                quality_score=1.0,
+                input_cost_per_million=0.0,
+                output_cost_per_million=0.0,
+                context_window_tokens=2_000_000,
+                supports_vision=True,
+                supports_tools=True,
+                supports_structured_output=True,
+                supports_audio=True,
+                supports_web_search=True,
+                supports_code_execution=True,
+                provider=ModelProvider.GOOGLE,
+                status=ModelStatus.ACTIVE,
+            ),
             "gemini-3.6-flash": TextModelConfig(
                 description="Latest Flash model with full thinking support and highest intelligence",
                 enabled=True,
