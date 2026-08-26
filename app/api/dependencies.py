@@ -113,24 +113,49 @@ async def get_current_user(
         # Check if token is near expiration and refresh proactively if refresh token is supplied
         exp = payload.get("exp")
         if exp and server_token_manager.is_near_expiry(exp) and refresh_token:
+            logger.info(
+                "get_current_user: Access token near expiry on path '%s'. Initiating proactive token refresh.",
+                request.url.path,
+            )
             try:
                 refreshed = await server_token_manager.refresh_tokens(refresh_token, db)
                 response.headers["X-New-Access-Token"] = refreshed.access_token
                 response.headers["X-New-Refresh-Token"] = refreshed.refresh_token
+                logger.info(
+                    "get_current_user: Proactive token refresh successful. Injected updated token headers for '%s'.",
+                    request.url.path,
+                )
             except Exception as ref_exc:
                 logger.debug("Proactive token refresh encountered non-critical error: %s", ref_exc)
-    except (jwt.ExpiredSignatureError, PyJWTError):
+    except (jwt.ExpiredSignatureError, PyJWTError) as token_err:
         # Access token is expired or invalid — attempt transparent server-side refresh if refresh token is present
         if refresh_token:
+            logger.info(
+                "get_current_user: Access token expired/invalid (%s) on path '%s'. Initiating transparent server-side refresh.",
+                type(token_err).__name__,
+                request.url.path,
+            )
             try:
                 refreshed = await server_token_manager.refresh_tokens(refresh_token, db)
                 response.headers["X-New-Access-Token"] = refreshed.access_token
                 response.headers["X-New-Refresh-Token"] = refreshed.refresh_token
                 payload = decode_jwt_payload(refreshed.access_token)
+                logger.info(
+                    "get_current_user: Transparent server-side token refresh successful. Injected updated token headers for '%s'.",
+                    request.url.path,
+                )
             except Exception as ref_fail:
-                logger.debug("Server-side token refresh on expired request failed: %s", ref_fail)
+                logger.warning(
+                    "get_current_user: Transparent server-side token refresh failed on path '%s': %s",
+                    request.url.path,
+                    ref_fail,
+                )
                 raise credentials_exception
         else:
+            logger.debug(
+                "get_current_user: Access token invalid/expired on path '%s' and no x-refresh-token provided.",
+                request.url.path,
+            )
             raise credentials_exception
 
     if payload is None:

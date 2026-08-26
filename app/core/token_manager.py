@@ -48,6 +48,7 @@ class ServerTokenRefreshManager:
             raise HTTPException(status_code=401, detail="Missing refresh token")
 
         key = refresh_token.strip()
+        key_prefix = f"{key[:8]}..." if len(key) >= 8 else "..."
 
         # Check recent refresh burst cache (5s TTL)
         now = time.time()
@@ -55,8 +56,14 @@ class ServerTokenRefreshManager:
         if cached:
             cached_resp, cached_time = cached
             if now - cached_time < 5.0:
+                logger.info(
+                    "ServerTokenRefreshManager: Serving from burst cache (key_prefix=%s, age=%.2fs)",
+                    key_prefix,
+                    now - cached_time,
+                )
                 return cached_resp
 
+        logger.info("ServerTokenRefreshManager: Initiating token refresh (key_prefix=%s)", key_prefix)
         lock = await self._get_lock(key)
         async with lock:
             # Double-check burst cache inside lock
@@ -64,6 +71,10 @@ class ServerTokenRefreshManager:
             if cached:
                 cached_resp, cached_time = cached
                 if time.time() - cached_time < 5.0:
+                    logger.info(
+                        "ServerTokenRefreshManager: Concurrency deduplicated via burst cache lock (key_prefix=%s)",
+                        key_prefix,
+                    )
                     return cached_resp
 
             # Try local auth service refresh first
@@ -73,14 +84,25 @@ class ServerTokenRefreshManager:
             token_response = None
             try:
                 token_response = await auth_service.refresh_tokens(refresh_token)
+                logger.info(
+                    "ServerTokenRefreshManager: Local token refresh succeeded (expires_in=%ss)",
+                    token_response.expires_in,
+                )
             except Exception as local_exc:
-                logger.debug("Local auth refresh did not succeed, checking identity service: %s", local_exc)
+                logger.debug(
+                    "Local auth refresh did not succeed, checking identity service: %s",
+                    local_exc,
+                )
 
             # If local refresh failed and identity service URL is configured, try identity service
             if token_response is None and settings.identity_service_url:
                 import httpx
 
                 refresh_url = f"{settings.identity_service_url.rstrip('/')}/api/v1/auth/refresh"
+                logger.info(
+                    "ServerTokenRefreshManager: Requesting token refresh from identity service (%s)",
+                    refresh_url,
+                )
                 try:
                     async with httpx.AsyncClient(timeout=5.0) as client:
                         resp = await client.post(
@@ -94,10 +116,18 @@ class ServerTokenRefreshManager:
                                 refresh_token=data.get("refresh_token") or data.get("refreshToken") or refresh_token,
                                 expires_in=data.get("expires_in") or data.get("expiresIn") or 1800,
                             )
+                            logger.info(
+                                "ServerTokenRefreshManager: Identity service token refresh succeeded (expires_in=%ss)",
+                                token_response.expires_in,
+                            )
                 except Exception as id_exc:
                     logger.warning("Identity service token refresh failed: %s", id_exc)
 
             if token_response is None:
+                logger.warning(
+                    "ServerTokenRefreshManager: Token refresh failed — invalid or expired refresh token (key_prefix=%s)",
+                    key_prefix,
+                )
                 raise HTTPException(
                     status_code=401,
                     detail="Invalid or expired refresh token",

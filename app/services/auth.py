@@ -1,3 +1,5 @@
+import logging
+
 import jwt
 from fastapi import HTTPException, status
 
@@ -10,6 +12,8 @@ from app.core.security import (
 )
 from app.models.users import TokenResponse, UserCreate, UserDB
 from app.repositories.users import UserRepository
+
+logger = logging.getLogger(__name__)
 
 
 class AuthService:
@@ -75,6 +79,7 @@ class AuthService:
             if not user:
                 raise HTTPException(status_code=401, detail="User not found")
 
+            logger.info("AuthService: Refreshing tokens for user %s (%s)", user.id, user.email)
             new_payload = {
                 "sub": str(user.id),
                 "email": user.email,
