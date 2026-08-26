@@ -108,6 +108,39 @@ def test_refresh_token(client):
     assert me_response.json()["email"] == "refreshtest@example.com"
 
 
+def test_transparent_server_side_token_refresh_via_header(client):
+    from datetime import timedelta
+    from app.core.security import create_access_token
+
+    client.post("/auth/signup", json={"email": "transparent@example.com", "password": "securepassword123"})
+    login_resp = client.post("/auth/login", json={"email": "transparent@example.com", "password": "securepassword123"})
+    tokens = login_resp.json()
+    refresh_tok = tokens["refresh_token"]
+
+    # Create an expired access token (-10 seconds)
+    expired_token = create_access_token(
+        data={"sub": tokens.get("sub", "transparent-user"), "email": "transparent@example.com"},
+        expires_delta=timedelta(seconds=-10),
+    )
+
+    # 1. Without X-Refresh-Token header -> returns 401
+    resp_no_refresh = client.get("/auth/me", headers={"Authorization": f"Bearer {expired_token}"})
+    assert resp_no_refresh.status_code == 401
+
+    # 2. With valid X-Refresh-Token header -> automatically refreshes on server, returns 200 and new token headers
+    resp_with_refresh = client.get(
+        "/auth/me",
+        headers={
+            "Authorization": f"Bearer {expired_token}",
+            "X-Refresh-Token": refresh_tok,
+        },
+    )
+    assert resp_with_refresh.status_code == 200
+    assert resp_with_refresh.json()["email"] == "transparent@example.com"
+    assert "x-new-access-token" in resp_with_refresh.headers or "X-New-Access-Token" in resp_with_refresh.headers
+    assert "x-new-refresh-token" in resp_with_refresh.headers or "X-New-Refresh-Token" in resp_with_refresh.headers
+
+
 def test_sessions(client, mock_agent):
     client.post("/auth/signup", json={"email": "sessionuser@example.com", "password": "securepassword123"})
 
