@@ -37,16 +37,20 @@ async def migrate():
     existing_data = config_doc.to_dict() or {}
     print(f"\nFound existing 'configs/app_config' with {len(existing_data)} fields.")
 
-    # Build the targeted update — only the fields this migration owns
+    # Build the targeted update — update models_list descriptions and reasoning modes
+    models_list = existing_data.get("models_list", {})
+    for model_name, default_model_cfg in default_config.models_list.items():
+        if model_name in models_list:
+            models_list[model_name]["reasoning_modes"] = [
+                mode.value if hasattr(mode, "value") else str(mode) for mode in default_model_cfg.reasoning_modes
+            ]
+            if not models_list[model_name].get("description"):
+                models_list[model_name]["description"] = default_model_cfg.description
+        else:
+            models_list[model_name] = default_model_cfg.model_dump(mode="json")
+
     updates: dict = {
-        # Always overwrite reasoning modes so they reflect latest model capabilities
-        "model_reasoning_modes": default_config.model_reasoning_modes,
-        # Merge descriptions — keep any custom overrides already in Firestore
-        "model_descriptions": {
-            **default_config.model_descriptions,
-            # Preserve any manually customised descriptions already stored
-            **(existing_data.get("model_descriptions") or {}),
-        },
+        "models_list": models_list,
     }
 
     print("\nApplying the following updates to 'configs/app_config':")
@@ -61,8 +65,7 @@ async def migrate():
     await config_ref.update(updates)
 
     print("\nMigration completed successfully!")
-    print("  - model_reasoning_modes: updated with per-model capability-accurate levels")
-    print("  - model_descriptions: merged (existing custom values preserved)")
+    print("  - models_list: updated with per-model descriptions and reasoning modes")
 
 
 if __name__ == "__main__":
