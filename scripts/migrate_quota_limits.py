@@ -34,8 +34,7 @@ async def migrate_global_config_and_users():
         for k, v in existing_data.items():
             print(f"  - {k}: {v}")
 
-        # Update model_reasoning_modes to ensure latest model mappings exist
-        config_updates = {"model_reasoning_modes": default_config.model_reasoning_modes}
+        config_updates = {}
         if "default_token_limit_6h" not in existing_data:
             config_updates["default_token_limit_6h"] = default_config.default_token_limit_6h
         if "default_token_limit_weekly" not in existing_data:
