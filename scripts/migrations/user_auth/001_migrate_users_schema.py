@@ -4,7 +4,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 
 # Add root directory to sys.path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
 from google.cloud.firestore_v1 import DELETE_FIELD
 
@@ -12,8 +12,13 @@ from app.database import create_db_client, init_db
 from app.utils.datetime import ensure_utc
 
 
-async def run_migration():
-    print("Initializing Database Connection...")
+async def migrate():
+    """Migrate user documents to 6-hour and weekly usage tracking schema.
+
+    Date: 2026-03-10
+    Idempotent: Removes legacy limit field and sets defaults only if missing.
+    """
+    print("  [001_migrate_users_schema] Initializing Firestore connection...")
     init_db()
     db = create_db_client()
 
@@ -36,8 +41,6 @@ async def run_migration():
         # 2. Ensure 6-hourly quota fields exist
         if "tokens_used_6h" not in data:
             updates["tokens_used_6h"] = 0
-        if "token_limit_6h" not in data:
-            updates["token_limit_6h"] = 60_000
 
         reset_at = ensure_utc(data.get("reset_at"))
         if reset_at is None:
@@ -46,22 +49,18 @@ async def run_migration():
         # 3. Ensure weekly quota fields exist
         if "tokens_used_weekly" not in data:
             updates["tokens_used_weekly"] = 0
-        if "token_limit_weekly" not in data:
-            updates["token_limit_weekly"] = 300_000
 
         weekly_reset_at = ensure_utc(data.get("weekly_reset_at"))
         if weekly_reset_at is None:
             updates["weekly_reset_at"] = next_weekly
 
         if updates:
-            print(f"Migrating user document: {doc.id} with updates: {list(updates.keys())}")
+            print(f"  [001_migrate_users_schema] Migrating user {doc.id}: {list(updates.keys())}")
             await doc.reference.update(updates)
             migrated_count += 1
-        else:
-            print(f"User document {doc.id} is already up to date.")
 
-    print(f"\nMigration complete! Total user documents updated: {migrated_count}")
+    print(f"  [001_migrate_users_schema] ✓ Users schema migration complete. Updated {migrated_count} documents.")
 
 
 if __name__ == "__main__":
-    asyncio.run(run_migration())
+    asyncio.run(migrate())

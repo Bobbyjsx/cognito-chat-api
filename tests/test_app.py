@@ -110,6 +110,7 @@ def test_refresh_token(client):
 
 def test_transparent_server_side_token_refresh_via_header(client):
     from datetime import timedelta
+
     from app.core.security import create_access_token
 
     client.post("/auth/signup", json={"email": "transparent@example.com", "password": "securepassword123"})

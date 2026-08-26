@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 
 from app.models.chats import ChatResponse
-from app.models.config import AppConfigDB
+from app.models.config import AppConfigDB, normalize_reasoning_level
 from app.models.users import UserDB
 from app.providers.base import (
     BaseProvider,
@@ -39,8 +39,6 @@ from app.tools.executor import ToolExecutor
 from app.tools.registry import ToolRegistry
 from app.utils.datetime import ensure_utc
 from app.utils.prompts import get_base_system_instructions
-
-from app.models.config import normalize_reasoning_level
 
 logger = logging.getLogger(__name__)
 

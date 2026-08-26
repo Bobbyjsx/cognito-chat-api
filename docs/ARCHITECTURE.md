@@ -131,3 +131,55 @@ Chat flow (`POST /agent/chat` with `attachments: [uuid, ...]`):
 - `POST /agent/chat` and `/agent/chat/stream` accept `attachments: [uuid, ...]`; `MessageSchema` gains `attachment_ids`. Responses/SSE events are unchanged (`text`, `reasoning`, `tool_call`, `tool_result`, `usage`).
 - `/config` response now includes `allowed_text_models`.
 - Response headers on protected endpoints: `X-New-Access-Token` and `X-New-Refresh-Token` when rotated.
+
+---
+
+## Database & Feature Migration Architecture (`scripts/migrations/`)
+
+Database and configuration migrations are organized in **feature-scoped modules** under `scripts/migrations/`.
+
+### Directory Layout
+
+```
+scripts/
+├── migrate.py                      # Central CLI & dependency dispatcher
+├── migrations/
+│   ├── core_config/                # Feature: core-config / initial-setup
+│   │   ├── runner.py               # Step registry & execution runner
+│   │   └── 001_seed_app_config.py
+│   ├── user_auth/                  # Feature: user-auth / users
+│   │   ├── runner.py
+│   │   ├── 001_migrate_users_schema.py
+│   │   └── 002_migrate_quota_limits.py
+│   ├── speech_to_text/             # Feature: speech-to-text / stt
+│   │   ├── runner.py
+│   │   └── 001_migrate_stt_config.py
+│   └── smart_model_routing/        # Feature: smart-model-routing
+│       ├── runner.py
+│       ├── 001_migrate_models_list_structure.py
+│       ├── 002_migrate_model_descriptions.py
+│       └── 003_migrate_unified_effort_modes.py
+```
+
+### Key Principles
+
+1. **Feature Scoping**: Every migration belongs to a specific feature directory.
+2. **Chronological Ordering**: Each feature contains numbered steps (`001_`, `002_`, `003_`) executed sequentially by the feature's `runner.py`.
+3. **Docstrings & Metadata**: Every migration step documents its creation date, purpose, and schema impacts.
+4. **Idempotency**: All migrations check existing state, merge non-destructively, and use conditional field deletions. Running any migration multiple times will never crash, duplicate records, or overwrite customized production settings.
+
+### Running Migrations
+
+```bash
+# Run migrations for a specific feature (in chronological order)
+make migrate smart-model-routing
+make migrate user-auth
+make migrate speech-to-text
+make migrate core-config
+
+# Run all migrations across all features in dependency order
+make migrate all
+
+# List all available features, aliases, dates, and migration steps
+make migrate-list
+```

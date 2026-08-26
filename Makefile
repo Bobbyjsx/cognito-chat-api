@@ -24,6 +24,18 @@ test:
 	PYTHONPATH=. $(VENV)/pytest tests/ || (docker compose down && exit 1)
 	docker compose down
 
+# If the first argument is "migrate", treat remaining words as feature names
+ifeq (migrate,$(firstword $(MAKECMDGOALS)))
+  MIGRATE_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
+  $(eval $(MIGRATE_ARGS):;@:)
+endif
+
+migrate:
+	PYTHONPATH=. $(VENV)/python scripts/migrate.py $(MIGRATE_ARGS)
+
+migrate-list:
+	PYTHONPATH=. $(VENV)/python scripts/migrate.py --list
+
 clean:
 	rm -rf __pycache__
 	rm -rf .ruff_cache
