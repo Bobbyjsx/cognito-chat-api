@@ -33,9 +33,7 @@ class ServerTokenRefreshManager:
                 self._locks[key] = asyncio.Lock()
             return self._locks[key]
 
-    def is_near_expiry(
-        self, exp_timestamp: int | float | None, buffer_seconds: int = TOKEN_REFRESH_BUFFER_SECONDS
-    ) -> bool:
+    def is_near_expiry(self, exp_timestamp: float | None, buffer_seconds: int = TOKEN_REFRESH_BUFFER_SECONDS) -> bool:
         if not exp_timestamp:
             return True
         now = time.time()
