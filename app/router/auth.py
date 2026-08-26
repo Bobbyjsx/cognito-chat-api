@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, Depends, status
 from google.cloud.firestore_v1.async_client import AsyncClient
 
@@ -15,6 +17,8 @@ from app.repositories.config import ConfigRepository
 from app.repositories.users import UserRepository
 from app.services.auth import AuthService
 from app.services.quota import QuotaService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -75,4 +79,5 @@ async def get_my_profile(
 
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_tokens(request: RefreshRequest, auth_service: AuthService = Depends(get_auth_service)):
+    logger.info("POST /auth/refresh: Received direct client token refresh request")
     return await auth_service.refresh_tokens(request.refresh_token)
