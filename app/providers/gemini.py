@@ -28,6 +28,7 @@ from app.providers.base import (
     GenerationConfig,
     GenerationEvent,
     GenerationResult,
+    ProviderError,
     ProviderGenerationError,
     ProviderModelNotFoundError,
     ToolCall,
@@ -157,14 +158,61 @@ class GeminiProvider(BaseProvider):
             )
         return calls
 
-    def _wrap_error(self, exc: Exception) -> Exception:
+    def normalize_error(self, exc: Exception) -> Exception:
         if isinstance(exc, genai_errors.APIError):
             status = getattr(exc, "code", None) or 500
             message = getattr(exc, "message", None) or str(exc) or ""
             if status == 404 or getattr(exc, "status", None) == "NOT_FOUND":
                 return ProviderModelNotFoundError(message or "Model not found.")
+            if status == 429 or getattr(exc, "status", None) == "RESOURCE_EXHAUSTED":
+                from app.providers.base import ProviderRateLimitError
+
+                return ProviderRateLimitError(message or "Gemini quota / rate limit exceeded.", status_code=429)
+            if status in (401, 403) or getattr(exc, "status", None) == "PERMISSION_DENIED":
+                from app.providers.base import ProviderAuthError
+
+                return ProviderAuthError(message or "Gemini authentication failed.", status_code=int(status))
+            if status == 400 or getattr(exc, "status", None) == "INVALID_ARGUMENT":
+                from app.providers.base import ProviderInvalidRequestError
+
+                return ProviderInvalidRequestError(message or "Invalid Gemini request.", status_code=400)
+            if status == 503 or getattr(exc, "status", None) == "UNAVAILABLE":
+                from app.providers.base import ProviderOverloadedError
+
+                return ProviderOverloadedError(message or "Gemini service is temporarily unavailable.", status_code=503)
+            if status == 504 or getattr(exc, "status", None) == "DEADLINE_EXCEEDED":
+                from app.providers.base import ProviderTimeoutError
+
+                return ProviderTimeoutError(message or "Gemini request timed out.", status_code=504)
             return ProviderGenerationError(message or "Model generation failed.", status_code=int(status))
-        return exc
+        if isinstance(exc, ProviderError):
+            return exc
+        return ProviderGenerationError(str(exc) or "Model generation failed.", status_code=500)
+
+    def _wrap_error(self, exc: Exception) -> Exception:
+        return self.normalize_error(exc)
+
+    def supports(self, capability: str) -> bool:
+        if capability in (
+            "audio",
+            "audio_transcription",
+            "vision",
+            "tools",
+            "reasoning",
+            "web_search",
+            "code_execution",
+        ):
+            return True
+        return True
+
+    def supports_model(self, model: str) -> bool:
+        return model.startswith("gemini") or "imagen" in model or "veo" in model
+
+    async def delete_file(self, file_uri: str) -> None:
+        try:
+            await self.client.aio.files.delete(name=file_uri)
+        except Exception as exc:
+            logger.warning("Failed to delete Gemini file %s: %s", file_uri, exc)
 
     # ── tool construction ────────────────────────────────────────────────────
 

@@ -29,14 +29,17 @@ class ScoringEngine:
         policy: RoutingPolicy,
     ) -> list[ScoredCandidate]:
         """Score all eligible candidate models and return them sorted by score descending."""
-        if not candidate_models:
+        # Precompute cost scale across the real candidate pool (excluding pseudo-model selectors)
+        real_candidates = {
+            k: v for k, v in candidate_models.items() if k.lower() not in ("auto", "smart", "default", "none")
+        }
+        if not real_candidates:
             return []
 
-        # Precompute cost scale across the candidate pool for relative normalization
-        min_cost, max_cost = self._compute_cost_range(candidate_models)
+        min_cost, max_cost = self._compute_cost_range(real_candidates)
 
         scored: list[ScoredCandidate] = []
-        for model_id, model in candidate_models.items():
+        for model_id, model in real_candidates.items():
             breakdown = self.evaluate_model(
                 model=model,
                 analysis=analysis,

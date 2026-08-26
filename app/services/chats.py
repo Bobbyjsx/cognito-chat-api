@@ -13,9 +13,11 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import HTTPException
 
@@ -28,6 +30,7 @@ from app.providers.base import (
     GenerationConfig,
     GenerationEvent,
     classify_provider_error,
+    is_retryable_provider_error,
 )
 from app.repositories.chats import ChatRepository
 from app.repositories.config import ConfigRepository
@@ -65,6 +68,7 @@ class AgentService:
         config_repo: ConfigRepository,
         attachment_service: AttachmentService,
         provider: BaseProvider | None = None,
+        provider_registry: Any | None = None,
         registry: ToolRegistry | None = None,
         executor: ToolExecutor | None = None,
         context_manager: ContextManager | None = None,
@@ -75,19 +79,33 @@ class AgentService:
         self.config_repo = config_repo
         self.attachment_service = attachment_service
 
-        if provider is None:
-            from app.core.config import settings
-            from app.providers.gemini import GeminiProvider
+        if provider_registry is None:
+            if provider is not None:
+                from app.models.config import ModelProvider
+                from app.providers.registry import ProviderRegistry
 
-            provider = GeminiProvider(api_key=settings.gemini_api_key)
-        self.provider = provider
+                provider_registry = ProviderRegistry()
+                provider_registry.register("default", provider)
+                provider_registry.register("gemini", provider)
+                provider_registry.register("google", provider)
+                provider_registry.register(ModelProvider.GOOGLE, provider)
+                provider_registry.register("anthropic", provider)
+                provider_registry.register("claude", provider)
+                provider_registry.register(ModelProvider.ANTHROPIC, provider)
+            else:
+                from app.providers.registry import create_default_provider_registry
+
+                provider_registry = create_default_provider_registry()
+
+        self.provider_registry = provider_registry
+        self.provider = provider or provider_registry.get("gemini")
 
         if registry is None:
             registry = ToolRegistry()
             registry.register_defaults()
         self.registry = registry
 
-        self.executor = executor or ToolExecutor(self.registry, self.provider)
+        self.executor = executor or ToolExecutor(self.registry, self.provider_registry)
         self.context_manager = context_manager or ContextManager()
 
         if router is None:
@@ -493,6 +511,7 @@ class AgentService:
         result = None
         used_model = model
         last_exc = None
+        gen_start_time = time.perf_counter()
 
         for attempt_idx, candidate_model in enumerate(models_to_attempt):
             try:
@@ -501,19 +520,29 @@ class AgentService:
                 break
             except Exception as exc:
                 last_exc = exc
-                if attempt_idx < len(models_to_attempt) - 1:
+                is_retryable = is_retryable_provider_error(exc)
+
+                if attempt_idx < len(models_to_attempt) - 1 and is_retryable:
                     logger.warning(
-                        "Generation with model '%s' failed (%s). Attempting fallback '%s'.",
+                        "Generation with model '%s' failed with retryable error (%s). Attempting fallback '%s'.",
                         candidate_model,
                         exc,
                         models_to_attempt[attempt_idx + 1],
                     )
                 else:
-                    logger.exception(
-                        "Model generation failed session_id=%s model=%s",
-                        session_id,
-                        candidate_model,
-                    )
+                    if not is_retryable:
+                        logger.warning(
+                            "Generation with model '%s' failed with non-retryable error (%s). Bypassing fallbacks.",
+                            candidate_model,
+                            exc,
+                        )
+                    else:
+                        logger.exception(
+                            "Model generation failed session_id=%s model=%s",
+                            session_id,
+                            candidate_model,
+                        )
+                    break
 
         if result is None and last_exc is not None:
             status, error_code, message = classify_provider_error(last_exc)
@@ -541,11 +570,16 @@ class AgentService:
         await redis_cache.delete_by_prefix(f"sessions:{user.id}")
         await redis_cache.delete_by_prefix(f"session:{session_id}")
 
+        duration_ms = (time.perf_counter() - gen_start_time) * 1000.0
+        provider_name = getattr(self.provider_registry.get_for_model(used_model, active_config), "name", "unknown")
+
         logger.info(
-            "[AgentService] Chat completed: session_id=%s, model='%s', tokens=%d, response='%s...'",
+            "[AgentService] Chat completed: session_id=%s, provider='%s', model='%s', tokens=%d, duration=%.1fms, response='%s...'",
             session_id,
+            provider_name,
             used_model,
             result.total_tokens,
+            duration_ms,
             result.text[:80].replace("\n", " ") if result.text else "",
         )
 
@@ -602,7 +636,7 @@ class AgentService:
                 session_id=str(session_id),
             )
 
-            model, reasoning, thinking_budget, tool_configs, _ = await self.validate_and_resolve_config(
+            model, reasoning, thinking_budget, tool_configs, fallbacks = await self.validate_and_resolve_config(
                 requested_model=requested_model,
                 requested_reasoning=requested_reasoning,
                 message_text=message_text,
@@ -636,30 +670,68 @@ class AgentService:
             yield self._error_event(f"Internal error during stream setup: {exc}")
             return
 
+        models_to_attempt = [model] + [m for m in fallbacks if m != model]
+        stream_started = False
         full_response = ""
         total_tokens = 0
+        used_model = model
+        last_exc = None
+        stream_start_time = time.perf_counter()
+        ttft_ms: float | None = None
 
-        try:
-            logger.info(
-                "[AgentService] Invoking provider generate_stream for model='%s' with %d contents",
-                model,
-                len(contents),
-            )
-            async for event in self.executor.generate_stream(model, contents, generation_config):
-                if event.type == "text":
-                    full_response += event.token or ""
-                elif event.type == "usage" and event.total_tokens:
-                    total_tokens = event.total_tokens
-                yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
-        except Exception as exc:
-            status, error_code, message = classify_provider_error(exc)
-            logger.exception(
-                "Model generation failed session_id=%s model=%s error_code=%s status=%s",
-                session_id,
-                model,
-                error_code,
-                status,
-            )
+        for attempt_idx, candidate_model in enumerate(models_to_attempt):
+            try:
+                logger.info(
+                    "[AgentService] Invoking provider generate_stream for model='%s' with %d contents",
+                    candidate_model,
+                    len(contents),
+                )
+                async for event in self.executor.generate_stream(candidate_model, contents, generation_config):
+                    if not stream_started:
+                        stream_started = True
+                        used_model = candidate_model
+                    if event.type in ("text", "reasoning") and ttft_ms is None:
+                        ttft_ms = (time.perf_counter() - stream_start_time) * 1000.0
+
+                    if event.type == "text":
+                        full_response += event.token or ""
+                    elif event.type == "usage" and event.total_tokens:
+                        total_tokens = event.total_tokens
+                    yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
+
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                if stream_started:
+                    # Chunks were already yielded to client; cannot silently switch fallback model
+                    logger.exception(
+                        "Streaming interrupted session_id=%s model=%s",
+                        session_id,
+                        candidate_model,
+                    )
+                    break
+
+                # Stream failed before sending tokens to client; check if retryable on next candidate
+                is_retryable = is_retryable_provider_error(exc)
+
+                if attempt_idx < len(models_to_attempt) - 1 and is_retryable:
+                    logger.warning(
+                        "Stream startup failed for model '%s' (%s). Attempting fallback '%s'.",
+                        candidate_model,
+                        exc,
+                        models_to_attempt[attempt_idx + 1],
+                    )
+                else:
+                    logger.exception(
+                        "Model generation failed session_id=%s model=%s",
+                        session_id,
+                        candidate_model,
+                    )
+                    break
+
+        if last_exc is not None:
+            _status, error_code, message = classify_provider_error(last_exc)
             await asyncio.gather(
                 user_msg_task,
                 self.chat_repo.add_message(
@@ -690,15 +762,21 @@ class AgentService:
             yield self._error_event("Token limit exceeded after generation. Please upgrade your plan.")
             return
 
+        total_duration_ms = (time.perf_counter() - stream_start_time) * 1000.0
+        provider_name = getattr(self.provider_registry.get_for_model(used_model, active_config), "name", "unknown")
+
         logger.info(
-            "[AgentService] Stream chat completed: session_id=%s, model='%s', tokens=%d, full_response='%s...'",
+            "[AgentService] Stream chat completed: session_id=%s, provider='%s', model='%s', tokens=%d, TTFT=%.1fms, total_duration=%.1fms, full_response='%s...'",
             session_id,
-            model,
+            provider_name,
+            used_model,
             total_tokens,
+            ttft_ms if ttft_ms is not None else 0.0,
+            total_duration_ms,
             full_response[:80].replace("\n", " ") if full_response else "",
         )
 
         yield (
             "event: done\n"
-            f"data: {json.dumps({'session_id': str(session_id), 'title': title, 'tokens_used': total_tokens, 'model': model, 'reasoning': reasoning})}\n\n"
+            f"data: {json.dumps({'session_id': str(session_id), 'title': title, 'tokens_used': total_tokens, 'model': used_model, 'reasoning': reasoning})}\n\n"
         )

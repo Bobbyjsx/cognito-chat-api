@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 from app.api.dependencies import get_storage_backend
 from app.core.config import settings
 from app.database import create_db_client, init_db
-from app.providers.gemini import GeminiProvider
 from app.repositories.attachments import AttachmentRepository
 from app.router import attachments, auth, chats, config, stt
 from app.services.attachments import AttachmentService
@@ -80,7 +79,12 @@ from app.core.redis import redis_cache
 async def lifespan(app: FastAPI):
     init_db()
     app.state.db_client = create_db_client()
-    app.state.provider = GeminiProvider(api_key=settings.gemini_api_key)
+
+    from app.providers.registry import create_default_provider_registry
+
+    provider_registry = create_default_provider_registry(settings)
+    app.state.provider_registry = provider_registry
+    app.state.provider = provider_registry.get("gemini")
     registry = ToolRegistry()
     registry.register_defaults()
     app.state.tool_registry = registry

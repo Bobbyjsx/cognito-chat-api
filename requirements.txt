@@ -15,4 +15,5 @@ pytest-asyncio
 freezegun
 httpx
 redis
+anthropic
 pre-commit
