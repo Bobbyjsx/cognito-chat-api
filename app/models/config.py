@@ -410,8 +410,12 @@ class AppConfigDB(BaseModel):
     @computed_field
     @property
     def allowed_text_models(self) -> list[str]:
-        """All enabled model names — derived from models_list."""
-        return [name for name, cfg in self.models_list.items() if cfg.enabled]
+        """All enabled model names — derived from models_list with 'auto' guaranteed first."""
+        other = [name for name, cfg in self.models_list.items() if cfg.enabled and name.lower() != "auto"]
+        auto_cfg = self.models_list.get("auto")
+        if auto_cfg and auto_cfg.enabled:
+            return ["auto"] + other
+        return other
 
     def get_reasoning_modes_for_model(self, model_name: str) -> list[str]:
         """Return the intersection of a model's reasoning_modes and the global
