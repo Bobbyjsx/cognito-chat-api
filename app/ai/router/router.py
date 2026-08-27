@@ -259,6 +259,7 @@ class SmartModelRouter:
 
         is_explicit = requested_model and requested_model not in ("auto", "smart", "default")
         if is_explicit:
+            assert requested_model is not None
             logger.info(
                 "[SmartRouter] Explicit model '%s' requested by user. Bypassing smart routing.", requested_model
             )
