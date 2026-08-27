@@ -31,13 +31,17 @@ class RedisCache:
             await self.redis_client.aclose()
             logger.info("Disconnected from Redis cache.")
 
-    async def get(self, key: str) -> Any | None:
+    async def get(self, key: str, model_cls: Any | None = None) -> Any | None:
         if not self.redis_client:
             return None
         try:
             val = await self.redis_client.get(key)
-            if val:
-                return json.loads(val)
+            if not val:
+                return None
+            data = json.loads(val)
+            if model_cls is not None:
+                return model_cls.model_validate(data)
+            return data
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
         return None
