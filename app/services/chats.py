@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 
 from fastapi import HTTPException
 
+from app.ai.router.blacklist import blacklist_model
 from app.models.chats import ChatResponse
 from app.models.config import AppConfigDB, normalize_reasoning_level
 from app.models.users import UserDB
@@ -501,6 +502,7 @@ class AgentService:
                 break
             except Exception as exc:
                 last_exc = exc
+                await blacklist_model(candidate_model)
                 if attempt_idx < len(models_to_attempt) - 1:
                     logger.warning(
                         "Generation with model '%s' failed (%s). Attempting fallback '%s'.",
@@ -602,7 +604,7 @@ class AgentService:
                 session_id=str(session_id),
             )
 
-            model, reasoning, thinking_budget, tool_configs, _ = await self.validate_and_resolve_config(
+            model, reasoning, thinking_budget, tool_configs, fallbacks = await self.validate_and_resolve_config(
                 requested_model=requested_model,
                 requested_reasoning=requested_reasoning,
                 message_text=message_text,
@@ -636,27 +638,61 @@ class AgentService:
             yield self._error_event(f"Internal error during stream setup: {exc}")
             return
 
+        models_to_attempt = [model] + [m for m in fallbacks if m != model]
+        used_model = model
+        last_exc = None
+        has_yielded_chunks = False
         full_response = ""
         total_tokens = 0
 
-        try:
-            logger.info(
-                "[AgentService] Invoking provider generate_stream for model='%s' with %d contents",
-                model,
-                len(contents),
-            )
-            async for event in self.executor.generate_stream(model, contents, generation_config):
-                if event.type == "text":
-                    full_response += event.token or ""
-                elif event.type == "usage" and event.total_tokens:
-                    total_tokens = event.total_tokens
-                yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
-        except Exception as exc:
-            status, error_code, message = classify_provider_error(exc)
+        for attempt_idx, candidate_model in enumerate(models_to_attempt):
+            full_response = ""
+            total_tokens = 0
+            has_yielded_chunks = False
+            last_exc = None
+            try:
+                logger.info(
+                    "[AgentService] Invoking provider generate_stream for model='%s' with %d contents",
+                    candidate_model,
+                    len(contents),
+                )
+                async for event in self.executor.generate_stream(candidate_model, contents, generation_config):
+                    if event.type == "text":
+                        full_response += event.token or ""
+                    elif event.type == "usage" and event.total_tokens:
+                        total_tokens = event.total_tokens
+                    yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
+                    has_yielded_chunks = True
+
+                used_model = candidate_model
+                break
+            except Exception as exc:
+                last_exc = exc
+                await blacklist_model(candidate_model)
+                if has_yielded_chunks:
+                    logger.warning("Stream failed mid-generation for model '%s', cannot retry.", candidate_model)
+                    break
+                else:
+                    if attempt_idx < len(models_to_attempt) - 1:
+                        logger.warning(
+                            "Generation stream with model '%s' failed (%s). Attempting fallback '%s'.",
+                            candidate_model,
+                            exc,
+                            models_to_attempt[attempt_idx + 1],
+                        )
+                    else:
+                        logger.exception(
+                            "Model generation stream failed session_id=%s model=%s",
+                            session_id,
+                            candidate_model,
+                        )
+
+        if last_exc is not None:
+            status, error_code, message = classify_provider_error(last_exc)
             logger.exception(
                 "Model generation failed session_id=%s model=%s error_code=%s status=%s",
                 session_id,
-                model,
+                used_model,
                 error_code,
                 status,
             )
@@ -693,12 +729,12 @@ class AgentService:
         logger.info(
             "[AgentService] Stream chat completed: session_id=%s, model='%s', tokens=%d, full_response='%s...'",
             session_id,
-            model,
+            used_model,
             total_tokens,
             full_response[:80].replace("\n", " ") if full_response else "",
         )
 
         yield (
             "event: done\n"
-            f"data: {json.dumps({'session_id': str(session_id), 'title': title, 'tokens_used': total_tokens, 'model': model, 'reasoning': reasoning})}\n\n"
+            f"data: {json.dumps({'session_id': str(session_id), 'title': title, 'tokens_used': total_tokens, 'model': used_model, 'reasoning': reasoning})}\n\n"
         )
