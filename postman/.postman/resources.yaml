@@ -1,7 +1,0 @@
-# Use this workspace to collaborate
-workspace:
-  id: 103c32e8-9d4b-46a6-a4cb-e358fd8174cd
-
-localResources:
-  environments:
-    - ../environments/antigravity-local.environment.yaml

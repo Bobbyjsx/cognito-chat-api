@@ -1,5 +1,0 @@
-$kind: collection
-name: Antigravity AI API
-variables:
-  - key: baseUrl
-    value: 'http://localhost:8000'
