@@ -70,11 +70,13 @@ class RedisCache:
         if not self.redis_client:
             return
         try:
-            cursor = "0"
-            while cursor != 0:
+            cursor = 0
+            while True:
                 cursor, keys = await self.redis_client.scan(cursor=cursor, match=f"{prefix}*", count=100)
                 if keys:
                     await self.redis_client.delete(*keys)
+                if cursor == 0:
+                    break
         except Exception as e:
             logger.error(f"Redis delete_by_prefix error for prefix {prefix}: {e}")
 

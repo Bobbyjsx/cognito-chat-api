@@ -223,14 +223,14 @@ class AgentService:
                 allowed_tools = [
                     t for t in cfg.allowed_tools if t not in (ToolName.CODE_EXECUTION, ToolName.GOOGLE_SEARCH)
                 ]
-            tool_configs = self.registry.to_provider_configs(allowed_tools)
+            tool_configs = self.registry.to_provider_configs([t.value for t in allowed_tools])
         else:
             from app.models.config import ToolName
 
             allowed_tools = list(cfg.allowed_tools)
             if ToolName.CODE_EXECUTION in allowed_tools and ToolName.GOOGLE_SEARCH in allowed_tools:
                 allowed_tools = [t for t in allowed_tools if t != ToolName.CODE_EXECUTION]
-            tool_configs = self.registry.to_provider_configs(allowed_tools)
+            tool_configs = self.registry.to_provider_configs([t.value for t in allowed_tools])
 
         logger.info(
             "[AgentService] Resolved model config: model='%s', reasoning='%s', thinking_budget=%s, tools=%s, fallbacks=%s",
