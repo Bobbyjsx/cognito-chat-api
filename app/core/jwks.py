@@ -46,10 +46,13 @@ def _store_memory(jwks: dict) -> dict:
 
 
 async def prefetch_jwks() -> dict | None:
+    logger.info("Waking identity service to prefetch JWKS...")
     try:
-        return await get_jwks()
+        result = await get_jwks()
+        logger.info("Identity service wake finished.")
+        return result
     except Exception as exc:
-        logger.info("JWKS prefetch did not complete: %s", exc)
+        logger.info("Identity service wake finished (with ignored error): %s", exc)
         return None
 
 
