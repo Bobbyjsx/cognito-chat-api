@@ -20,6 +20,7 @@ class CandidateFilter:
         analysis: RequestAnalysis,
         policy: RoutingPolicy,
         context: RequestContext | None = None,
+        blacklisted_models: set[str] | None = None,
     ) -> tuple[dict[str, TextModelConfig], dict[str, str]]:
         """Filter out models that cannot satisfy the request.
 
@@ -46,6 +47,10 @@ class CandidateFilter:
 
             if model.status != ModelStatus.ACTIVE:
                 filtered[model_id] = f"Model status is '{model.status}' (must be '{ModelStatus.ACTIVE.value}')."
+                continue
+
+            if blacklisted_models and model_id in blacklisted_models:
+                filtered[model_id] = "Model is currently blacklisted due to recent spike errors or failures."
                 continue
 
             # 2. User plan / allowed models constraint

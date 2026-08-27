@@ -40,3 +40,7 @@ class CacheKeys:
     @staticmethod
     def identity_jwks() -> str:
         return "auth:jwks"
+
+    @staticmethod
+    def model_blacklist(model_id: str) -> str:
+        return f"blacklist:model:{model_id}"

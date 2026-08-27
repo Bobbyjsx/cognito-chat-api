@@ -17,7 +17,8 @@ def test_scorer_prefers_lightweight_model_for_simple_task():
     )
     policy = PolicyRegistry.get(RoutingMode.FAST)
 
-    ranked = scorer.score_candidates(cfg.models_list, analysis, policy)
+    models_to_score = {k: v for k, v in cfg.models_list.items() if k != "auto"}
+    ranked = scorer.score_candidates(models_to_score, analysis, policy)
     assert len(ranked) > 0
     top_model = ranked[0]
     # Simple conversation with fast policy should pick flash-lite tier
@@ -36,7 +37,8 @@ def test_scorer_prefers_powerful_model_for_complex_reasoning_task():
     )
     policy = PolicyRegistry.get(RoutingMode.EXTENDED)
 
-    ranked = scorer.score_candidates(cfg.models_list, analysis, policy)
+    models_to_score = {k: v for k, v in cfg.models_list.items() if k != "auto"}
+    ranked = scorer.score_candidates(models_to_score, analysis, policy)
     assert len(ranked) > 0
     top_model = ranked[0]
     # Deep coding & reasoning with quality policy should choose pro or 3.6-flash
@@ -53,7 +55,8 @@ def test_scorer_penalizes_under_capable_models():
     )
     policy = PolicyRegistry.get(RoutingMode.BALANCED)
 
-    ranked = scorer.score_candidates(cfg.models_list, analysis, policy)
+    models_to_score = {k: v for k, v in cfg.models_list.items() if k != "auto"}
+    ranked = scorer.score_candidates(models_to_score, analysis, policy)
     scored_dict = {c.model_id: c for c in ranked}
 
     # gemini-3.1-flash-lite (complexity=0.25) should have complexity_match ~ 0.0
@@ -68,7 +71,8 @@ def test_scorer_explainable_breakdown():
     analysis = RequestAnalysis(task_type=TaskType.GENERAL_KNOWLEDGE, complexity=0.5)
     policy = PolicyRegistry.get(RoutingMode.BALANCED)
 
-    ranked = scorer.score_candidates(cfg.models_list, analysis, policy)
+    models_to_score = {k: v for k, v in cfg.models_list.items() if k != "auto"}
+    ranked = scorer.score_candidates(models_to_score, analysis, policy)
     for candidate in ranked:
         bd = candidate.breakdown
         assert 0.0 <= bd.capability_match <= 1.0

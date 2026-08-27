@@ -21,6 +21,42 @@ patch("firebase_admin.initialize_app").start()
 patch("firebase_admin._apps", {"[DEFAULT]": True}).start()
 
 
+# Mock Redis to prevent touching a real/live database in tests
+class MockRedisClient:
+    def __init__(self):
+        self.store = {}
+
+    async def get(self, key):
+        return self.store.get(key)
+
+    async def set(self, key, value, ex=None):
+        self.store[key] = value
+
+    async def delete(self, *keys):
+        for k in keys:
+            self.store.pop(k, None)
+
+    async def scan(self, cursor=0, match=None, count=None):
+        if match:
+            prefix = match.replace("*", "")
+            keys = [k for k in self.store if k.startswith(prefix)]
+        else:
+            keys = list(self.store)
+        return 0, keys
+
+    async def flushdb(self):
+        self.store.clear()
+
+    async def ping(self):
+        return True
+
+    async def aclose(self):
+        pass
+
+
+patch("redis.asyncio.from_url", return_value=MockRedisClient()).start()
+
+
 class MockApp:
     project_id = "test-project"
 
@@ -34,7 +70,20 @@ from app.main import app
 
 @pytest.fixture(autouse=True)
 def clear_database():
-    """Clear the Firestore emulator database and re-seed app_config between tests."""
+    """Clear the Firestore emulator database, re-seed app_config, and clear Redis between tests."""
+    from app.core.redis import redis_cache
+
+    if redis_cache.redis_client:
+        if hasattr(redis_cache.redis_client, "store"):
+            redis_cache.redis_client.store.clear()
+        else:
+            import asyncio
+
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(redis_cache.redis_client.flushdb())
+            except RuntimeError:
+                asyncio.run(redis_cache.redis_client.flushdb())
     try:
         import urllib.request
 
