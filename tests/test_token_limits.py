@@ -282,14 +282,10 @@ class TestTokenQuotaEndpoints:
         resp = client.get("/auth/me", headers=headers)
         assert resp.status_code == 200
         data = resp.json()
-        assert "tokens_used_6h" in data
-        assert "token_limit_6h" in data
+        assert "pct_6h" in data
+        assert "pct_weekly" in data
         assert "reset_at" in data
-        assert "tokens_used_weekly" in data
-        assert "token_limit_weekly" in data
         assert "weekly_reset_at" in data
-        assert data["token_limit_6h"] == 60_000
-        assert data["token_limit_weekly"] == 300_000
 
     def test_reset_at_is_6h_from_signup(self, client):
         frozen_now = datetime(2026, 7, 29, 6, 0, 0, tzinfo=timezone.utc)
