@@ -20,12 +20,11 @@ logger = logging.getLogger(__name__)
 
 from app.api.dependencies import get_storage_backend
 from app.core.config import settings
+from app.core.jwks import prefetch_jwks
 from app.database import create_db_client, init_db
-from app.providers.gemini import GeminiProvider
 from app.repositories.attachments import AttachmentRepository
 from app.router import attachments, auth, chats, config, stt
 from app.services.attachments import AttachmentService
-from app.tools.registry import ToolRegistry
 
 
 async def _cleanup_loop(app: FastAPI):
@@ -76,32 +75,41 @@ async def _prewarm_services(app: FastAPI):
 from app.core.redis import redis_cache
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    init_db()
-    app.state.db_client = create_db_client()
-    app.state.provider = GeminiProvider(api_key=settings.gemini_api_key)
-    registry = ToolRegistry()
-    registry.register_defaults()
-    app.state.tool_registry = registry
-
+async def _init_ai_stack(app: FastAPI):
     from app.ai.router import (
         CompositeRequestAnalyzer,
         GeminiFlashLiteAnalyzer,
         HeuristicFallbackAnalyzer,
         SmartModelRouter,
     )
+    from app.providers.gemini import GeminiProvider
+    from app.tools.registry import ToolRegistry
 
+    app.state.provider = GeminiProvider(api_key=settings.gemini_api_key)
+    registry = ToolRegistry()
+    registry.register_defaults()
+    app.state.tool_registry = registry
     flash_analyzer = GeminiFlashLiteAnalyzer(api_key=settings.gemini_api_key)
     heuristic_analyzer = HeuristicFallbackAnalyzer()
-    composite_analyzer = CompositeRequestAnalyzer(primary_analyzer=flash_analyzer, fallback_analyzer=heuristic_analyzer)
+    composite_analyzer = CompositeRequestAnalyzer(
+        primary_analyzer=flash_analyzer,
+        fallback_analyzer=heuristic_analyzer,
+    )
     app.state.smart_router = SmartModelRouter(analyzer=composite_analyzer)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    jwks_task = asyncio.create_task(prefetch_jwks())
+    init_db()
+    app.state.db_client = create_db_client()
     await redis_cache.connect()
+    await _init_ai_stack(app)
     cleanup_task = asyncio.create_task(_cleanup_loop(app))
     prewarm_task = asyncio.create_task(_prewarm_services(app))
 
     yield
+    jwks_task.cancel()
     cleanup_task.cancel()
     prewarm_task.cancel()
     await redis_cache.disconnect()
