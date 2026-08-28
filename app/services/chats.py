@@ -647,6 +647,15 @@ class AgentService:
                 )
             )
 
+            async def _invalidate_caches():
+                from app.core.redis import redis_cache
+
+                await user_msg_task
+                await redis_cache.delete_by_prefix(f"sessions:{user.id}")
+                await redis_cache.delete_by_prefix(f"session:{session_id}")
+
+            asyncio.create_task(_invalidate_caches())
+
             current_parts = await self._prepare_current_parts(message_text, attachments)
             contents = await self._build_contents(user, session, active_config, current_parts)
             generation_config = GenerationConfig(
