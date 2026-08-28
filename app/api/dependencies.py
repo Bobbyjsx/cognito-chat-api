@@ -1,7 +1,7 @@
 import logging
 
 import jwt
-from fastapi import Depends, HTTPException, Request, Response, status
+from fastapi import Depends, Header, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordBearer
 from google.cloud.firestore_v1.async_client import AsyncClient
 from jwt import PyJWTError
@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.core.jwks import IDENTITY_ALGORITHMS, decode_identity_jwt
 from app.core.token_manager import server_token_manager
 from app.database import get_db
+from app.integrations.cloud_tasks import CloudTasksDispatcher
 from app.models.users import UserDB
 from app.providers.base import BaseProvider
 from app.repositories.users import UserRepository
@@ -184,3 +185,34 @@ async def get_current_user(
         logger.debug("Failed to cache user in Redis: %s", exc)
 
     return user
+
+
+def get_tasks_dispatcher(request: Request) -> CloudTasksDispatcher:
+    """Returns the shared CloudTasksDispatcher instance."""
+    dispatcher = getattr(request.app.state, "tasks_dispatcher", None)
+    if dispatcher is None:
+        dispatcher = CloudTasksDispatcher()
+    return dispatcher
+
+
+async def verify_cloud_tasks_caller(
+    request: Request,
+    x_cloudtasks_queuename: str | None = Header(None, alias="X-CloudTasks-QueueName"),
+) -> bool:
+    """
+    Validates that a task request originates from Google Cloud Tasks or an authorized internal worker.
+    """
+    # Cloud Tasks injects specific HTTP headers
+    if x_cloudtasks_queuename:
+        return True
+
+    # Allow in local development
+    if settings.debug or getattr(settings, "environment", "development") == "development":
+        return True
+
+    # We could also verify OIDC token here if we used one
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Unauthorized Cloud Tasks invocation",
+    )

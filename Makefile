@@ -3,7 +3,8 @@
 VENV = .venv/bin
 
 install:
-	$(VENV)/pip install -r requirements.txt
+	$(VENV)/python -m pip install -r requirements.txt
+
 
 run:
 	docker compose up --build --watch cognito-chat-api

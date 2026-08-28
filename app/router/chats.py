@@ -32,16 +32,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/agent", tags=["agent"])
 
 
+from app.api.dependencies import get_tasks_dispatcher
+from app.integrations.cloud_tasks import CloudTasksDispatcher
+from app.repositories.generations import GenerationRepository
+
+
 def get_agent_service(
     db: AsyncClient = Depends(get_db),
     provider: BaseProvider = Depends(get_provider),
     storage: StorageBackend = Depends(get_storage_backend),
     registry: ToolRegistry = Depends(get_tool_registry),
     smart_router=Depends(get_smart_router),
+    dispatcher: CloudTasksDispatcher = Depends(get_tasks_dispatcher),
 ) -> AgentService:
     chat_repo = ChatRepository(db)
     user_repo = UserRepository(db)
     config_repo = ConfigRepository(db)
+    generation_repo = GenerationRepository(db)
     attachment_service = AttachmentService(AttachmentRepository(db), storage, provider)
     executor = ToolExecutor(registry, provider)
     return AgentService(
@@ -53,6 +60,8 @@ def get_agent_service(
         registry=registry,
         executor=executor,
         router=smart_router,
+        generation_repo=generation_repo,
+        tasks_dispatcher=dispatcher,
     )
 
 
@@ -164,6 +173,11 @@ async def get_session(
     messages = session.messages or []
     session.messages = None
 
+    from app.repositories.generations import GenerationRepository
+
+    gen_repo = GenerationRepository(db)
+    active_gen = await gen_repo.get_active_generation(session_id)
+
     response = {
         "session": session.model_dump(mode="json"),
         "messages": {
@@ -172,6 +186,7 @@ async def get_session(
             "offset": offset,
             "has_more": has_more,
         },
+        "active_generation_id": str(active_gen.id) if active_gen else None,
     }
 
     await redis_cache.set(cache_key, response, expire=300)
@@ -216,4 +231,19 @@ async def mark_as_read(
     await redis_cache.delete_by_prefix(f"sessions:{current_user.id}")
     await redis_cache.delete_by_prefix(f"session:{session_id}")
 
-    return {"message": "Session marked as read"}
+
+@router.get("/generations/{generation_id}", status_code=200)
+async def get_generation(
+    generation_id: uuid.UUID,
+    current_user: UserDB = Depends(get_current_user),
+    db: AsyncClient = Depends(get_db),
+):
+    from app.repositories.generations import GenerationRepository
+
+    repo = GenerationRepository(db)
+    generation = await repo.get_by_id(generation_id)
+    if not generation:
+        raise HTTPException(status_code=404, detail="Generation not found")
+    if str(generation.user_id) != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    return generation.model_dump(mode="json")

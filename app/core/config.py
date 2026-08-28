@@ -1,5 +1,3 @@
-import os
-
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
 
@@ -12,7 +10,6 @@ class Settings(BaseSettings):
 
     # Explicitly define this so Pydantic expects it from the .env file
     gemini_api_key: str = ""
-    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
     # Database Configuration (Firebase)
     firebase_credentials_path: str = ""
@@ -38,6 +35,15 @@ class Settings(BaseSettings):
 
     # Cache (Redis)
     redis_url: str = ""
+
+    # Cloud Tasks
+    cloud_tasks_project: str = ""
+    cloud_tasks_location: str = "us-central1"
+    cloud_tasks_queue: str = "cognito-generations"
+    cloud_tasks_worker_url: str = ""
+    cloud_tasks_service_account_email: str = ""
+
+    environment: str = ""
 
     class Config:
         env_file = ".env"

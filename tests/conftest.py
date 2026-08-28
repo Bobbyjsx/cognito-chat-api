@@ -162,3 +162,7 @@ def mock_agent():
         mock_client_instance.aio.files.upload = AsyncMock(return_value=MagicMock(uri="files/mock-upload"))
 
         yield mock_client_instance
+
+
+# Mock Cloud Tasks so tests do not actually hit GCP
+patch("app.integrations.cloud_tasks.tasks_v2.CloudTasksClient").start()

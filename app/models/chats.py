@@ -19,6 +19,35 @@ class ReadStatus(str, Enum):
     NOT_READ = "not read"
 
 
+class GenerationStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING_LIVE = "running_live"
+    RUNNING_WORKER = "running_worker"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class GenerationDB(BaseModel):
+    """Pydantic model representing a durable generation execution."""
+
+    id: UUID = Field(default_factory=uuid4)
+    user_id: UUID | str
+    session_id: UUID
+    message_id: UUID | None = None
+    status: GenerationStatus = GenerationStatus.QUEUED
+    requested_model: str | None = None
+    resolved_model: str | None = None
+    requested_reasoning: str | None = None
+    resolved_reasoning: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: datetime | None = None
+    error: str | None = None
+    usage_tokens: int = 0
+    buffered_text: str = ""
+
+
 class ChatMessageDB(BaseModel):
     """Pydantic model representing a Chat Message document in Firestore."""
 
@@ -28,6 +57,7 @@ class ChatMessageDB(BaseModel):
     content: str
     error: str | None = None
     attachment_ids: list[str] = Field(default_factory=list)
+    generation_id: UUID | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 

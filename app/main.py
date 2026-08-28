@@ -23,7 +23,7 @@ from app.core.config import settings
 from app.core.jwks import prefetch_jwks
 from app.database import create_db_client, init_db
 from app.repositories.attachments import AttachmentRepository
-from app.router import attachments, auth, chats, config, stt
+from app.router import attachments, auth, chats, config, stt, tasks
 from app.services.attachments import AttachmentService
 
 
@@ -82,10 +82,24 @@ async def _init_ai_stack(app: FastAPI):
         HeuristicFallbackAnalyzer,
         SmartModelRouter,
     )
+    from app.integrations.cloud_tasks import CloudTasksDispatcher
     from app.providers.gemini import GeminiProvider
     from app.tools.registry import ToolRegistry
 
+    # Initialize Provider
     app.state.provider = GeminiProvider(api_key=settings.gemini_api_key)
+    logger.info("Initialized GeminiProvider with provided API key.")
+
+    # Initialize CloudTasksDispatcher
+    app.state.tasks_dispatcher = CloudTasksDispatcher(
+        project=settings.cloud_tasks_project,
+        location=settings.cloud_tasks_location,
+        queue=settings.cloud_tasks_queue,
+        worker_url=settings.cloud_tasks_worker_url,
+        service_account_email=settings.cloud_tasks_service_account_email,
+    )
+    logger.info("Initialized CloudTasksDispatcher.")
+
     registry = ToolRegistry()
     registry.register_defaults()
     app.state.tool_registry = registry
@@ -149,6 +163,7 @@ app.include_router(chats.router)
 app.include_router(config.router)
 app.include_router(stt.router)
 app.include_router(attachments.router)
+app.include_router(tasks.router)
 
 
 @app.get("/health")

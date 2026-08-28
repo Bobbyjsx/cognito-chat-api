@@ -70,11 +70,15 @@ class AgentService:
         executor: ToolExecutor | None = None,
         context_manager: ContextManager | None = None,
         router=None,
+        generation_repo=None,
+        tasks_dispatcher=None,
     ):
         self.chat_repo = chat_repo
         self.user_repo = user_repo
         self.config_repo = config_repo
         self.attachment_service = attachment_service
+        self.generation_repo = generation_repo
+        self.tasks_dispatcher = tasks_dispatcher
 
         if provider is None:
             from app.core.config import settings
@@ -587,9 +591,6 @@ class AgentService:
             )
             await self._quota_precheck(user, active_config)
 
-            # Flush session event immediately to establish SSE connection and stream headers (< 10ms)
-            yield f"event: session\ndata: {json.dumps({'session_id': str(session_id), 'title': title})}\n\n"
-
             attachments = await self._prepare_attachments(user, active_config, attachment_ids, session_id)
 
             from app.ai.router.schemas import RequestContext
@@ -611,6 +612,30 @@ class AgentService:
                 routing_mode=routing_mode,
                 context=routing_context,
             )
+
+            # Create generation model first
+            from app.models.chats import GenerationDB, GenerationStatus
+            from app.schemas.task import GenerationTaskPayload
+
+            generation = GenerationDB(
+                user_id=user.id,
+                session_id=session_id,
+                status=GenerationStatus.RUNNING_LIVE,
+                requested_model=requested_model,
+                resolved_model=model,
+                requested_reasoning=requested_reasoning,
+                resolved_reasoning=reasoning,
+            )
+            generation = await self.generation_repo.create(generation)
+
+            yield f"event: session\ndata: {json.dumps({'session_id': str(session_id), 'title': title, 'generation_id': str(generation.id)})}\n\n"
+
+            # Dispatch Cloud Task for background recovery
+            payload = GenerationTaskPayload(generation_id=str(generation.id))
+            try:
+                await self.tasks_dispatcher.enqueue_generation_task(payload)
+            except Exception as e:
+                logger.warning(f"Failed to enqueue generation task: {e}")
 
             # 2. Persist user message in the background concurrently without blocking stream start
             user_msg_task = asyncio.create_task(
@@ -650,6 +675,7 @@ class AgentService:
             total_tokens = 0
             has_yielded_chunks = False
             last_exc = None
+            last_heartbeat_time = asyncio.get_running_loop().time()
             try:
                 logger.info(
                     "[AgentService] Invoking provider generate_stream for model='%s' with %d contents",
@@ -664,8 +690,21 @@ class AgentService:
                     yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
                     has_yielded_chunks = True
 
+                    # Heartbeat every 2 seconds
+                    now = asyncio.get_running_loop().time()
+                    if now - last_heartbeat_time > 2.0:
+                        asyncio.create_task(self.generation_repo.heartbeat(generation.id, full_response))
+                        last_heartbeat_time = now
+
                 used_model = candidate_model
                 break
+            except asyncio.CancelledError:
+                # Client disconnected
+                logger.info(
+                    "Client disconnected during stream_chat for generation %s. Relinquishing to background worker.",
+                    generation.id,
+                )
+                raise
             except Exception as exc:
                 last_exc = exc
                 await blacklist_model(candidate_model)
@@ -703,6 +742,13 @@ class AgentService:
                     role=MessageRole.AGENT,
                     content=full_response,
                     error=f"[{error_code}] {message}",
+                    generation_id=str(generation.id),
+                ),
+                self.generation_repo.update_status(
+                    generation.id,
+                    GenerationStatus.FAILED,
+                    error=f"[{error_code}] {message}",
+                    buffered_text=full_response,
                 ),
                 return_exceptions=True,
             )
@@ -712,16 +758,32 @@ class AgentService:
         from app.core.redis import redis_cache
 
         # Concurrently ensure user message is persisted, agent response is stored, quota is charged, and cache is evicted
+        try:
+            agent_msg = await self.chat_repo.add_message(
+                session_id, role=MessageRole.AGENT, content=full_response, generation_id=str(generation.id)
+            )
+            msg_id_str = str(agent_msg.id)
+        except Exception as e:
+            logger.error("Failed to add agent message: %s", e)
+            msg_id_str = None
+
         persist_results = await asyncio.gather(
             user_msg_task,
-            self.chat_repo.add_message(session_id, role=MessageRole.AGENT, content=full_response),
             self._charge_usage(user, total_tokens, active_config),
+            self.generation_repo.update_status(
+                generation.id,
+                GenerationStatus.COMPLETED,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                usage_tokens=total_tokens,
+                buffered_text=full_response,
+                message_id=msg_id_str,
+            ),
             redis_cache.delete_by_prefix(f"sessions:{user.id}"),
             redis_cache.delete_by_prefix(f"session:{session_id}"),
             return_exceptions=True,
         )
 
-        within_limit = persist_results[2] if isinstance(persist_results[2], bool) else True
+        within_limit = persist_results[1] if isinstance(persist_results[1], bool) else True
         if not within_limit:
             yield self._error_event("Token limit exceeded after generation. Please upgrade your plan.")
             return
