@@ -544,8 +544,10 @@ class AgentService:
 
         from app.core.redis import redis_cache
 
-        await redis_cache.delete_by_prefix(f"sessions:{user.id}")
-        await redis_cache.delete_by_prefix(f"session:{session_id}")
+        from app.core.cache_keys import CacheKeys
+
+        await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id))
+        await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))
 
         logger.info(
             "[AgentService] Chat completed: session_id=%s, model='%s', tokens=%d, response='%s...'",
@@ -649,10 +651,11 @@ class AgentService:
 
             async def _invalidate_caches():
                 from app.core.redis import redis_cache
+                from app.core.cache_keys import CacheKeys
 
                 await user_msg_task
-                await redis_cache.delete_by_prefix(f"sessions:{user.id}")
-                await redis_cache.delete_by_prefix(f"session:{session_id}")
+                await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id))
+                await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))
 
             asyncio.create_task(_invalidate_caches())
 
@@ -775,6 +778,7 @@ class AgentService:
             return
 
         from app.core.redis import redis_cache
+        from app.core.cache_keys import CacheKeys
 
         # Concurrently ensure user message is persisted, agent response is stored, quota is charged, and cache is evicted
         try:
@@ -798,8 +802,8 @@ class AgentService:
                 buffered_thoughts=full_thoughts,
                 message_id=msg_id_str,
             ),
-            redis_cache.delete_by_prefix(f"sessions:{user.id}"),
-            redis_cache.delete_by_prefix(f"session:{session_id}"),
+            redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id)),
+            redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id)),
             return_exceptions=True,
         )
 

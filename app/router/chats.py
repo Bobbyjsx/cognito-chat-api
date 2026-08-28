@@ -168,7 +168,7 @@ async def get_session(
     if session.read_status != ReadStatus.READ:
         await repo.mark_session_read(session_id)
         session.read_status = ReadStatus.READ
-        await redis_cache.delete_by_prefix(f"sessions:{current_user.id}")
+        await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(current_user.id))
 
     messages = session.messages or []
     session.messages = None
@@ -206,9 +206,10 @@ async def delete_session(
         raise HTTPException(status_code=404, detail="Session not found")
 
     from app.core.redis import redis_cache
+    from app.core.cache_keys import CacheKeys
 
-    await redis_cache.delete_by_prefix(f"sessions:{current_user.id}")
-    await redis_cache.delete_by_prefix(f"session:{session_id}")
+    await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(current_user.id))
+    await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))
 
     return {"message": "Session deleted successfully"}
 
@@ -227,9 +228,10 @@ async def mark_as_read(
     await repo.mark_session_read(session_id)
 
     from app.core.redis import redis_cache
+    from app.core.cache_keys import CacheKeys
 
-    await redis_cache.delete_by_prefix(f"sessions:{current_user.id}")
-    await redis_cache.delete_by_prefix(f"session:{session_id}")
+    await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(current_user.id))
+    await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))
 
 
 @router.get("/generations/{generation_id}", status_code=200)

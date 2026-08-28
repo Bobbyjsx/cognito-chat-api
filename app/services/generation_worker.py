@@ -194,9 +194,10 @@ class GenerationWorkerService:
             )
 
             from app.core.redis import redis_cache
+            from app.core.cache_keys import CacheKeys
 
-            await redis_cache.delete_by_prefix(f"sessions:{user.id}")
-            await redis_cache.delete_by_prefix(f"session:{session.id}")
+            await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id))
+            await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session.id))
 
             logger.info("Worker successfully completed generation %s", generation_id)
             return TaskExecutionResponse(
