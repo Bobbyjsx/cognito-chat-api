@@ -144,13 +144,19 @@ class ChatRepository:
         content: str,
         error: str | None = None,
         attachment_ids: list[str] | None = None,
+        generation_id: str | UUID | None = None,
     ) -> ChatMessageDB:
+        # Convert generation_id to UUID if it's a string
+        if isinstance(generation_id, str):
+            generation_id = UUID(generation_id)
+
         message_db = ChatMessageDB(
             session_id=session_id,
             role=role,
             content=content,
             error=error,
             attachment_ids=attachment_ids or [],
+            generation_id=generation_id,
         )
         doc_ref = self.collection.document(str(session_id)).collection("messages").document(str(message_db.id))
         data = message_db.model_dump(mode="json")
