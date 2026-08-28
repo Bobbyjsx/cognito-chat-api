@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 from datetime import datetime, timezone
@@ -152,20 +153,43 @@ class GenerationWorkerService:
                 tool_configs=tool_configs,
             )
 
-            result = await self.agent_service.executor.generate(generation.resolved_model, contents, generation_config)
+            full_response = ""
+            full_thoughts = ""
+            total_tokens = 0
+            last_heartbeat_time = asyncio.get_running_loop().time()
+
+            async for event in self.agent_service.executor.generate_stream(
+                generation.resolved_model, contents, generation_config
+            ):
+                if event.type == "text":
+                    full_response += event.token or ""
+                elif event.type == "reasoning":
+                    full_thoughts += event.token or ""
+                elif event.type == "usage" and event.total_tokens:
+                    total_tokens = event.total_tokens
+
+                now = asyncio.get_running_loop().time()
+                if now - last_heartbeat_time > 2.0:
+                    asyncio.create_task(
+                        self.generation_repo.heartbeat(
+                            generation.id, buffered_text=full_response, buffered_thoughts=full_thoughts
+                        )
+                    )
+                    last_heartbeat_time = now
 
             # Record success
             agent_msg = await self.chat_repo.add_message(
-                session.id, role=MessageRole.AGENT, content=result.text, generation_id=str(generation.id)
+                session.id, role=MessageRole.AGENT, content=full_response, generation_id=str(generation.id)
             )
 
-            await self.agent_service._charge_usage(user, result.total_tokens, active_config)
+            await self.agent_service._charge_usage(user, total_tokens, active_config)
             await self.generation_repo.update_status(
                 generation_id,
                 GenerationStatus.COMPLETED,
                 completed_at=datetime.now(timezone.utc).isoformat(),
-                usage_tokens=result.total_tokens,
-                buffered_text=result.text,
+                usage_tokens=total_tokens,
+                buffered_text=full_response,
+                buffered_thoughts=full_thoughts,
                 message_id=str(agent_msg.id),
             )
 

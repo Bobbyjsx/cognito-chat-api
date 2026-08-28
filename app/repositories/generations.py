@@ -63,17 +63,26 @@ class GenerationRepository:
             update_data["usage_tokens"] = kwargs["usage_tokens"]
         if "buffered_text" in kwargs:
             update_data["buffered_text"] = kwargs["buffered_text"]
+        if "buffered_thoughts" in kwargs:
+            update_data["buffered_thoughts"] = kwargs["buffered_thoughts"]
         if "message_id" in kwargs:
             update_data["message_id"] = str(kwargs["message_id"])
 
         await doc_ref.update(update_data)
 
-    async def heartbeat(self, generation_id: UUID | str, buffered_text: str | None = None) -> None:
+    async def heartbeat(
+        self,
+        generation_id: UUID | str,
+        buffered_text: str | None = None,
+        buffered_thoughts: str | None = None,
+    ) -> None:
         """Update the updated_at timestamp to indicate the generation is still alive."""
         doc_ref = self.collection.document(str(generation_id))
         update_data = {"updated_at": datetime.now(timezone.utc).isoformat()}
         if buffered_text is not None:
             update_data["buffered_text"] = buffered_text
+        if buffered_thoughts is not None:
+            update_data["buffered_thoughts"] = buffered_thoughts
         try:
             await doc_ref.update(update_data)
         except Exception as e:

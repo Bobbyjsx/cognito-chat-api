@@ -681,6 +681,7 @@ class AgentService:
 
         for attempt_idx, candidate_model in enumerate(models_to_attempt):
             full_response = ""
+            full_thoughts = ""
             total_tokens = 0
             has_yielded_chunks = False
             last_exc = None
@@ -694,6 +695,8 @@ class AgentService:
                 async for event in self.executor.generate_stream(candidate_model, contents, generation_config):
                     if event.type == "text":
                         full_response += event.token or ""
+                    elif event.type == "reasoning":
+                        full_thoughts += event.token or ""
                     elif event.type == "usage" and event.total_tokens:
                         total_tokens = event.total_tokens
                     yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
@@ -702,7 +705,13 @@ class AgentService:
                     # Heartbeat every 2 seconds
                     now = asyncio.get_running_loop().time()
                     if now - last_heartbeat_time > 2.0:
-                        asyncio.create_task(self.generation_repo.heartbeat(generation.id, full_response))
+                        asyncio.create_task(
+                            self.generation_repo.heartbeat(
+                                generation.id,
+                                buffered_text=full_response,
+                                buffered_thoughts=full_thoughts,
+                            )
+                        )
                         last_heartbeat_time = now
 
                 used_model = candidate_model
@@ -758,6 +767,7 @@ class AgentService:
                     GenerationStatus.FAILED,
                     error=f"[{error_code}] {message}",
                     buffered_text=full_response,
+                    buffered_thoughts=full_thoughts,
                 ),
                 return_exceptions=True,
             )
@@ -785,6 +795,7 @@ class AgentService:
                 completed_at=datetime.now(timezone.utc).isoformat(),
                 usage_tokens=total_tokens,
                 buffered_text=full_response,
+                buffered_thoughts=full_thoughts,
                 message_id=msg_id_str,
             ),
             redis_cache.delete_by_prefix(f"sessions:{user.id}"),

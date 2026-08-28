@@ -46,6 +46,7 @@ class GenerationDB(BaseModel):
     error: str | None = None
     usage_tokens: int = 0
     buffered_text: str = ""
+    buffered_thoughts: str = ""
 
 
 class ChatMessageDB(BaseModel):
