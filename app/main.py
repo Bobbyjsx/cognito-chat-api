@@ -141,11 +141,8 @@ app = FastAPI(
 async def add_cache_control_header(request: Request, call_next):
     response = await call_next(request)
     if request.method == "GET" and response.status_code == 200 and "Cache-Control" not in response.headers:
-        # Disable browser caching for dynamic API responses to ensure
-        # frontend stays perfectly in sync with our Redis backend cache busts.
-        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        response.headers["Pragma"] = "no-cache"
-        response.headers["Expires"] = "0"
+        # Cache all GET requests for 60 seconds, allowing stale-while-revalidate for smooth reloads
+        response.headers["Cache-Control"] = "private, max-age=60, stale-while-revalidate=60"
     return response
 
 
