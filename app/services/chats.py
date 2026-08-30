@@ -656,6 +656,7 @@ class AgentService:
                     role=MessageRole.USER,
                     content=message_text,
                     attachment_ids=[str(a.id) for a in attachments],
+                    generation_id=str(generation.id),
                 )
             )
 

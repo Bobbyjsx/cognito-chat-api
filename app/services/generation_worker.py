@@ -121,8 +121,8 @@ class GenerationWorkerService:
 
             contents = []
             for msg in session.messages:
-                # exclude messages that are newer than this generation
-                if msg.created_at > generation.created_at:
+                # exclude messages that are newer than this generation, unless explicitly tied to it
+                if msg.created_at > generation.created_at and str(msg.generation_id) != str(generation.id):
                     continue
                 parts = [{"text": msg.content}]
                 # Note: skipping attachment hydration here for brevity unless needed
