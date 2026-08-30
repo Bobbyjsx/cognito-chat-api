@@ -586,11 +586,21 @@ class AgentService:
         import asyncio
 
         try:
+            is_new_session = session_id is None
+
             # 1. Concurrently fetch active config and resolve chat session
             active_config, (session, session_id, title) = await asyncio.gather(
                 self.get_active_config(),
                 self._resolve_session(user, session_id, message_text),
             )
+
+            if is_new_session:
+                from app.core.redis import redis_cache
+                from app.core.cache_keys import CacheKeys
+
+                # Immediately invalidate the sessions list cache so fast reloads see the new chat
+                await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id))
+
             await self._quota_precheck(user, active_config)
 
             attachments = await self._prepare_attachments(user, active_config, attachment_ids, session_id)
