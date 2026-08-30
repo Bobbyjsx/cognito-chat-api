@@ -590,95 +590,122 @@ class AgentService:
         try:
             is_new_session = session_id is None
 
-            # 1. Concurrently fetch active config and resolve chat session
-            active_config, (session, session_id, title) = await asyncio.gather(
-                self.get_active_config(),
-                self._resolve_session(user, session_id, message_text),
-            )
-
-            if is_new_session:
-                from app.core.redis import redis_cache
-                from app.core.cache_keys import CacheKeys
-
-                # Immediately invalidate the sessions list cache so fast reloads see the new chat
-                await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id))
-
-            await self._quota_precheck(user, active_config)
-
-            attachments = await self._prepare_attachments(user, active_config, attachment_ids, session_id)
-
+            from app.core.redis import redis_cache
+            from app.core.cache_keys import CacheKeys
             from app.ai.router.schemas import RequestContext
-            from app.models.chats import MessageRole
-
-            routing_context = RequestContext(
-                conversation_message_count=len(session.messages) if session and session.messages else 0,
-                approximate_context_tokens=len(message_text) // 4,
-                has_attachments=bool(attachments),
-                attachment_types=[a.type for a in attachments],
-                user_id=str(user.id),
-                session_id=str(session_id),
-            )
-
-            model, reasoning, thinking_budget, tool_configs, fallbacks = await self.validate_and_resolve_config(
-                requested_model=requested_model,
-                requested_reasoning=requested_reasoning,
-                message_text=message_text,
-                routing_mode=routing_mode,
-                context=routing_context,
-            )
-
-            # Create generation model first
-            from app.models.chats import GenerationDB, GenerationStatus
+            from app.models.chats import MessageRole, GenerationDB, GenerationStatus
             from app.schemas.task import GenerationTaskPayload
 
-            generation = GenerationDB(
-                user_id=user.id,
-                session_id=session_id,
-                status=GenerationStatus.RUNNING_LIVE,
-                requested_model=requested_model,
-                resolved_model=model,
-                requested_reasoning=requested_reasoning,
-                resolved_reasoning=reasoning,
-            )
-            generation = await self.generation_repo.create(generation)
-
-            # 2. Persist user message in the background concurrently without blocking stream start
-            user_msg_task = asyncio.create_task(
-                self.chat_repo.add_message(
-                    session_id,
-                    role=MessageRole.USER,
-                    content=message_text,
-                    attachment_ids=[str(a.id) for a in attachments],
-                    generation_id=str(generation.id),
+            async def _shielded_prep():
+                _active_config, (_session, _session_id, _title) = await asyncio.gather(
+                    self.get_active_config(),
+                    self._resolve_session(user, session_id, message_text),
                 )
-            )
-            _fire_and_forget_tasks.add(user_msg_task)
-            user_msg_task.add_done_callback(_fire_and_forget_tasks.discard)
 
-            # Dispatch Cloud Task for background recovery without blocking
-            payload = GenerationTaskPayload(generation_id=str(generation.id))
+                if is_new_session:
+                    await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id))
 
-            async def _enqueue_task():
-                try:
-                    await self.tasks_dispatcher.enqueue_generation_task(payload)
-                except Exception as e:
-                    logger.warning(f"Failed to enqueue generation task: {e}")
+                await self._quota_precheck(user, _active_config)
 
-            enqueue_task = asyncio.create_task(_enqueue_task())
-            _fire_and_forget_tasks.add(enqueue_task)
-            enqueue_task.add_done_callback(_fire_and_forget_tasks.discard)
+                _attachments = await self._prepare_attachments(user, _active_config, attachment_ids, _session_id)
 
-            async def _invalidate_caches():
-                from app.core.redis import redis_cache
-                from app.core.cache_keys import CacheKeys
+                routing_context = RequestContext(
+                    conversation_message_count=len(_session.messages) if _session and _session.messages else 0,
+                    approximate_context_tokens=len(message_text) // 4,
+                    has_attachments=bool(_attachments),
+                    attachment_types=[a.type for a in _attachments],
+                    user_id=str(user.id),
+                    session_id=str(_session_id),
+                )
 
-                await user_msg_task
-                await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id))
-                await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))
+                (
+                    _model,
+                    _reasoning,
+                    _thinking_budget,
+                    _tool_configs,
+                    _fallbacks,
+                ) = await self.validate_and_resolve_config(
+                    requested_model=requested_model,
+                    requested_reasoning=requested_reasoning,
+                    message_text=message_text,
+                    routing_mode=routing_mode,
+                    context=routing_context,
+                )
 
-            invalidate_task = asyncio.create_task(_invalidate_caches())
-            _fire_and_forget_tasks.add(invalidate_task)
-            invalidate_task.add_done_callback(_fire_and_forget_tasks.discard)
+                _generation = GenerationDB(
+                    user_id=user.id,
+                    session_id=_session_id,
+                    status=GenerationStatus.RUNNING_LIVE,
+                    requested_model=requested_model,
+                    resolved_model=_model,
+                    requested_reasoning=requested_reasoning,
+                    resolved_reasoning=_reasoning,
+                )
+                _generation = await self.generation_repo.create(_generation)
+
+                _user_msg_task = asyncio.create_task(
+                    self.chat_repo.add_message(
+                        _session_id,
+                        role=MessageRole.USER,
+                        content=message_text,
+                        attachment_ids=[str(a.id) for a in _attachments],
+                        generation_id=str(_generation.id),
+                    )
+                )
+                _fire_and_forget_tasks.add(_user_msg_task)
+                _user_msg_task.add_done_callback(_fire_and_forget_tasks.discard)
+
+                payload = GenerationTaskPayload(generation_id=str(_generation.id))
+
+                async def _enqueue_task():
+                    try:
+                        await self.tasks_dispatcher.enqueue_generation_task(payload)
+                    except Exception as e:
+                        logger.warning(f"Failed to enqueue generation task: {e}")
+
+                _enqueue_task_coro = asyncio.create_task(_enqueue_task())
+                _fire_and_forget_tasks.add(_enqueue_task_coro)
+                _enqueue_task_coro.add_done_callback(_fire_and_forget_tasks.discard)
+
+                async def _invalidate_caches():
+                    await _user_msg_task
+                    await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id))
+                    await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(_session_id))
+
+                _invalidate_task = asyncio.create_task(_invalidate_caches())
+                _fire_and_forget_tasks.add(_invalidate_task)
+                _invalidate_task.add_done_callback(_fire_and_forget_tasks.discard)
+
+                return (
+                    _active_config,
+                    _session,
+                    _session_id,
+                    _title,
+                    _attachments,
+                    _model,
+                    _reasoning,
+                    _thinking_budget,
+                    _tool_configs,
+                    _fallbacks,
+                    _generation,
+                    _user_msg_task,
+                )
+
+            (
+                active_config,
+                session,
+                resolved_session_id,
+                title,
+                attachments,
+                model,
+                reasoning,
+                thinking_budget,
+                tool_configs,
+                fallbacks,
+                generation,
+                user_msg_task,
+            ) = await asyncio.shield(_shielded_prep())
+            session_id = resolved_session_id
 
             yield f"event: session\ndata: {json.dumps({'session_id': str(session_id), 'title': title, 'generation_id': str(generation.id)})}\n\n"
 
