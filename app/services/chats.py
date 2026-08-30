@@ -11,6 +11,10 @@ model needs (contents, tools, config) is expressed through
 
 from __future__ import annotations
 
+import asyncio
+
+_fire_and_forget_tasks = set()
+
 import json
 import logging
 import uuid
@@ -583,8 +587,6 @@ class AgentService:
             yield self._error_event("Message is empty.")
             return
 
-        import asyncio
-
         try:
             is_new_session = session_id is None
 
@@ -650,6 +652,8 @@ class AgentService:
                     generation_id=str(generation.id),
                 )
             )
+            _fire_and_forget_tasks.add(user_msg_task)
+            user_msg_task.add_done_callback(_fire_and_forget_tasks.discard)
 
             # Dispatch Cloud Task for background recovery without blocking
             payload = GenerationTaskPayload(generation_id=str(generation.id))
@@ -660,7 +664,9 @@ class AgentService:
                 except Exception as e:
                     logger.warning(f"Failed to enqueue generation task: {e}")
 
-            asyncio.create_task(_enqueue_task())
+            enqueue_task = asyncio.create_task(_enqueue_task())
+            _fire_and_forget_tasks.add(enqueue_task)
+            enqueue_task.add_done_callback(_fire_and_forget_tasks.discard)
 
             async def _invalidate_caches():
                 from app.core.redis import redis_cache
@@ -670,7 +676,9 @@ class AgentService:
                 await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id))
                 await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))
 
-            asyncio.create_task(_invalidate_caches())
+            invalidate_task = asyncio.create_task(_invalidate_caches())
+            _fire_and_forget_tasks.add(invalidate_task)
+            invalidate_task.add_done_callback(_fire_and_forget_tasks.discard)
 
             yield f"event: session\ndata: {json.dumps({'session_id': str(session_id), 'title': title, 'generation_id': str(generation.id)})}\n\n"
 
