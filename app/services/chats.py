@@ -640,15 +640,6 @@ class AgentService:
             )
             generation = await self.generation_repo.create(generation)
 
-            yield f"event: session\ndata: {json.dumps({'session_id': str(session_id), 'title': title, 'generation_id': str(generation.id)})}\n\n"
-
-            # Dispatch Cloud Task for background recovery
-            payload = GenerationTaskPayload(generation_id=str(generation.id))
-            try:
-                await self.tasks_dispatcher.enqueue_generation_task(payload)
-            except Exception as e:
-                logger.warning(f"Failed to enqueue generation task: {e}")
-
             # 2. Persist user message in the background concurrently without blocking stream start
             user_msg_task = asyncio.create_task(
                 self.chat_repo.add_message(
@@ -660,6 +651,17 @@ class AgentService:
                 )
             )
 
+            # Dispatch Cloud Task for background recovery without blocking
+            payload = GenerationTaskPayload(generation_id=str(generation.id))
+
+            async def _enqueue_task():
+                try:
+                    await self.tasks_dispatcher.enqueue_generation_task(payload)
+                except Exception as e:
+                    logger.warning(f"Failed to enqueue generation task: {e}")
+
+            asyncio.create_task(_enqueue_task())
+
             async def _invalidate_caches():
                 from app.core.redis import redis_cache
                 from app.core.cache_keys import CacheKeys
@@ -669,6 +671,8 @@ class AgentService:
                 await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))
 
             asyncio.create_task(_invalidate_caches())
+
+            yield f"event: session\ndata: {json.dumps({'session_id': str(session_id), 'title': title, 'generation_id': str(generation.id)})}\n\n"
 
             current_parts = await self._prepare_current_parts(message_text, attachments)
             contents = await self._build_contents(user, session, active_config, current_parts)
