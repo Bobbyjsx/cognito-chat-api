@@ -706,6 +706,15 @@ class AgentService:
                 user_msg_task,
             ) = await asyncio.shield(_shielded_prep())
             session_id = resolved_session_id
+        except asyncio.CancelledError:
+            # Shielded prep was cancelled from the outside!
+            # We must explicitly abandon it so the worker can pick it up immediately without waiting 15s.
+            if "_generation" in locals() or "generation" in locals():
+                gen_id = locals().get("generation", locals().get("_generation")).id
+                _abandon_task = asyncio.create_task(self.generation_repo.update_status(gen_id, GenerationStatus.QUEUED))
+                _fire_and_forget_tasks.add(_abandon_task)
+                _abandon_task.add_done_callback(_fire_and_forget_tasks.discard)
+            raise
 
             yield f"event: session\ndata: {json.dumps({'session_id': str(session_id), 'title': title, 'generation_id': str(generation.id)})}\n\n"
 
@@ -775,6 +784,11 @@ class AgentService:
                     "Client disconnected during stream_chat for generation %s. Relinquishing to background worker.",
                     generation.id,
                 )
+                _abandon_task = asyncio.create_task(
+                    self.generation_repo.update_status(generation.id, GenerationStatus.QUEUED)
+                )
+                _fire_and_forget_tasks.add(_abandon_task)
+                _abandon_task.add_done_callback(_fire_and_forget_tasks.discard)
                 raise
             except Exception as exc:
                 last_exc = exc
