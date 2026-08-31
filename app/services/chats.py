@@ -590,6 +590,16 @@ class AgentService:
             yield self._error_event("Message is empty.")
             return
 
+        if state is not None:
+            state["user_id"] = str(user.id)
+            state["session_id"] = str(session_id) if session_id else None
+            state["requested_model"] = requested_model
+            state["requested_reasoning"] = requested_reasoning
+            state["message_text"] = message_text
+            state["attachment_ids"] = [str(a) for a in (attachment_ids or [])]
+            state["completed"] = False
+            state["handled"] = False
+
         try:
             is_new_session = session_id is None
 
@@ -603,6 +613,9 @@ class AgentService:
                     self.get_active_config(),
                     self._resolve_session(user, session_id, message_text),
                 )
+
+                if state is not None:
+                    state["session_id"] = str(_session_id)
 
                 if is_new_session:
                     await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id))
@@ -633,6 +646,10 @@ class AgentService:
                     routing_mode=routing_mode,
                     context=routing_context,
                 )
+
+                if state is not None:
+                    state["resolved_model"] = _model
+                    state["resolved_reasoning"] = _reasoning
 
                 _user_msg_task = asyncio.create_task(
                     self.chat_repo.add_message(
@@ -684,16 +701,10 @@ class AgentService:
             session_id = resolved_session_id
 
             if state is not None:
-                state["user_id"] = str(user.id)
                 state["session_id"] = str(session_id)
-                state["requested_model"] = requested_model
                 state["resolved_model"] = model
-                state["requested_reasoning"] = requested_reasoning
                 state["resolved_reasoning"] = reasoning
-                state["message_text"] = message_text
                 state["attachment_ids"] = [str(a.id) for a in attachments]
-                state["completed"] = False
-                state["handled"] = False
         except (asyncio.CancelledError, GeneratorExit):
             # Client disconnected during prep
             if state is not None and not state.get("completed") and not state.get("handled"):
@@ -863,8 +874,7 @@ async def handle_stream_abandonment(state: dict, agent_service: AgentService) ->
     state["handled"] = True
 
     user_id_str = state.get("user_id")
-    session_id_str = state.get("session_id")
-    if not user_id_str or not session_id_str:
+    if not user_id_str:
         return
 
     import uuid
@@ -874,7 +884,17 @@ async def handle_stream_abandonment(state: dict, agent_service: AgentService) ->
     from app.core.redis import redis_cache
 
     user_id = uuid.UUID(user_id_str)
-    session_id = uuid.UUID(session_id_str)
+    session_id_str = state.get("session_id")
+    if not session_id_str:
+        user = await agent_service.user_repo.get_by_id(user_id_str)
+        if not user:
+            return
+        _, session_id, _ = await agent_service._resolve_session(user, None, state.get("message_text", ""))
+        session_id_str = str(session_id)
+        state["session_id"] = session_id_str
+    else:
+        session_id = uuid.UUID(session_id_str)
+
     gen_id = uuid.uuid4()
 
     logger.info(
