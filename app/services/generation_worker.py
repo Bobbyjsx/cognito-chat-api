@@ -110,14 +110,24 @@ class GenerationWorkerService:
         try:
             active_config = await self.agent_service.get_active_config()
             session, _ = await self.chat_repo.get_session(generation.session_id, user.id, limit=100)
+
+            if (not session or not session.messages) and generation.prompt:
+                # User message was not committed yet due to early client disconnect; persist it now
+                user_msg = await self.chat_repo.add_message(
+                    generation.session_id,
+                    role=MessageRole.USER,
+                    content=generation.prompt,
+                )
+                if not session:
+                    session, _ = await self.chat_repo.get_session(generation.session_id, user.id, limit=100)
+                else:
+                    session.messages = [user_msg]
+
             if not session:
                 raise ValueError("Session not found")
 
             # The last message from the user should be the trigger message.
-            # But what if there are newer messages? We should ideally only consider messages up to when generation was created.
-            # For simplicity (V1), we just take all messages, the last user message being the prompt.
-            # If the last message is an agent message (e.g. from another generation), we might need to be careful.
-
+            # For simplicity (V1), we take all messages, the last user message being the prompt.
             contents = []
             for msg in session.messages:
                 if not msg.content and msg.role == MessageRole.AGENT:

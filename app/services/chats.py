@@ -909,6 +909,7 @@ async def handle_stream_abandonment(state: dict, agent_service: AgentService) ->
         user_id=user_id,
         session_id=session_id,
         user_message_id=user_msg_id,
+        prompt=state.get("message_text"),
         status=GenerationStatus.QUEUED,
         requested_model=state.get("requested_model"),
         resolved_model=state.get("resolved_model") or state.get("model"),
