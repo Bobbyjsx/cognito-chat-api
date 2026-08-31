@@ -1,7 +1,55 @@
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
+
+logger = logging.getLogger(__name__)
+
+
+class AgentStreamingResponse(StreamingResponse):
+    def __init__(self, content, state: dict, agent_service, **kwargs):
+        super().__init__(content, **kwargs)
+        self.state = state
+        self.agent_service = agent_service
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            gen_id = self.state.get("generation_id")
+            if gen_id and not self.state.get("completed"):
+                logger.info("AgentStreamingResponse ASGI call ended prematurely. Queuing generation %s", gen_id)
+                import asyncio
+                from app.models.chats import GenerationStatus
+
+                async def mark_queued():
+                    try:
+                        await self.agent_service.generation_repo.update_status(gen_id, GenerationStatus.QUEUED)
+                        # Run the local worker immediately for development
+                        from app.services.generation_worker import GenerationWorkerService
+                        from app.schemas.task import GenerationTaskPayload
+
+                        logger.info("Executing local worker for generation %s", gen_id)
+                        from app.repositories.chats import ChatRepository
+                        from app.repositories.users import UserRepository
+                        from app.repositories.config import ConfigRepository
+
+                        worker = GenerationWorkerService(
+                            generation_repo=self.agent_service.generation_repo,
+                            chat_repo=ChatRepository(self.agent_service.db),
+                            user_repo=UserRepository(self.agent_service.db),
+                            config_repo=ConfigRepository(self.agent_service.db),
+                            agent_service=self.agent_service,
+                        )
+                        payload = GenerationTaskPayload(generation_id=str(gen_id))
+                        await worker.execute_task(payload)
+                    except Exception as e:
+                        logger.error("Failed to mark or execute generation %s as QUEUED: %s", gen_id, e)
+
+                asyncio.create_task(mark_queued())
+
+
 from fastapi.responses import StreamingResponse
 from google.cloud.firestore_v1.async_client import AsyncClient
 
@@ -95,12 +143,15 @@ async def chat_with_agent(
 @router.post("/chat/stream", summary="Stream a chat response via SSE")
 async def stream_chat_with_agent(
     request: ChatRequest,
+    fastapi_req: Request,
     session_id: uuid.UUID | None = None,
     current_user: UserDB = Depends(get_current_user),
     agent_service: AgentService = Depends(get_agent_service),
 ):
-    return StreamingResponse(
+    state = {"generation_id": None, "completed": False}
+    return AgentStreamingResponse(
         agent_service.stream_chat(
+            request=fastapi_req,
             user=current_user,
             message_text=request.message,
             session_id=session_id,
@@ -108,7 +159,10 @@ async def stream_chat_with_agent(
             requested_reasoning=request.reasoning,
             attachment_ids=request.attachments,
             routing_mode=request.routing_mode,
+            state=state,
         ),
+        state=state,
+        agent_service=agent_service,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -127,26 +181,51 @@ async def list_sessions(
 ):
     from app.core.cache_keys import CacheKeys
     from app.core.redis import redis_cache
-
-    cache_key = CacheKeys.user_sessions(current_user.id, limit, offset, q)
-    cached_data = await redis_cache.get(cache_key)
-    if cached_data:
-        return cached_data
+    from app.repositories.generations import GenerationRepository
 
     repo = ChatRepository(db)
-    sessions, has_more, total = await repo.get_user_sessions(
-        current_user.id, search_query=q, limit=limit, offset=offset
-    )
 
-    response = PaginatedResponse(items=sessions, total=total, limit=limit, offset=offset, has_more=has_more)
+    # Cache only the raw session list (invalidated on message/session events)
+    cache_key = CacheKeys.user_sessions(current_user.id, limit, offset, q)
+    cached_sessions = await redis_cache.get(cache_key)
 
-    await redis_cache.set(cache_key, response.model_dump(mode="json"), expire=300)
-    return response
+    if cached_sessions:
+        sessions_data = cached_sessions["sessions"]
+        has_more = cached_sessions["has_more"]
+        total = cached_sessions["total"]
+    else:
+        sessions, has_more, total = await repo.get_user_sessions(
+            current_user.id, search_query=q, limit=limit, offset=offset
+        )
+        sessions_data = [s.model_dump(mode="json") for s in sessions]
+        await redis_cache.set(
+            cache_key,
+            {"sessions": sessions_data, "has_more": has_more, "total": total},
+            expire=300,
+        )
+
+    # Always fetch active generations fresh — they change rapidly during bg generation
+    gen_repo = GenerationRepository(db)
+    active_gens = await gen_repo.get_active_generations_for_user(current_user.id)
+
+    # Merge active_generation_id into each session item
+    items = []
+    for s_dict in sessions_data:
+        merged = dict(s_dict)
+        sid = str(s_dict.get("id", ""))
+        if sid in active_gens:
+            merged["active_generation_id"] = active_gens[sid]
+        else:
+            merged["active_generation_id"] = None
+        items.append(ChatSessionListSchema(**merged))
+
+    return PaginatedResponse(items=items, total=total, limit=limit, offset=offset, has_more=has_more)
 
 
 @router.get("/sessions/{session_id}")
 async def get_session(
     session_id: uuid.UUID,
+    response: Response,
     limit: int = 10,
     offset: int = 0,
     current_user: UserDB = Depends(get_current_user),
@@ -154,11 +233,17 @@ async def get_session(
 ):
     from app.core.cache_keys import CacheKeys
     from app.core.redis import redis_cache
+    from app.repositories.generations import GenerationRepository
+
+    gen_repo = GenerationRepository(db)
+    active_gen = await gen_repo.get_active_generation(session_id)
 
     cache_key = CacheKeys.session_details(session_id, limit, offset)
-    cached_data = await redis_cache.get(cache_key)
-    if cached_data:
-        return cached_data
+    # Only read from Redis cache if this session is NOT actively generating
+    if not active_gen:
+        cached_data = await redis_cache.get(cache_key)
+        if cached_data:
+            return cached_data
 
     repo = ChatRepository(db)
     session, has_more = await repo.get_session(session_id, current_user.id, limit=limit, offset=offset)
@@ -173,12 +258,7 @@ async def get_session(
     messages = session.messages or []
     session.messages = None
 
-    from app.repositories.generations import GenerationRepository
-
-    gen_repo = GenerationRepository(db)
-    active_gen = await gen_repo.get_active_generation(session_id)
-
-    response = {
+    result = {
         "session": session.model_dump(mode="json"),
         "messages": {
             "items": [msg.model_dump(mode="json") for msg in messages],
@@ -189,8 +269,15 @@ async def get_session(
         "active_generation_id": str(active_gen.id) if active_gen else None,
     }
 
-    await redis_cache.set(cache_key, response, expire=300)
-    return response
+    if active_gen:
+        # Active generation in progress: force no-cache for browser and intermediate proxies
+        response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+    else:
+        # Normal session: cache in Redis and allow standard caching
+        await redis_cache.set(cache_key, result, expire=300)
+
+    return result
 
 
 @router.delete("/sessions/{session_id}", status_code=200)
@@ -203,32 +290,31 @@ async def delete_session(
     repo = ChatRepository(db)
     success = await repo.soft_delete_session(session_id, current_user.id)
     if not success:
-        raise HTTPException(status_code=404, detail="Session not found")
+        raise HTTPException(status_code=404, detail="Session not found or already deleted")
 
     from app.core.redis import redis_cache
     from app.core.cache_keys import CacheKeys
 
     await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(current_user.id))
     await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))
-
     return {"message": "Session deleted successfully"}
 
 
-@router.post("/sessions/{session_id}/read", status_code=200)
-async def mark_as_read(
+@router.patch("/sessions/{session_id}/read", status_code=200)
+async def mark_session_read(
     session_id: uuid.UUID,
     current_user: UserDB = Depends(get_current_user),
     db: AsyncClient = Depends(get_db),
 ):
     repo = ChatRepository(db)
-    session = await repo.get_session(session_id, current_user.id)
+    session, _ = await repo.get_session(session_id, current_user.id, limit=1)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
     await repo.mark_session_read(session_id)
 
-    from app.core.redis import redis_cache
     from app.core.cache_keys import CacheKeys
+    from app.core.redis import redis_cache
 
     await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(current_user.id))
     await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))
@@ -237,9 +323,13 @@ async def mark_as_read(
 @router.get("/generations/{generation_id}", status_code=200)
 async def get_generation(
     generation_id: uuid.UUID,
+    response: Response,
     current_user: UserDB = Depends(get_current_user),
     db: AsyncClient = Depends(get_db),
 ):
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+
     from app.repositories.generations import GenerationRepository
 
     repo = GenerationRepository(db)

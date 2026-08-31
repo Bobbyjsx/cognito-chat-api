@@ -158,7 +158,7 @@ class GenerationWorkerService:
             total_tokens = 0
             last_heartbeat_time = asyncio.get_running_loop().time()
 
-            async for event in self.agent_service.executor.generate_stream(
+            async for event in self.agent_service.provider.generate_stream(
                 generation.resolved_model, contents, generation_config
             ):
                 if event.type == "text":

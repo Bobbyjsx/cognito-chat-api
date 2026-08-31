@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime, timezone
 from uuid import UUID
@@ -9,11 +10,60 @@ from app.models.chats import GenerationDB, GenerationStatus
 
 logger = logging.getLogger(__name__)
 
+# Maximum allowed duration (in seconds) for a generation before auto-marking as failed
+GENERATION_TIMEOUT_SECONDS = 30
+
 
 class GenerationRepository:
     def __init__(self, db: AsyncClient):
         self.db = db
         self.collection = self.db.collection("generations")
+
+    async def get_active_generations_for_user(self, user_id: UUID | str) -> dict[str, str]:
+        docs = (
+            self.collection.where(filter=FieldFilter("user_id", "==", str(user_id)))
+            .where(
+                filter=FieldFilter(
+                    "status",
+                    "in",
+                    [
+                        GenerationStatus.QUEUED.value,
+                        GenerationStatus.RUNNING_LIVE.value,
+                        GenerationStatus.RUNNING_WORKER.value,
+                    ],
+                )
+            )
+            .stream()
+        )
+        mapping = {}
+        now = datetime.now(timezone.utc)
+        async for doc in docs:
+            data = doc.to_dict()
+            session_id = data.get("session_id")
+            # Auto-expire generations created > GENERATION_TIMEOUT_SECONDS ago
+            created_at_val = data.get("created_at")
+            if created_at_val:
+                try:
+                    if isinstance(created_at_val, str):
+                        created_at = datetime.fromisoformat(created_at_val)
+                    else:
+                        created_at = created_at_val
+                    if created_at.tzinfo is None:
+                        created_at = created_at.replace(tzinfo=timezone.utc)
+                    if (now - created_at).total_seconds() > GENERATION_TIMEOUT_SECONDS:
+                        asyncio.create_task(
+                            self.update_status(
+                                doc.id,
+                                GenerationStatus.FAILED,
+                                error=f"Generation timed out after {GENERATION_TIMEOUT_SECONDS} seconds",
+                            )
+                        )
+                        continue
+                except Exception:
+                    pass
+            if session_id:
+                mapping[str(session_id)] = str(doc.id)
+        return mapping
 
     async def get_active_generation(self, session_id: UUID | str) -> GenerationDB | None:
         docs = (
@@ -34,7 +84,19 @@ class GenerationRepository:
         )
         if not docs:
             return None
-        return GenerationDB(**docs[0].to_dict())
+        generation = GenerationDB(**docs[0].to_dict())
+        now = datetime.now(timezone.utc)
+        created_at = generation.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        if (now - created_at).total_seconds() > GENERATION_TIMEOUT_SECONDS:
+            await self.update_status(
+                generation.id,
+                GenerationStatus.FAILED,
+                error=f"Generation timed out after {GENERATION_TIMEOUT_SECONDS} seconds",
+            )
+            return None
+        return generation
 
     async def create(self, generation: GenerationDB) -> GenerationDB:
         doc_ref = self.collection.document(str(generation.id))
@@ -47,7 +109,35 @@ class GenerationRepository:
         doc = await doc_ref.get()
         if not doc.exists:
             return None
-        return GenerationDB(**doc.to_dict())
+        generation = GenerationDB(**doc.to_dict())
+
+        # Check timeout expiration for active/non-terminal generations
+        if generation.status in {
+            GenerationStatus.QUEUED,
+            GenerationStatus.RUNNING_LIVE,
+            GenerationStatus.RUNNING_WORKER,
+        }:
+            now = datetime.now(timezone.utc)
+            created_at = generation.created_at
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            elapsed = (now - created_at).total_seconds()
+            if elapsed > GENERATION_TIMEOUT_SECONDS:
+                logger.warning(
+                    "Generation %s timed out after %.1fs (timeout limit: %ds). Marking as FAILED.",
+                    generation.id,
+                    elapsed,
+                    GENERATION_TIMEOUT_SECONDS,
+                )
+                await self.update_status(
+                    generation.id,
+                    GenerationStatus.FAILED,
+                    error=f"Generation timed out after {int(elapsed)} seconds",
+                )
+                generation.status = GenerationStatus.FAILED
+                generation.error = f"Generation timed out after {int(elapsed)} seconds"
+
+        return generation
 
     async def update_status(self, generation_id: UUID | str, status: GenerationStatus, **kwargs) -> None:
         doc_ref = self.collection.document(str(generation_id))
@@ -69,6 +159,55 @@ class GenerationRepository:
             update_data["message_id"] = str(kwargs["message_id"])
 
         await doc_ref.update(update_data)
+
+        # When generation fails, ensure an agent failure message exists in the session's message list
+        if status == GenerationStatus.FAILED:
+            try:
+                doc = await doc_ref.get()
+                if doc.exists:
+                    gen_data = doc.to_dict()
+                    session_id = gen_data.get("session_id")
+                    user_id = gen_data.get("user_id")
+                    error_msg = (
+                        kwargs.get("error") or gen_data.get("error") or "Model generation failed. Please try again."
+                    )
+
+                    if session_id:
+                        from app.models.chats import MessageRole
+                        from app.repositories.chats import ChatRepository
+
+                        # Check if an agent message for this generation already exists
+                        existing_msgs = (
+                            await self.db.collection("sessions")
+                            .document(str(session_id))
+                            .collection("messages")
+                            .where(filter=FieldFilter("generation_id", "==", str(generation_id)))
+                            .where(filter=FieldFilter("role", "in", [MessageRole.AGENT.value, "agent", "model"]))
+                            .limit(1)
+                            .get()
+                        )
+                        if not existing_msgs:
+                            chat_repo = ChatRepository(self.db)
+                            await chat_repo.add_message(
+                                session_id=UUID(str(session_id)),
+                                role=MessageRole.AGENT,
+                                content="",
+                                error=error_msg,
+                                generation_id=str(generation_id),
+                            )
+                            # Invalidate redis cache for session details and user sessions
+                            from app.core.cache_keys import CacheKeys
+                            from app.core.redis import redis_cache
+
+                            if user_id:
+                                await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user_id))
+                            await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))
+            except Exception as e:
+                logger.error(
+                    "Failed to append failure message for generation %s: %s",
+                    generation_id,
+                    e,
+                )
 
     async def heartbeat(
         self,

@@ -21,7 +21,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 from app.ai.router.blacklist import blacklist_model
 from app.models.chats import ChatResponse
@@ -580,6 +580,8 @@ class AgentService:
         requested_reasoning: str | None = None,
         attachment_ids: list[uuid.UUID] | None = None,
         routing_mode: str | None = None,
+        state: dict | None = None,
+        request: Request | None = None,
     ) -> AsyncGenerator[str, None]:
         """Yields SSE-formatted chunks as the provider responds, then persists
         the full message and token usage once the stream is complete."""
@@ -706,6 +708,8 @@ class AgentService:
                 user_msg_task,
             ) = await asyncio.shield(_shielded_prep())
             session_id = resolved_session_id
+            if state is not None:
+                state["generation_id"] = str(generation.id)
         except asyncio.CancelledError:
             # Shielded prep was cancelled from the outside!
             # We must explicitly abandon it so the worker can pick it up immediately without waiting 15s.
@@ -883,6 +887,9 @@ class AgentService:
             total_tokens,
             full_response[:80].replace("\n", " ") if full_response else "",
         )
+
+        if state is not None:
+            state["completed"] = True
 
         yield (
             "event: done\n"

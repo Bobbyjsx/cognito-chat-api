@@ -140,9 +140,14 @@ app = FastAPI(
 @app.middleware("http")
 async def add_cache_control_header(request: Request, call_next):
     response = await call_next(request)
-    if request.method == "GET" and response.status_code == 200 and "Cache-Control" not in response.headers:
-        # Cache all GET requests for 60 seconds, allowing stale-while-revalidate for smooth reloads
-        response.headers["Cache-Control"] = "private, max-age=60, stale-while-revalidate=60"
+    if "Cache-Control" not in response.headers:
+        if request.url.path.endswith("/content") and request.method == "GET" and response.status_code == 200:
+            # Only cache binary attachment files in browser cache
+            response.headers["Cache-Control"] = "private, max-age=3600"
+        else:
+            # Dynamic API data must not be cached by browser HTTP disk cache
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
     return response
 
 

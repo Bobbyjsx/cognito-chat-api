@@ -110,6 +110,7 @@ class ChatSessionSchema(BaseModel):
     last_message_content: str | None = None
     last_message_role: str | None = None
     read_status: str = "read"
+    active_generation_id: UUID | str | None = None
 
 
 class ChatSessionListSchema(BaseModel):
@@ -121,3 +122,4 @@ class ChatSessionListSchema(BaseModel):
     last_message_content: str | None = None
     last_message_role: str | None = None
     read_status: str = "read"
+    active_generation_id: UUID | str | None = None

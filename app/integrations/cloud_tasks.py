@@ -52,10 +52,15 @@ class CloudTasksDispatcher:
 
         body_bytes = payload.model_dump_json().encode("utf-8")
 
+        worker_base = self.worker_url.rstrip("/")
+        if not worker_base.endswith("/tasks/generations"):
+            worker_base = f"{worker_base}/tasks/generations"
+        target_url = f"{worker_base}/{payload.generation_id}"
+
         task: dict[str, Any] = {
             "http_request": {
                 "http_method": tasks_v2.HttpMethod.POST,
-                "url": f"{self.worker_url.rstrip('/')}/{payload.generation_id}",
+                "url": target_url,
                 "headers": {
                     "Content-Type": "application/json",
                     "User-Agent": "cognito-chat-api-cloud-tasks/1.0",
