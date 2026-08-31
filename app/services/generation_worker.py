@@ -133,47 +133,91 @@ class GenerationWorkerService:
                 raise ValueError("No messages found in session.")
 
             from app.providers.base import GenerationConfig
+            from app.services.chats import get_base_system_instructions
 
-            thinking_budget = 0
-            if generation.resolved_reasoning == "extended":
-                thinking_budget = 24576
-            elif generation.resolved_reasoning == "balanced":
-                thinking_budget = 8192
+            model = generation.resolved_model
+            reasoning = generation.resolved_reasoning
+            fallbacks: list[str] = []
 
-            tool_configs = self.agent_service.registry.to_provider_configs(
-                [t.value for t in active_config.allowed_tools]
-            )
+            if not model:
+                last_user_text = ""
+                for msg in reversed(session.messages):
+                    if msg.role == MessageRole.USER:
+                        last_user_text = msg.content
+                        break
+
+                (
+                    resolved_model,
+                    resolved_reasoning,
+                    thinking_budget,
+                    tool_configs,
+                    fallbacks,
+                ) = await self.agent_service.validate_and_resolve_config(
+                    requested_model=generation.requested_model,
+                    requested_reasoning=generation.requested_reasoning,
+                    message_text=last_user_text,
+                )
+                model = resolved_model
+                reasoning = resolved_reasoning
+            else:
+                thinking_budget = 0
+                if reasoning == "extended":
+                    thinking_budget = 24576
+                elif reasoning == "balanced":
+                    thinking_budget = 8192
+
+                tool_configs = self.agent_service.registry.to_provider_configs(
+                    [t.value for t in active_config.allowed_tools]
+                )
 
             generation_config = GenerationConfig(
-                system_instruction="You are a helpful AI assistant.",  # Or get from config
+                system_instruction=get_base_system_instructions(),
                 thinking_budget=thinking_budget,
                 include_thoughts=True,
                 tool_configs=tool_configs,
             )
 
+            models_to_attempt = [model] + [m for m in fallbacks if m != model]
             full_response = ""
             full_thoughts = ""
             total_tokens = 0
-            last_heartbeat_time = asyncio.get_running_loop().time()
 
-            async for event in self.agent_service.provider.generate_stream(
-                generation.resolved_model, contents, generation_config
-            ):
-                if event.type == "text":
-                    full_response += event.token or ""
-                elif event.type == "reasoning":
-                    full_thoughts += event.token or ""
-                elif event.type == "usage" and event.total_tokens:
-                    total_tokens = event.total_tokens
-
-                now = asyncio.get_running_loop().time()
-                if now - last_heartbeat_time > 2.0:
-                    asyncio.create_task(
-                        self.generation_repo.heartbeat(
-                            generation.id, buffered_text=full_response, buffered_thoughts=full_thoughts
-                        )
+            for attempt_idx, candidate_model in enumerate(models_to_attempt):
+                full_response = ""
+                full_thoughts = ""
+                total_tokens = 0
+                last_heartbeat_time = asyncio.get_running_loop().time()
+                try:
+                    logger.info(
+                        "Worker executing generate_stream for model='%s' with %d contents",
+                        candidate_model,
+                        len(contents),
                     )
-                    last_heartbeat_time = now
+                    async for event in self.agent_service.provider.generate_stream(
+                        candidate_model, contents, generation_config
+                    ):
+                        if event.type == "text":
+                            full_response += event.token or ""
+                        elif event.type == "reasoning":
+                            full_thoughts += event.token or ""
+                        elif event.type == "usage" and event.total_tokens:
+                            total_tokens = event.total_tokens
+
+                        now = asyncio.get_running_loop().time()
+                        if now - last_heartbeat_time > 2.0:
+                            asyncio.create_task(
+                                self.generation_repo.heartbeat(
+                                    generation.id, buffered_text=full_response, buffered_thoughts=full_thoughts
+                                )
+                            )
+                            last_heartbeat_time = now
+
+                    logger.info("Worker completed streaming successfully with model '%s'", candidate_model)
+                    break
+                except Exception as exc:
+                    logger.warning("Worker attempt for model '%s' failed: %s", candidate_model, exc)
+                    if attempt_idx >= len(models_to_attempt) - 1:
+                        raise
 
             # Record success
             agent_msg = await self.chat_repo.add_message(
