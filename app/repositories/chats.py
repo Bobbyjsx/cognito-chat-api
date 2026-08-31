@@ -44,7 +44,7 @@ class ChatRepository:
 
         messages_ref = (
             doc_ref.collection("messages")
-            .order_by("created_at", direction=firestore.Query.DESCENDING)
+            .order_by("created_at", direction=firestore.Query.ASCENDING)
             .offset(offset)
             .limit(limit + 1)
         )
@@ -70,8 +70,6 @@ class ChatRepository:
         if has_more:
             msgs.pop()
 
-        # Reverse back to chronological order
-        msgs.reverse()
         session.messages = msgs
 
         return session, has_more
