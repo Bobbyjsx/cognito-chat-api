@@ -35,6 +35,7 @@ class GenerationDB(BaseModel):
     user_id: UUID | str
     session_id: UUID
     message_id: UUID | None = None
+    user_message_id: UUID | None = None
     status: GenerationStatus = GenerationStatus.QUEUED
     requested_model: str | None = None
     resolved_model: str | None = None

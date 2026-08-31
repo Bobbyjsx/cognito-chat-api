@@ -188,3 +188,7 @@ class ChatRepository:
     async def mark_session_read(self, session_id: UUID) -> None:
         session_ref = self.collection.document(str(session_id))
         await session_ref.update({"read_status": ReadStatus.READ.value})
+
+    async def update_message(self, session_id: UUID | str, message_id: UUID | str, **fields) -> None:
+        doc_ref = self.collection.document(str(session_id)).collection("messages").document(str(message_id))
+        await doc_ref.update(fields)

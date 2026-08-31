@@ -140,8 +140,6 @@ class GenerationRepository:
         return generation
 
     async def update_status(self, generation_id: UUID | str, status: GenerationStatus, **kwargs) -> None:
-        from datetime import timedelta
-
         doc_ref = self.collection.document(str(generation_id))
         update_data = {
             "status": status.value,
@@ -162,8 +160,7 @@ class GenerationRepository:
 
         await doc_ref.update(update_data)
 
-        # When generation fails, ensure an agent failure message exists in the session's message list,
-        # bound to the generation's historical creation time rather than 'now'.
+        # When generation fails, attach the error directly to the corresponding user prompt message.
         if status == GenerationStatus.FAILED:
             try:
                 doc = await doc_ref.get()
@@ -171,68 +168,40 @@ class GenerationRepository:
                     gen_data = doc.to_dict()
                     session_id = gen_data.get("session_id")
                     user_id = gen_data.get("user_id")
+                    user_message_id = gen_data.get("user_message_id") or gen_data.get("message_id")
                     error_msg = (
                         kwargs.get("error") or gen_data.get("error") or "Model generation failed. Please try again."
                     )
 
                     if session_id:
-                        from app.models.chats import MessageRole
                         from app.repositories.chats import ChatRepository
+                        from app.core.cache_keys import CacheKeys
+                        from app.core.redis import redis_cache
+                        from google.cloud import firestore
 
-                        # Check if an agent message for this generation already exists
-                        existing_msgs = (
-                            await self.db.collection("sessions")
-                            .document(str(session_id))
-                            .collection("messages")
-                            .where(filter=FieldFilter("generation_id", "==", str(generation_id)))
-                            .where(filter=FieldFilter("role", "in", [MessageRole.AGENT.value, "agent", "model"]))
-                            .limit(1)
-                            .get()
-                        )
-                        if not existing_msgs:
-                            gen_created_at = gen_data.get("created_at")
-                            if gen_created_at:
-                                if isinstance(gen_created_at, str):
-                                    msg_time = datetime.fromisoformat(gen_created_at)
-                                else:
-                                    msg_time = gen_created_at
-                                if msg_time.tzinfo is None:
-                                    msg_time = msg_time.replace(tzinfo=timezone.utc)
-                                msg_time = msg_time + timedelta(milliseconds=1)
-                            else:
-                                msg_time = datetime.now(timezone.utc)
-
-                            # Check if newer messages already exist in this session
-                            newer_msgs = (
+                        chat_repo = ChatRepository(self.db)
+                        if user_message_id:
+                            await chat_repo.update_message(session_id, user_message_id, error=error_msg)
+                        else:
+                            # Fallback: update the latest user message in this session
+                            last_user_msgs = (
                                 await self.db.collection("sessions")
                                 .document(str(session_id))
                                 .collection("messages")
-                                .where(filter=FieldFilter("created_at", ">", msg_time.isoformat()))
+                                .where(filter=FieldFilter("role", "==", "user"))
+                                .order_by("created_at", direction=firestore.Query.DESCENDING)
                                 .limit(1)
                                 .get()
                             )
-                            should_update_summary = len(newer_msgs) == 0
+                            if last_user_msgs:
+                                await last_user_msgs[0].reference.update({"error": error_msg})
 
-                            chat_repo = ChatRepository(self.db)
-                            await chat_repo.add_message(
-                                session_id=UUID(str(session_id)),
-                                role=MessageRole.AGENT,
-                                content="",
-                                error=error_msg,
-                                generation_id=str(generation_id),
-                                created_at=msg_time,
-                                update_session_summary=should_update_summary,
-                            )
-                            # Invalidate redis cache for session details and user sessions
-                            from app.core.cache_keys import CacheKeys
-                            from app.core.redis import redis_cache
-
-                            if user_id:
-                                await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user_id))
-                            await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))
+                        if user_id:
+                            await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user_id))
+                        await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))
             except Exception as e:
                 logger.error(
-                    "Failed to append failure message for generation %s: %s",
+                    "Failed to update error on message for generation %s: %s",
                     generation_id,
                     e,
                 )
