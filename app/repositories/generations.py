@@ -206,6 +206,13 @@ class GenerationRepository:
                     e,
                 )
 
+    async def update(self, generation_id: UUID | str, **fields) -> None:
+        """Update arbitrary fields on a generation document."""
+        doc_ref = self.collection.document(str(generation_id))
+        update_data = {k: str(v) if isinstance(v, UUID) else v for k, v in fields.items()}
+        update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+        await doc_ref.update(update_data)
+
     async def heartbeat(
         self,
         generation_id: UUID | str,

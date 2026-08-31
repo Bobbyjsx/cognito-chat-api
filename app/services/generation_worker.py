@@ -111,7 +111,11 @@ class GenerationWorkerService:
             active_config = await self.agent_service.get_active_config()
             session, _ = await self.chat_repo.get_session(generation.session_id, user.id, limit=100)
 
-            if (not session or not session.messages) and generation.prompt:
+            prompt_in_messages = any(
+                m.role == MessageRole.USER and m.content == generation.prompt
+                for m in (session.messages if session else [])
+            )
+            if not prompt_in_messages and generation.prompt:
                 # User message was not committed yet due to early client disconnect; persist it now
                 user_msg = await self.chat_repo.add_message(
                     generation.session_id,
@@ -121,7 +125,8 @@ class GenerationWorkerService:
                 if not session:
                     session, _ = await self.chat_repo.get_session(generation.session_id, user.id, limit=100)
                 else:
-                    session.messages = [user_msg]
+                    session.messages.append(user_msg)
+                await self.generation_repo.update(generation_id, user_message_id=user_msg.id)
 
             if not session:
                 raise ValueError("Session not found")
