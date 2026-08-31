@@ -145,19 +145,25 @@ class ChatRepository:
         error: str | None = None,
         attachment_ids: list[str] | None = None,
         generation_id: str | UUID | None = None,
+        created_at: datetime | str | None = None,
+        update_session_summary: bool = True,
     ) -> ChatMessageDB:
         # Convert generation_id to UUID if it's a string
         if isinstance(generation_id, str):
             generation_id = UUID(generation_id)
 
-        message_db = ChatMessageDB(
-            session_id=session_id,
-            role=role,
-            content=content,
-            error=error,
-            attachment_ids=attachment_ids or [],
-            generation_id=generation_id,
-        )
+        msg_kwargs = {
+            "session_id": session_id,
+            "role": role,
+            "content": content,
+            "error": error,
+            "attachment_ids": attachment_ids or [],
+            "generation_id": generation_id,
+        }
+        if created_at is not None:
+            msg_kwargs["created_at"] = created_at
+
+        message_db = ChatMessageDB(**msg_kwargs)
         doc_ref = self.collection.document(str(session_id)).collection("messages").document(str(message_db.id))
         data = message_db.model_dump(mode="json")
 
@@ -167,15 +173,16 @@ class ChatRepository:
 
         batch = self.db.batch()
         batch.set(doc_ref, data)
-        batch.update(
-            session_ref,
-            {
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-                "last_message_content": content or (error or "Error responding"),
-                "last_message_role": role_val,
-                "read_status": read_status.value,
-            },
-        )
+        if update_session_summary:
+            batch.update(
+                session_ref,
+                {
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "last_message_content": content or (error or "Error responding"),
+                    "last_message_role": role_val,
+                    "read_status": read_status.value,
+                },
+            )
         await batch.commit()
 
         return message_db

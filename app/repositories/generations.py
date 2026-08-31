@@ -40,17 +40,17 @@ class GenerationRepository:
         async for doc in docs:
             data = doc.to_dict()
             session_id = data.get("session_id")
-            # Auto-expire generations created > GENERATION_TIMEOUT_SECONDS ago
-            created_at_val = data.get("created_at")
-            if created_at_val:
+            # Auto-expire generations with no heartbeat/update > GENERATION_TIMEOUT_SECONDS ago
+            check_time_val = data.get("updated_at") or data.get("created_at")
+            if check_time_val:
                 try:
-                    if isinstance(created_at_val, str):
-                        created_at = datetime.fromisoformat(created_at_val)
+                    if isinstance(check_time_val, str):
+                        check_time = datetime.fromisoformat(check_time_val)
                     else:
-                        created_at = created_at_val
-                    if created_at.tzinfo is None:
-                        created_at = created_at.replace(tzinfo=timezone.utc)
-                    if (now - created_at).total_seconds() > GENERATION_TIMEOUT_SECONDS:
+                        check_time = check_time_val
+                    if check_time.tzinfo is None:
+                        check_time = check_time.replace(tzinfo=timezone.utc)
+                    if (now - check_time).total_seconds() > GENERATION_TIMEOUT_SECONDS:
                         asyncio.create_task(
                             self.update_status(
                                 doc.id,
@@ -86,10 +86,10 @@ class GenerationRepository:
             return None
         generation = GenerationDB(**docs[0].to_dict())
         now = datetime.now(timezone.utc)
-        created_at = generation.created_at
-        if created_at.tzinfo is None:
-            created_at = created_at.replace(tzinfo=timezone.utc)
-        if (now - created_at).total_seconds() > GENERATION_TIMEOUT_SECONDS:
+        check_time = generation.updated_at or generation.created_at
+        if check_time.tzinfo is None:
+            check_time = check_time.replace(tzinfo=timezone.utc)
+        if (now - check_time).total_seconds() > GENERATION_TIMEOUT_SECONDS:
             await self.update_status(
                 generation.id,
                 GenerationStatus.FAILED,
@@ -118,10 +118,10 @@ class GenerationRepository:
             GenerationStatus.RUNNING_WORKER,
         }:
             now = datetime.now(timezone.utc)
-            created_at = generation.created_at
-            if created_at.tzinfo is None:
-                created_at = created_at.replace(tzinfo=timezone.utc)
-            elapsed = (now - created_at).total_seconds()
+            check_time = generation.updated_at or generation.created_at
+            if check_time.tzinfo is None:
+                check_time = check_time.replace(tzinfo=timezone.utc)
+            elapsed = (now - check_time).total_seconds()
             if elapsed > GENERATION_TIMEOUT_SECONDS:
                 logger.warning(
                     "Generation %s timed out after %.1fs (timeout limit: %ds). Marking as FAILED.",
@@ -140,6 +140,8 @@ class GenerationRepository:
         return generation
 
     async def update_status(self, generation_id: UUID | str, status: GenerationStatus, **kwargs) -> None:
+        from datetime import timedelta
+
         doc_ref = self.collection.document(str(generation_id))
         update_data = {
             "status": status.value,
@@ -160,7 +162,8 @@ class GenerationRepository:
 
         await doc_ref.update(update_data)
 
-        # When generation fails, ensure an agent failure message exists in the session's message list
+        # When generation fails, ensure an agent failure message exists in the session's message list,
+        # bound to the generation's historical creation time rather than 'now'.
         if status == GenerationStatus.FAILED:
             try:
                 doc = await doc_ref.get()
@@ -187,6 +190,29 @@ class GenerationRepository:
                             .get()
                         )
                         if not existing_msgs:
+                            gen_created_at = gen_data.get("created_at")
+                            if gen_created_at:
+                                if isinstance(gen_created_at, str):
+                                    msg_time = datetime.fromisoformat(gen_created_at)
+                                else:
+                                    msg_time = gen_created_at
+                                if msg_time.tzinfo is None:
+                                    msg_time = msg_time.replace(tzinfo=timezone.utc)
+                                msg_time = msg_time + timedelta(milliseconds=1)
+                            else:
+                                msg_time = datetime.now(timezone.utc)
+
+                            # Check if newer messages already exist in this session
+                            newer_msgs = (
+                                await self.db.collection("sessions")
+                                .document(str(session_id))
+                                .collection("messages")
+                                .where(filter=FieldFilter("created_at", ">", msg_time.isoformat()))
+                                .limit(1)
+                                .get()
+                            )
+                            should_update_summary = len(newer_msgs) == 0
+
                             chat_repo = ChatRepository(self.db)
                             await chat_repo.add_message(
                                 session_id=UUID(str(session_id)),
@@ -194,6 +220,8 @@ class GenerationRepository:
                                 content="",
                                 error=error_msg,
                                 generation_id=str(generation_id),
+                                created_at=msg_time,
+                                update_session_summary=should_update_summary,
                             )
                             # Invalidate redis cache for session details and user sessions
                             from app.core.cache_keys import CacheKeys
