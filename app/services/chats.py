@@ -83,6 +83,7 @@ class AgentService:
         self.attachment_service = attachment_service
         self.generation_repo = generation_repo
         self.tasks_dispatcher = tasks_dispatcher
+        self.db = chat_repo.db
 
         if provider is None:
             from app.core.config import settings
@@ -595,7 +596,7 @@ class AgentService:
             from app.core.redis import redis_cache
             from app.core.cache_keys import CacheKeys
             from app.ai.router.schemas import RequestContext
-            from app.models.chats import MessageRole, GenerationDB, GenerationStatus
+            from app.models.chats import MessageRole
 
             async def _shielded_prep():
                 _active_config, (_session, _session_id, _title) = await asyncio.gather(
@@ -632,17 +633,6 @@ class AgentService:
                     routing_mode=routing_mode,
                     context=routing_context,
                 )
-
-                _generation = GenerationDB(
-                    user_id=user.id,
-                    session_id=_session_id,
-                    status=GenerationStatus.RUNNING_LIVE,
-                    requested_model=requested_model,
-                    resolved_model=_model,
-                    requested_reasoning=requested_reasoning,
-                    resolved_reasoning=_reasoning,
-                )
-                _generation = await self.generation_repo.create(_generation)
 
                 _user_msg_task = asyncio.create_task(
                     self.chat_repo.add_message(
@@ -704,7 +694,7 @@ class AgentService:
                 state["attachment_ids"] = [str(a.id) for a in attachments]
                 state["completed"] = False
                 state["handled"] = False
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, GeneratorExit):
             # Client disconnected during prep
             if state is not None and not state.get("completed") and not state.get("handled"):
                 _abandon_task = asyncio.create_task(handle_stream_abandonment(state, self))
@@ -723,145 +713,147 @@ class AgentService:
                 include_thoughts=True,
                 tool_configs=tool_configs,
             )
+
+            models_to_attempt = [model] + [m for m in fallbacks if m != model]
+            used_model = model
+            last_exc = None
+            has_yielded_chunks = False
+            full_response = ""
+            full_thoughts = ""
+            total_tokens = 0
+
+            for attempt_idx, candidate_model in enumerate(models_to_attempt):
+                full_response = ""
+                full_thoughts = ""
+                total_tokens = 0
+                has_yielded_chunks = False
+                last_exc = None
+                try:
+                    logger.info(
+                        "[AgentService] Invoking provider generate_stream for model='%s' with %d contents",
+                        candidate_model,
+                        len(contents),
+                    )
+                    async for event in self.executor.generate_stream(candidate_model, contents, generation_config):
+                        if event.type == "text":
+                            full_response += event.token or ""
+                        elif event.type == "reasoning":
+                            full_thoughts += event.token or ""
+                        elif event.type == "usage" and event.total_tokens:
+                            total_tokens = event.total_tokens
+
+                        if state is not None:
+                            state["buffered_text"] = full_response
+                            state["buffered_thoughts"] = full_thoughts
+                            state["model"] = candidate_model
+
+                        yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
+                        has_yielded_chunks = True
+
+                    used_model = candidate_model
+                    break
+                except (asyncio.CancelledError, GeneratorExit):
+                    raise
+                except Exception as exc:
+                    last_exc = exc
+                    await blacklist_model(candidate_model)
+                    if has_yielded_chunks:
+                        logger.warning("Stream failed mid-generation for model '%s', cannot retry.", candidate_model)
+                        break
+                    else:
+                        if attempt_idx < len(models_to_attempt) - 1:
+                            logger.warning(
+                                "Generation stream with model '%s' failed (%s). Attempting fallback '%s'.",
+                                candidate_model,
+                                exc,
+                                models_to_attempt[attempt_idx + 1],
+                            )
+                        else:
+                            logger.exception(
+                                "Model generation stream failed session_id=%s model=%s",
+                                session_id,
+                                candidate_model,
+                            )
+
+            if last_exc is not None:
+                status, error_code, message = classify_provider_error(last_exc)
+                logger.exception(
+                    "Model generation failed session_id=%s model=%s error_code=%s status=%s",
+                    session_id,
+                    used_model,
+                    error_code,
+                    status,
+                )
+                if state is not None:
+                    state["completed"] = True
+                await asyncio.gather(
+                    user_msg_task,
+                    self.chat_repo.add_message(
+                        session_id,
+                        role=MessageRole.AGENT,
+                        content=full_response,
+                        error=f"[{error_code}] {message}",
+                    ),
+                    return_exceptions=True,
+                )
+                yield self._error_event(message, error_code)
+                return
+
+            from app.core.redis import redis_cache
+            from app.core.cache_keys import CacheKeys
+
+            # Concurrently ensure user message is persisted, agent response is stored, quota is charged, and cache is evicted
+            try:
+                await self.chat_repo.add_message(session_id, role=MessageRole.AGENT, content=full_response)
+            except Exception as e:
+                logger.error("Failed to add agent message: %s", e)
+
+            if state is not None:
+                state["completed"] = True
+
+            persist_results = await asyncio.gather(
+                user_msg_task,
+                self._charge_usage(user, total_tokens, active_config),
+                redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id)),
+                redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id)),
+                return_exceptions=True,
+            )
+
+            within_limit = persist_results[1] if isinstance(persist_results[1], bool) else True
+            if not within_limit:
+                yield self._error_event("Token limit exceeded after generation. Please upgrade your plan.")
+                return
+
+            logger.info(
+                "[AgentService] Stream chat completed: session_id=%s, model='%s', tokens=%d, full_response='%s...'",
+                session_id,
+                used_model,
+                total_tokens,
+                full_response[:80].replace("\n", " ") if full_response else "",
+            )
+
+            yield (
+                "event: done\n"
+                f"data: {json.dumps({'session_id': str(session_id), 'title': title, 'tokens_used': total_tokens, 'model': used_model, 'reasoning': reasoning})}\n\n"
+            )
+        except (asyncio.CancelledError, GeneratorExit):
+            # Client disconnected anytime during the streaming lifecycle!
+            logger.info(
+                "Client disconnected during stream_chat for session %s. Relinquishing to background worker.",
+                session_id,
+            )
+            if state is not None and not state.get("completed") and not state.get("handled"):
+                _abandon_task = asyncio.create_task(handle_stream_abandonment(state, self))
+                _fire_and_forget_tasks.add(_abandon_task)
+                _abandon_task.add_done_callback(_fire_and_forget_tasks.discard)
+            raise
         except HTTPException as exc:
             yield self._error_event(str(exc.detail))
             return
         except Exception as exc:
-            logger.exception("[AgentService] Stream setup failed for session_id=%s", session_id)
-            yield self._error_event(f"Internal error during stream setup: {exc}")
+            logger.exception("[AgentService] Stream failed for session_id=%s", session_id)
+            yield self._error_event(f"Internal error during stream: {exc}")
             return
-
-        models_to_attempt = [model] + [m for m in fallbacks if m != model]
-        used_model = model
-        last_exc = None
-        has_yielded_chunks = False
-        full_response = ""
-        full_thoughts = ""
-        total_tokens = 0
-
-        for attempt_idx, candidate_model in enumerate(models_to_attempt):
-            full_response = ""
-            full_thoughts = ""
-            total_tokens = 0
-            has_yielded_chunks = False
-            last_exc = None
-            try:
-                logger.info(
-                    "[AgentService] Invoking provider generate_stream for model='%s' with %d contents",
-                    candidate_model,
-                    len(contents),
-                )
-                async for event in self.executor.generate_stream(candidate_model, contents, generation_config):
-                    if event.type == "text":
-                        full_response += event.token or ""
-                    elif event.type == "reasoning":
-                        full_thoughts += event.token or ""
-                    elif event.type == "usage" and event.total_tokens:
-                        total_tokens = event.total_tokens
-
-                    if state is not None:
-                        state["buffered_text"] = full_response
-                        state["buffered_thoughts"] = full_thoughts
-                        state["model"] = candidate_model
-
-                    yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
-                    has_yielded_chunks = True
-
-                used_model = candidate_model
-                break
-            except asyncio.CancelledError:
-                # Client disconnected mid-generation!
-                logger.info(
-                    "Client disconnected during stream_chat for session %s. Relinquishing to background worker.",
-                    session_id,
-                )
-                if state is not None and not state.get("completed") and not state.get("handled"):
-                    _abandon_task = asyncio.create_task(handle_stream_abandonment(state, self))
-                    _fire_and_forget_tasks.add(_abandon_task)
-                    _abandon_task.add_done_callback(_fire_and_forget_tasks.discard)
-                raise
-            except Exception as exc:
-                last_exc = exc
-                await blacklist_model(candidate_model)
-                if has_yielded_chunks:
-                    logger.warning("Stream failed mid-generation for model '%s', cannot retry.", candidate_model)
-                    break
-                else:
-                    if attempt_idx < len(models_to_attempt) - 1:
-                        logger.warning(
-                            "Generation stream with model '%s' failed (%s). Attempting fallback '%s'.",
-                            candidate_model,
-                            exc,
-                            models_to_attempt[attempt_idx + 1],
-                        )
-                    else:
-                        logger.exception(
-                            "Model generation stream failed session_id=%s model=%s",
-                            session_id,
-                            candidate_model,
-                        )
-
-        if last_exc is not None:
-            status, error_code, message = classify_provider_error(last_exc)
-            logger.exception(
-                "Model generation failed session_id=%s model=%s error_code=%s status=%s",
-                session_id,
-                used_model,
-                error_code,
-                status,
-            )
-            if state is not None:
-                state["completed"] = True
-            await asyncio.gather(
-                user_msg_task,
-                self.chat_repo.add_message(
-                    session_id,
-                    role=MessageRole.AGENT,
-                    content=full_response,
-                    error=f"[{error_code}] {message}",
-                ),
-                return_exceptions=True,
-            )
-            yield self._error_event(message, error_code)
-            return
-
-        from app.core.redis import redis_cache
-        from app.core.cache_keys import CacheKeys
-
-        # Concurrently ensure user message is persisted, agent response is stored, quota is charged, and cache is evicted
-        try:
-            await self.chat_repo.add_message(session_id, role=MessageRole.AGENT, content=full_response)
-        except Exception as e:
-            logger.error("Failed to add agent message: %s", e)
-
-        if state is not None:
-            state["completed"] = True
-
-        persist_results = await asyncio.gather(
-            user_msg_task,
-            self._charge_usage(user, total_tokens, active_config),
-            redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id)),
-            redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id)),
-            return_exceptions=True,
-        )
-
-        within_limit = persist_results[1] if isinstance(persist_results[1], bool) else True
-        if not within_limit:
-            yield self._error_event("Token limit exceeded after generation. Please upgrade your plan.")
-            return
-
-        logger.info(
-            "[AgentService] Stream chat completed: session_id=%s, model='%s', tokens=%d, full_response='%s...'",
-            session_id,
-            used_model,
-            total_tokens,
-            full_response[:80].replace("\n", " ") if full_response else "",
-        )
-
-        yield (
-            "event: done\n"
-            f"data: {json.dumps({'session_id': str(session_id), 'title': title, 'tokens_used': total_tokens, 'model': used_model, 'reasoning': reasoning})}\n\n"
-        )
 
 
 async def handle_stream_abandonment(state: dict, agent_service: AgentService) -> None:

@@ -121,18 +121,16 @@ class GenerationWorkerService:
 
             contents = []
             for msg in session.messages:
-                # exclude messages that are newer than this generation, unless explicitly tied to it
-                if msg.created_at > generation.created_at and str(msg.generation_id) != str(generation.id):
+                if not msg.content and msg.role == MessageRole.AGENT:
                     continue
                 parts = [{"text": msg.content}]
-                # Note: skipping attachment hydration here for brevity unless needed
                 from app.providers.base import ContentPart
 
-                contents.append(ContentPart(role="user" if msg.role == "user" else "model", parts=parts))
+                contents.append(ContentPart(role="user" if msg.role == MessageRole.USER else "model", parts=parts))
 
-            # If there's no user message before the generation, something is wrong
+            # If there's no message in the session, something is wrong
             if not contents:
-                raise ValueError("No messages found before generation.")
+                raise ValueError("No messages found in session.")
 
             from app.providers.base import GenerationConfig
 
