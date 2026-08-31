@@ -596,7 +596,6 @@ class AgentService:
             from app.core.cache_keys import CacheKeys
             from app.ai.router.schemas import RequestContext
             from app.models.chats import MessageRole, GenerationDB, GenerationStatus
-            from app.schemas.task import GenerationTaskPayload
 
             async def _shielded_prep():
                 _active_config, (_session, _session_id, _title) = await asyncio.gather(
@@ -651,23 +650,10 @@ class AgentService:
                         role=MessageRole.USER,
                         content=message_text,
                         attachment_ids=[str(a.id) for a in _attachments],
-                        generation_id=str(_generation.id),
                     )
                 )
                 _fire_and_forget_tasks.add(_user_msg_task)
                 _user_msg_task.add_done_callback(_fire_and_forget_tasks.discard)
-
-                payload = GenerationTaskPayload(generation_id=str(_generation.id))
-
-                async def _enqueue_task():
-                    try:
-                        await self.tasks_dispatcher.enqueue_generation_task(payload)
-                    except Exception as e:
-                        logger.warning(f"Failed to enqueue generation task: {e}")
-
-                _enqueue_task_coro = asyncio.create_task(_enqueue_task())
-                _fire_and_forget_tasks.add(_enqueue_task_coro)
-                _enqueue_task_coro.add_done_callback(_fire_and_forget_tasks.discard)
 
                 async def _invalidate_caches():
                     await _user_msg_task
@@ -689,7 +675,6 @@ class AgentService:
                     _thinking_budget,
                     _tool_configs,
                     _fallbacks,
-                    _generation,
                     _user_msg_task,
                 )
 
@@ -704,23 +689,31 @@ class AgentService:
                 thinking_budget,
                 tool_configs,
                 fallbacks,
-                generation,
                 user_msg_task,
             ) = await asyncio.shield(_shielded_prep())
             session_id = resolved_session_id
+
             if state is not None:
-                state["generation_id"] = str(generation.id)
+                state["user_id"] = str(user.id)
+                state["session_id"] = str(session_id)
+                state["requested_model"] = requested_model
+                state["resolved_model"] = model
+                state["requested_reasoning"] = requested_reasoning
+                state["resolved_reasoning"] = reasoning
+                state["message_text"] = message_text
+                state["attachment_ids"] = [str(a.id) for a in attachments]
+                state["completed"] = False
+                state["handled"] = False
         except asyncio.CancelledError:
-            # Shielded prep was cancelled from the outside!
-            # We must explicitly abandon it so the worker can pick it up immediately without waiting 15s.
-            if "_generation" in locals() or "generation" in locals():
-                gen_id = locals().get("generation", locals().get("_generation")).id
-                _abandon_task = asyncio.create_task(self.generation_repo.update_status(gen_id, GenerationStatus.QUEUED))
+            # Client disconnected during prep
+            if state is not None and not state.get("completed") and not state.get("handled"):
+                _abandon_task = asyncio.create_task(handle_stream_abandonment(state, self))
                 _fire_and_forget_tasks.add(_abandon_task)
                 _abandon_task.add_done_callback(_fire_and_forget_tasks.discard)
             raise
 
-            yield f"event: session\ndata: {json.dumps({'session_id': str(session_id), 'title': title, 'generation_id': str(generation.id)})}\n\n"
+        try:
+            yield f"event: session\ndata: {json.dumps({'session_id': str(session_id), 'title': title})}\n\n"
 
             current_parts = await self._prepare_current_parts(message_text, attachments)
             contents = await self._build_contents(user, session, active_config, current_parts)
@@ -743,6 +736,7 @@ class AgentService:
         last_exc = None
         has_yielded_chunks = False
         full_response = ""
+        full_thoughts = ""
         total_tokens = 0
 
         for attempt_idx, candidate_model in enumerate(models_to_attempt):
@@ -751,7 +745,6 @@ class AgentService:
             total_tokens = 0
             has_yielded_chunks = False
             last_exc = None
-            last_heartbeat_time = asyncio.get_running_loop().time()
             try:
                 logger.info(
                     "[AgentService] Invoking provider generate_stream for model='%s' with %d contents",
@@ -765,34 +758,27 @@ class AgentService:
                         full_thoughts += event.token or ""
                     elif event.type == "usage" and event.total_tokens:
                         total_tokens = event.total_tokens
+
+                    if state is not None:
+                        state["buffered_text"] = full_response
+                        state["buffered_thoughts"] = full_thoughts
+                        state["model"] = candidate_model
+
                     yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
                     has_yielded_chunks = True
-
-                    # Heartbeat every 2 seconds
-                    now = asyncio.get_running_loop().time()
-                    if now - last_heartbeat_time > 2.0:
-                        asyncio.create_task(
-                            self.generation_repo.heartbeat(
-                                generation.id,
-                                buffered_text=full_response,
-                                buffered_thoughts=full_thoughts,
-                            )
-                        )
-                        last_heartbeat_time = now
 
                 used_model = candidate_model
                 break
             except asyncio.CancelledError:
-                # Client disconnected
+                # Client disconnected mid-generation!
                 logger.info(
-                    "Client disconnected during stream_chat for generation %s. Relinquishing to background worker.",
-                    generation.id,
+                    "Client disconnected during stream_chat for session %s. Relinquishing to background worker.",
+                    session_id,
                 )
-                _abandon_task = asyncio.create_task(
-                    self.generation_repo.update_status(generation.id, GenerationStatus.QUEUED)
-                )
-                _fire_and_forget_tasks.add(_abandon_task)
-                _abandon_task.add_done_callback(_fire_and_forget_tasks.discard)
+                if state is not None and not state.get("completed") and not state.get("handled"):
+                    _abandon_task = asyncio.create_task(handle_stream_abandonment(state, self))
+                    _fire_and_forget_tasks.add(_abandon_task)
+                    _abandon_task.add_done_callback(_fire_and_forget_tasks.discard)
                 raise
             except Exception as exc:
                 last_exc = exc
@@ -824,6 +810,8 @@ class AgentService:
                 error_code,
                 status,
             )
+            if state is not None:
+                state["completed"] = True
             await asyncio.gather(
                 user_msg_task,
                 self.chat_repo.add_message(
@@ -831,14 +819,6 @@ class AgentService:
                     role=MessageRole.AGENT,
                     content=full_response,
                     error=f"[{error_code}] {message}",
-                    generation_id=str(generation.id),
-                ),
-                self.generation_repo.update_status(
-                    generation.id,
-                    GenerationStatus.FAILED,
-                    error=f"[{error_code}] {message}",
-                    buffered_text=full_response,
-                    buffered_thoughts=full_thoughts,
                 ),
                 return_exceptions=True,
             )
@@ -850,26 +830,16 @@ class AgentService:
 
         # Concurrently ensure user message is persisted, agent response is stored, quota is charged, and cache is evicted
         try:
-            agent_msg = await self.chat_repo.add_message(
-                session_id, role=MessageRole.AGENT, content=full_response, generation_id=str(generation.id)
-            )
-            msg_id_str = str(agent_msg.id)
+            await self.chat_repo.add_message(session_id, role=MessageRole.AGENT, content=full_response)
         except Exception as e:
             logger.error("Failed to add agent message: %s", e)
-            msg_id_str = None
+
+        if state is not None:
+            state["completed"] = True
 
         persist_results = await asyncio.gather(
             user_msg_task,
             self._charge_usage(user, total_tokens, active_config),
-            self.generation_repo.update_status(
-                generation.id,
-                GenerationStatus.COMPLETED,
-                completed_at=datetime.now(timezone.utc).isoformat(),
-                usage_tokens=total_tokens,
-                buffered_text=full_response,
-                buffered_thoughts=full_thoughts,
-                message_id=msg_id_str,
-            ),
             redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id)),
             redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id)),
             return_exceptions=True,
@@ -888,10 +858,88 @@ class AgentService:
             full_response[:80].replace("\n", " ") if full_response else "",
         )
 
-        if state is not None:
-            state["completed"] = True
-
         yield (
             "event: done\n"
             f"data: {json.dumps({'session_id': str(session_id), 'title': title, 'tokens_used': total_tokens, 'model': used_model, 'reasoning': reasoning})}\n\n"
         )
+
+
+async def handle_stream_abandonment(state: dict, agent_service: AgentService) -> None:
+    """Handle premature stream disconnect by creating a GenerationDB and enqueuing a background task."""
+    if not state or state.get("completed") or state.get("handled"):
+        return
+    state["handled"] = True
+
+    user_id_str = state.get("user_id")
+    session_id_str = state.get("session_id")
+    if not user_id_str or not session_id_str:
+        return
+
+    import uuid
+    from app.models.chats import GenerationDB, GenerationStatus
+    from app.schemas.task import GenerationTaskPayload
+    from app.core.cache_keys import CacheKeys
+    from app.core.redis import redis_cache
+
+    user_id = uuid.UUID(user_id_str)
+    session_id = uuid.UUID(session_id_str)
+    gen_id = uuid.uuid4()
+
+    logger.info(
+        "[AgentService] Stream abandoned by client for session %s. Lazily creating Generation %s & dispatching worker.",
+        session_id,
+        gen_id,
+    )
+
+    gen = GenerationDB(
+        id=gen_id,
+        user_id=user_id,
+        session_id=session_id,
+        status=GenerationStatus.QUEUED,
+        requested_model=state.get("requested_model"),
+        resolved_model=state.get("resolved_model") or state.get("model"),
+        requested_reasoning=state.get("requested_reasoning"),
+        resolved_reasoning=state.get("resolved_reasoning"),
+        buffered_text=state.get("buffered_text", ""),
+        buffered_thoughts=state.get("buffered_thoughts", ""),
+    )
+
+    try:
+        await agent_service.generation_repo.create(gen)
+        state["generation_id"] = str(gen.id)
+    except Exception as e:
+        logger.error("Failed to create GenerationDB record for abandoned stream: %s", e)
+        return
+
+    # Invalidate Redis caches so sidebar immediately shows active_generation_id
+    try:
+        await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user_id))
+        await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))
+    except Exception as e:
+        logger.warning("Failed to invalidate Redis cache on stream abandonment: %s", e)
+
+    payload = GenerationTaskPayload(generation_id=str(gen.id))
+
+    # Dispatch to Cloud Tasks
+    try:
+        await agent_service.tasks_dispatcher.enqueue_generation_task(payload)
+    except Exception as e:
+        logger.warning("Failed to enqueue generation task to Cloud Tasks: %s", e)
+
+    # In local development / standalone worker, also trigger local worker execution immediately
+    try:
+        from app.services.generation_worker import GenerationWorkerService
+        from app.repositories.chats import ChatRepository
+        from app.repositories.users import UserRepository
+        from app.repositories.config import ConfigRepository
+
+        worker = GenerationWorkerService(
+            generation_repo=agent_service.generation_repo,
+            chat_repo=ChatRepository(agent_service.db),
+            user_repo=UserRepository(agent_service.db),
+            config_repo=ConfigRepository(agent_service.db),
+            agent_service=agent_service,
+        )
+        await worker.execute_task(payload)
+    except Exception as e:
+        logger.error("Failed to execute local worker for abandoned generation %s: %s", gen.id, e)

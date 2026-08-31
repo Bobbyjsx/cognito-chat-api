@@ -17,37 +17,11 @@ class AgentStreamingResponse(StreamingResponse):
         try:
             await super().__call__(scope, receive, send)
         finally:
-            gen_id = self.state.get("generation_id")
-            if gen_id and not self.state.get("completed"):
-                logger.info("AgentStreamingResponse ASGI call ended prematurely. Queuing generation %s", gen_id)
+            if not self.state.get("completed") and not self.state.get("handled"):
                 import asyncio
-                from app.models.chats import GenerationStatus
+                from app.services.chats import handle_stream_abandonment
 
-                async def mark_queued():
-                    try:
-                        await self.agent_service.generation_repo.update_status(gen_id, GenerationStatus.QUEUED)
-                        # Run the local worker immediately for development
-                        from app.services.generation_worker import GenerationWorkerService
-                        from app.schemas.task import GenerationTaskPayload
-
-                        logger.info("Executing local worker for generation %s", gen_id)
-                        from app.repositories.chats import ChatRepository
-                        from app.repositories.users import UserRepository
-                        from app.repositories.config import ConfigRepository
-
-                        worker = GenerationWorkerService(
-                            generation_repo=self.agent_service.generation_repo,
-                            chat_repo=ChatRepository(self.agent_service.db),
-                            user_repo=UserRepository(self.agent_service.db),
-                            config_repo=ConfigRepository(self.agent_service.db),
-                            agent_service=self.agent_service,
-                        )
-                        payload = GenerationTaskPayload(generation_id=str(gen_id))
-                        await worker.execute_task(payload)
-                    except Exception as e:
-                        logger.error("Failed to mark or execute generation %s as QUEUED: %s", gen_id, e)
-
-                asyncio.create_task(mark_queued())
+                asyncio.create_task(handle_stream_abandonment(self.state, self.agent_service))
 
 
 from fastapi.responses import StreamingResponse
