@@ -72,14 +72,13 @@ class GenerationWorkerService:
                 # Raising a transient error will cause Cloud Tasks to retry later
                 raise ValueError("Generation is actively running live.")
 
-        # Claim the generation
+        # Atomically claim the generation (only one worker can ever claim it from QUEUED or RUNNING_LIVE)
         claimed = await self.generation_repo.atomic_transition_status(
             generation_id,
             GenerationStatus.RUNNING_WORKER,
             expected_current_statuses=[
                 GenerationStatus.QUEUED,
                 GenerationStatus.RUNNING_LIVE,
-                GenerationStatus.RUNNING_WORKER,
             ],
         )
 

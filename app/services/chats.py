@@ -934,26 +934,28 @@ async def handle_stream_abandonment(state: dict, agent_service: AgentService) ->
 
     payload = GenerationTaskPayload(generation_id=str(gen.id))
 
-    # Dispatch to Cloud Tasks
+    # Dispatch to Cloud Tasks (or fallback to local background execution if Cloud Tasks is unavailable/fails)
+    enqueued = False
     try:
         await agent_service.tasks_dispatcher.enqueue_generation_task(payload)
+        enqueued = True
     except Exception as e:
-        logger.warning("Failed to enqueue generation task to Cloud Tasks: %s", e)
+        logger.warning("Cloud Tasks enqueue failed (%s). Falling back to background worker task.", e)
 
-    # In local development / standalone worker, also trigger local worker execution immediately
-    try:
-        from app.services.generation_worker import GenerationWorkerService
-        from app.repositories.chats import ChatRepository
-        from app.repositories.users import UserRepository
-        from app.repositories.config import ConfigRepository
+    if not enqueued:
+        try:
+            from app.services.generation_worker import GenerationWorkerService
+            from app.repositories.chats import ChatRepository
+            from app.repositories.users import UserRepository
+            from app.repositories.config import ConfigRepository
 
-        worker = GenerationWorkerService(
-            generation_repo=agent_service.generation_repo,
-            chat_repo=ChatRepository(agent_service.db),
-            user_repo=UserRepository(agent_service.db),
-            config_repo=ConfigRepository(agent_service.db),
-            agent_service=agent_service,
-        )
-        await worker.execute_task(payload)
-    except Exception as e:
-        logger.error("Failed to execute local worker for abandoned generation %s: %s", gen.id, e)
+            worker = GenerationWorkerService(
+                generation_repo=agent_service.generation_repo,
+                chat_repo=ChatRepository(agent_service.db),
+                user_repo=UserRepository(agent_service.db),
+                config_repo=ConfigRepository(agent_service.db),
+                agent_service=agent_service,
+            )
+            asyncio.create_task(worker.execute_task(payload))
+        except Exception as e:
+            logger.error("Failed to execute local fallback worker for abandoned generation %s: %s", gen.id, e)
