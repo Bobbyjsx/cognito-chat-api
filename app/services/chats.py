@@ -81,9 +81,14 @@ class AgentService:
         self.user_repo = user_repo
         self.config_repo = config_repo
         self.attachment_service = attachment_service
+        self.db = chat_repo.db
+
+        if generation_repo is None:
+            from app.repositories.generations import GenerationRepository
+
+            generation_repo = GenerationRepository(self.db)
         self.generation_repo = generation_repo
         self.tasks_dispatcher = tasks_dispatcher
-        self.db = chat_repo.db
 
         if provider is None:
             from app.core.config import settings
@@ -547,9 +552,8 @@ class AgentService:
                 status_code=429, detail="Token limit exceeded after generation. Please upgrade your plan."
             )
 
-        from app.core.redis import redis_cache
-
         from app.core.cache_keys import CacheKeys
+        from app.core.redis import redis_cache
 
         await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id))
         await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))
@@ -603,9 +607,9 @@ class AgentService:
         try:
             is_new_session = session_id is None
 
-            from app.core.redis import redis_cache
-            from app.core.cache_keys import CacheKeys
             from app.ai.router.schemas import RequestContext
+            from app.core.cache_keys import CacheKeys
+            from app.core.redis import redis_cache
             from app.models.chats import MessageRole
 
             async def _shielded_prep():
@@ -809,8 +813,8 @@ class AgentService:
                 yield self._error_event(message, error_code)
                 return
 
-            from app.core.redis import redis_cache
             from app.core.cache_keys import CacheKeys
+            from app.core.redis import redis_cache
 
             # Concurrently ensure agent response is stored, quota is charged, and cache is evicted
             try:
@@ -876,10 +880,11 @@ async def handle_stream_abandonment(state: dict, agent_service: AgentService) ->
         return
 
     import uuid
-    from app.models.chats import GenerationDB, GenerationStatus
-    from app.schemas.task import GenerationTaskPayload
+
     from app.core.cache_keys import CacheKeys
     from app.core.redis import redis_cache
+    from app.models.chats import GenerationDB, GenerationStatus
+    from app.schemas.task import GenerationTaskPayload
 
     user_id = uuid.UUID(user_id_str)
     session_id_str = state.get("session_id")
@@ -945,13 +950,14 @@ async def handle_stream_abandonment(state: dict, agent_service: AgentService) ->
 
     if not enqueued:
         try:
-            from app.services.generation_worker import GenerationWorkerService
             from app.repositories.chats import ChatRepository
-            from app.repositories.users import UserRepository
             from app.repositories.config import ConfigRepository
+            from app.repositories.generations import GenerationRepository
+            from app.services.generation_worker import GenerationWorkerService
 
+            gen_repo = agent_service.generation_repo or GenerationRepository(agent_service.db)
             worker = GenerationWorkerService(
-                generation_repo=agent_service.generation_repo,
+                generation_repo=gen_repo,
                 chat_repo=ChatRepository(agent_service.db),
                 user_repo=UserRepository(agent_service.db),
                 config_repo=ConfigRepository(agent_service.db),
