@@ -25,6 +25,11 @@ test:
 	PYTHONPATH=. $(VENV)/pytest tests/ || (docker compose down && exit 1)
 	docker compose down
 
+latency-regression:
+	PYTHONPATH=. $(VENV)/python scripts/latency_regression.py
+
+test-latency-regression: latency-regression
+
 # If the first argument is "migrate", treat remaining words as feature names
 ifeq (migrate,$(firstword $(MAKECMDGOALS)))
   MIGRATE_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))

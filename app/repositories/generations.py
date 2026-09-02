@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 from datetime import datetime, timezone
 from uuid import UUID
@@ -44,7 +45,7 @@ class GenerationRepository:
             # Auto-expire generations with no heartbeat/update > GENERATION_TIMEOUT_SECONDS ago
             check_time_val = data.get("updated_at") or data.get("created_at")
             if check_time_val:
-                try:
+                with contextlib.suppress(Exception):
                     if isinstance(check_time_val, str):
                         check_time = datetime.fromisoformat(check_time_val)
                     else:
@@ -60,8 +61,6 @@ class GenerationRepository:
                             )
                         )
                         continue
-                except Exception:
-                    pass
             if session_id:
                 mapping[str(session_id)] = str(doc.id)
         return mapping
@@ -175,10 +174,11 @@ class GenerationRepository:
                     )
 
                     if session_id:
-                        from app.repositories.chats import ChatRepository
+                        from google.cloud import firestore
+
                         from app.core.cache_keys import CacheKeys
                         from app.core.redis import redis_cache
-                        from google.cloud import firestore
+                        from app.repositories.chats import ChatRepository
 
                         chat_repo = ChatRepository(self.db)
                         if user_message_id:

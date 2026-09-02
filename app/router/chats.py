@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import uuid
 
@@ -19,6 +20,7 @@ class AgentStreamingResponse(StreamingResponse):
         finally:
             if not self.state.get("completed") and not self.state.get("handled"):
                 import asyncio
+
                 from app.services.chats import handle_stream_abandonment
 
                 asyncio.create_task(handle_stream_abandonment(self.state, self.agent_service))
@@ -157,6 +159,7 @@ async def list_sessions(
     from app.core.redis import redis_cache
     from app.repositories.generations import GenerationRepository
 
+    gen_repo = GenerationRepository(db)
     repo = ChatRepository(db)
 
     # Cache only the raw session list (invalidated on message/session events)
@@ -167,20 +170,19 @@ async def list_sessions(
         sessions_data = cached_sessions["sessions"]
         has_more = cached_sessions["has_more"]
         total = cached_sessions["total"]
+        active_gens = await gen_repo.get_active_generations_for_user(current_user.id)
     else:
-        sessions, has_more, total = await repo.get_user_sessions(
-            current_user.id, search_query=q, limit=limit, offset=offset
+        (sessions_res, active_gens) = await asyncio.gather(
+            repo.get_user_sessions(current_user.id, search_query=q, limit=limit, offset=offset),
+            gen_repo.get_active_generations_for_user(current_user.id),
         )
+        sessions, has_more, total = sessions_res
         sessions_data = [s.model_dump(mode="json") for s in sessions]
         await redis_cache.set(
             cache_key,
             {"sessions": sessions_data, "has_more": has_more, "total": total},
             expire=300,
         )
-
-    # Always fetch active generations fresh — they change rapidly during bg generation
-    gen_repo = GenerationRepository(db)
-    active_gens = await gen_repo.get_active_generations_for_user(current_user.id)
 
     # Merge active_generation_id into each session item
     items = []
@@ -210,24 +212,23 @@ async def get_session(
     from app.repositories.generations import GenerationRepository
 
     gen_repo = GenerationRepository(db)
-    active_gen = await gen_repo.get_active_generation(session_id)
+    repo = ChatRepository(db)
 
     cache_key = CacheKeys.session_details(session_id, limit, offset)
-    # Only read from Redis cache if this session is NOT actively generating
-    if not active_gen:
-        cached_data = await redis_cache.get(cache_key)
-        if cached_data:
-            return cached_data
 
-    repo = ChatRepository(db)
-    session, has_more = await repo.get_session(session_id, current_user.id, limit=limit, offset=offset)
+    # Concurrently fetch active generation status and session data from Firestore
+    (active_gen, session_res) = await asyncio.gather(
+        gen_repo.get_active_generation(session_id),
+        repo.get_session(session_id, current_user.id, limit=limit, offset=offset),
+    )
+    session, has_more = session_res
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
     if session.read_status != ReadStatus.READ:
-        await repo.mark_session_read(session_id)
         session.read_status = ReadStatus.READ
-        await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(current_user.id))
+        asyncio.create_task(repo.mark_session_read(session_id))
+        asyncio.create_task(redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(current_user.id)))
 
     messages = session.messages or []
     session.messages = None
@@ -266,8 +267,8 @@ async def delete_session(
     if not success:
         raise HTTPException(status_code=404, detail="Session not found or already deleted")
 
-    from app.core.redis import redis_cache
     from app.core.cache_keys import CacheKeys
+    from app.core.redis import redis_cache
 
     await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(current_user.id))
     await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))

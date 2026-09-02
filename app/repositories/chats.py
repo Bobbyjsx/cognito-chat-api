@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime, timezone
 from uuid import UUID
@@ -42,29 +43,30 @@ class ChatRepository:
         doc_ref = self.collection.document(str(session_id))
         from google.cloud import firestore
 
-        messages_ref = (
+        messages_query = (
             doc_ref.collection("messages")
             .order_by("created_at", direction=firestore.Query.ASCENDING)
             .offset(offset)
             .limit(limit + 1)
         )
 
-        doc = await doc_ref.get()
+        async def _fetch_messages():
+            msgs = []
+            async for msg_doc in messages_query.stream():
+                msgs.append(ChatMessageDB(**msg_doc.to_dict()))
+            return msgs
+
+        # Concurrently fetch parent session document and messages subcollection
+        doc, msgs = await asyncio.gather(doc_ref.get(), _fetch_messages())
+
         if not doc.exists:
             return None, False
 
         data = doc.to_dict()
-        if data.get("user_id") != str(user_id):
-            return None, False
-        if data.get("is_deleted") is True:
+        if data.get("user_id") != str(user_id) or data.get("is_deleted") is True:
             return None, False
 
         session = ChatSessionDB(**data)
-
-        msgs = []
-        async for msg_doc in messages_ref.stream():
-            msg_data = msg_doc.to_dict()
-            msgs.append(ChatMessageDB(**msg_data))
 
         has_more = len(msgs) > limit
         if has_more:

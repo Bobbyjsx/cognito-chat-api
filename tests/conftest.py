@@ -165,7 +165,7 @@ def mock_agent():
 
 
 # Mock Cloud Tasks so tests do not actually hit GCP
-try:
+import contextlib
+
+with contextlib.suppress(Exception):
     patch("google.cloud.tasks_v2.CloudTasksClient").start()
-except Exception:
-    pass
