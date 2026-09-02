@@ -260,8 +260,8 @@ class GenerationWorkerService:
                 message_id=str(agent_msg.id),
             )
 
-            from app.core.redis import redis_cache
             from app.core.cache_keys import CacheKeys
+            from app.core.redis import redis_cache
 
             await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id))
             await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session.id))
