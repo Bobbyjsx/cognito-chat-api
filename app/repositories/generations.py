@@ -6,12 +6,13 @@ from uuid import UUID
 from google.cloud.firestore_v1.async_client import AsyncClient
 from google.cloud.firestore_v1.base_query import FieldFilter
 
+from app.core.config import settings
 from app.models.chats import GenerationDB, GenerationStatus
 
 logger = logging.getLogger(__name__)
 
 # Maximum allowed duration (in seconds) for a generation before auto-marking as failed
-GENERATION_TIMEOUT_SECONDS = 30
+GENERATION_TIMEOUT_SECONDS = settings.generation_timeout_seconds
 
 
 class GenerationRepository:

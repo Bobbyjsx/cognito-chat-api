@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     cloud_tasks_worker_url: str = ""
     cloud_tasks_service_account_email: str = ""
 
+    # Generation Timeout (seconds)
+    generation_timeout_seconds: int = 300
+
     environment: str = ""
 
     class Config:

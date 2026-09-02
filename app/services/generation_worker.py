@@ -238,6 +238,17 @@ class GenerationWorkerService:
                 session.id, role=MessageRole.AGENT, content=full_response, generation_id=str(generation.id)
             )
 
+            # Clear any transient error on user message
+            if generation.user_message_id:
+                try:
+                    await self.chat_repo.update_message(
+                        session.id,
+                        generation.user_message_id,
+                        error=None,
+                    )
+                except Exception as e:
+                    logger.warning("Could not clear error on user message: %s", e)
+
             await self.agent_service._charge_usage(user, total_tokens, active_config)
             await self.generation_repo.update_status(
                 generation_id,
