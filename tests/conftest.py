@@ -165,4 +165,7 @@ def mock_agent():
 
 
 # Mock Cloud Tasks so tests do not actually hit GCP
-patch("app.integrations.cloud_tasks.tasks_v2.CloudTasksClient").start()
+try:
+    patch("google.cloud.tasks_v2.CloudTasksClient").start()
+except Exception:
+    pass
