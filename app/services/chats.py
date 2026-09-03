@@ -746,6 +746,12 @@ class AgentService:
                 _fire_and_forget_tasks.add(_abandon_task)
                 _abandon_task.add_done_callback(_fire_and_forget_tasks.discard)
             raise
+        except Exception as prep_exc:
+            if state is not None:
+                state["handled"] = True
+            detail = prep_exc.detail if isinstance(prep_exc, HTTPException) else str(prep_exc)
+            yield f"event: error\ndata: {json.dumps({'error': detail})}\n\n"
+            return
 
         try:
             yield f"event: session\ndata: {json.dumps({'session_id': str(session_id), 'title': title})}\n\n"
