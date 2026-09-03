@@ -11,16 +11,22 @@ model needs (contents, tools, config) is expressed through
 
 from __future__ import annotations
 
+import asyncio
+
+_fire_and_forget_tasks = set()
+
 import json
 import logging
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
+from enum import Enum
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 
 from app.ai.router.blacklist import blacklist_model
-from app.models.chats import ChatResponse
+from app.models.attachments import AttachmentMetadata
+from app.models.chats import ChatResponse, ChatSessionDB, MessageRole
 from app.models.config import AppConfigDB, normalize_reasoning_level
 from app.models.users import UserDB
 from app.providers.base import (
@@ -70,11 +76,21 @@ class AgentService:
         executor: ToolExecutor | None = None,
         context_manager: ContextManager | None = None,
         router=None,
+        generation_repo=None,
+        tasks_dispatcher=None,
     ):
         self.chat_repo = chat_repo
         self.user_repo = user_repo
         self.config_repo = config_repo
         self.attachment_service = attachment_service
+        self.db = chat_repo.db
+
+        if generation_repo is None:
+            from app.repositories.generations import GenerationRepository
+
+            generation_repo = GenerationRepository(self.db)
+        self.generation_repo = generation_repo
+        self.tasks_dispatcher = tasks_dispatcher
 
         if provider is None:
             from app.core.config import settings
@@ -154,8 +170,8 @@ class AgentService:
             fallbacks = [m for m in cfg.allowed_text_models if m != model]
 
         allowed_for_model = cfg.get_reasoning_modes_for_model(model)
-        allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in allowed_for_model]
-        global_allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in cfg.allowed_reasoning_levels]
+        allowed_vals = [m.value if isinstance(m, Enum) else str(m) for m in allowed_for_model]
+        global_allowed_vals = [m.value if isinstance(m, Enum) else str(m) for m in cfg.allowed_reasoning_levels]
 
         # Resolve reasoning mode
         if effective_reasoning:
@@ -295,7 +311,7 @@ class AgentService:
         user: UserDB,
         session_id: uuid.UUID | None,
         message_text: str,
-    ) -> tuple[object, uuid.UUID, str | None]:
+    ) -> tuple[ChatSessionDB, uuid.UUID, str | None]:
         title = None
         if session_id is None:
             title = await self._generate_title(message_text)
@@ -320,30 +336,25 @@ class AgentService:
         config: AppConfigDB,
         attachment_ids: list[uuid.UUID] | None,
         session_id: uuid.UUID | None,
-    ) -> list:
+    ) -> list[AttachmentMetadata]:
         if not attachment_ids:
             return []
         if len(attachment_ids) > config.attachment_max_count:
             raise HTTPException(
                 status_code=400,
-                detail=f"Too many attachments. Maximum is {config.attachment_max_count} per message.",
+                detail=f"Too many attachments. Maximum allowed is {config.attachment_max_count}.",
             )
-        if not config.enable_attachments:
-            raise HTTPException(status_code=403, detail="Attachments are currently disabled by admin.")
-
         attachments = await self.attachment_service.resolve_many(user.id, attachment_ids)
-        missing = {str(i) for i in attachment_ids} - {str(a.id) for a in attachments}
-        if missing:
-            raise HTTPException(status_code=400, detail=f"Attachment(s) not found: {sorted(missing)}")
-
-        for attachment in attachments:
-            if attachment.session_id is None and session_id is not None:
-                await self.attachment_service.bind_session(attachment, session_id)
-
-        if attachment_ids:
+        if len(attachments) != len(attachment_ids):
+            raise HTTPException(status_code=400, detail="One or more attachments not found or not owned by you.")
+        # If this is a new session that was just created, bind the attachments to it
+        # and make them permanent (remove from temp)
+        if session_id:
+            for att in attachments:
+                if att.session_id is None:
+                    await self.attachment_service.bind_session(att, session_id)
             await self.attachment_service.make_permanent(user.id, attachment_ids)
             attachments = await self.attachment_service.resolve_many(user.id, attachment_ids)
-
         return attachments
 
     async def _prepare_current_parts(
@@ -356,12 +367,12 @@ class AgentService:
             parts.extend(await self.attachment_service.prepare_parts(attachment))
         return parts
 
-    # ── history / context ─────────────────────────────────────────────────────
+    # ── prompt construction ───────────────────────────────────────────────────
 
     async def _build_contents(
         self,
         user: UserDB,
-        session: object | None,
+        session: ChatSessionDB | None,
         config: AppConfigDB,
         current_parts: list[dict],
     ) -> list[ContentPart]:
@@ -374,7 +385,7 @@ class AgentService:
             )
 
         attachment_ids = [a_id for msg in history for a_id in (msg.attachment_ids or [])]
-        attachment_map: dict[str, object] = {}
+        attachment_map: dict[str, AttachmentMetadata] = {}
         if attachment_ids:
             try:
                 parsed = [uuid.UUID(str(i)) for i in attachment_ids]
@@ -454,7 +465,6 @@ class AgentService:
         attachments = await self._prepare_attachments(user, active_config, attachment_ids, session_id)
 
         from app.ai.router.schemas import RequestContext
-        from app.models.chats import MessageRole
 
         routing_context = RequestContext(
             conversation_message_count=len(session.messages) if session and session.messages else 0,
@@ -530,6 +540,7 @@ class AgentService:
                 detail={"code": error_code, "message": message},
             ) from last_exc
 
+        assert result is not None
         await self.chat_repo.add_message(session_id, role=MessageRole.AGENT, content=result.text)
 
         within_limit = await self._charge_usage(user, result.total_tokens, active_config)
@@ -538,10 +549,11 @@ class AgentService:
                 status_code=429, detail="Token limit exceeded after generation. Please upgrade your plan."
             )
 
+        from app.core.cache_keys import CacheKeys
         from app.core.redis import redis_cache
 
-        await redis_cache.delete_by_prefix(f"sessions:{user.id}")
-        await redis_cache.delete_by_prefix(f"session:{session_id}")
+        await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id))
+        await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))
 
         logger.info(
             "[AgentService] Chat completed: session_id=%s, model='%s', tokens=%d, response='%s...'",
@@ -570,6 +582,8 @@ class AgentService:
         requested_reasoning: str | None = None,
         attachment_ids: list[uuid.UUID] | None = None,
         routing_mode: str | None = None,
+        state: dict | None = None,
+        request: Request | None = None,
     ) -> AsyncGenerator[str, None]:
         """Yields SSE-formatted chunks as the provider responds, then persists
         the full message and token usage once the stream is complete."""
@@ -577,50 +591,129 @@ class AgentService:
             yield self._error_event("Message is empty.")
             return
 
-        import asyncio
+        if state is not None:
+            state["user_id"] = str(user.id)
+            state["session_id"] = str(session_id) if session_id else None
+            state["requested_model"] = requested_model
+            state["requested_reasoning"] = requested_reasoning
+            state["message_text"] = message_text
+            state["attachment_ids"] = [str(a) for a in (attachment_ids or [])]
+            state["completed"] = False
+            state["handled"] = False
 
         try:
-            # 1. Concurrently fetch active config and resolve chat session
-            active_config, (session, session_id, title) = await asyncio.gather(
-                self.get_active_config(),
-                self._resolve_session(user, session_id, message_text),
-            )
-            await self._quota_precheck(user, active_config)
-
-            # Flush session event immediately to establish SSE connection and stream headers (< 10ms)
-            yield f"event: session\ndata: {json.dumps({'session_id': str(session_id), 'title': title})}\n\n"
-
-            attachments = await self._prepare_attachments(user, active_config, attachment_ids, session_id)
+            is_new_session = session_id is None
 
             from app.ai.router.schemas import RequestContext
+            from app.core.cache_keys import CacheKeys
+            from app.core.redis import redis_cache
             from app.models.chats import MessageRole
 
-            routing_context = RequestContext(
-                conversation_message_count=len(session.messages) if session and session.messages else 0,
-                approximate_context_tokens=len(message_text) // 4,
-                has_attachments=bool(attachments),
-                attachment_types=[a.type for a in attachments],
-                user_id=str(user.id),
-                session_id=str(session_id),
-            )
+            async def _shielded_prep():
+                _active_config, (_session, _session_id, _title) = await asyncio.gather(
+                    self.get_active_config(),
+                    self._resolve_session(user, session_id, message_text),
+                )
 
-            model, reasoning, thinking_budget, tool_configs, fallbacks = await self.validate_and_resolve_config(
-                requested_model=requested_model,
-                requested_reasoning=requested_reasoning,
-                message_text=message_text,
-                routing_mode=routing_mode,
-                context=routing_context,
-            )
+                if state is not None:
+                    state["session_id"] = str(_session_id)
 
-            # 2. Persist user message in the background concurrently without blocking stream start
-            user_msg_task = asyncio.create_task(
-                self.chat_repo.add_message(
-                    session_id,
+                if is_new_session:
+                    await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id))
+
+                await self._quota_precheck(user, _active_config)
+
+                _attachments = await self._prepare_attachments(user, _active_config, attachment_ids, _session_id)
+
+                routing_context = RequestContext(
+                    conversation_message_count=len(_session.messages) if _session and _session.messages else 0,
+                    approximate_context_tokens=len(message_text) // 4,
+                    has_attachments=bool(_attachments),
+                    attachment_types=[a.type for a in _attachments],
+                    user_id=str(user.id),
+                    session_id=str(_session_id),
+                )
+
+                (
+                    _model,
+                    _reasoning,
+                    _thinking_budget,
+                    _tool_configs,
+                    _fallbacks,
+                ) = await self.validate_and_resolve_config(
+                    requested_model=requested_model,
+                    requested_reasoning=requested_reasoning,
+                    message_text=message_text,
+                    routing_mode=routing_mode,
+                    context=routing_context,
+                )
+
+                if state is not None:
+                    state["resolved_model"] = _model
+                    state["resolved_reasoning"] = _reasoning
+
+                _user_msg = await self.chat_repo.add_message(
+                    _session_id,
                     role=MessageRole.USER,
                     content=message_text,
-                    attachment_ids=[str(a.id) for a in attachments],
+                    attachment_ids=[str(a.id) for a in _attachments],
                 )
-            )
+                if state is not None:
+                    state["user_message_id"] = str(_user_msg.id)
+
+                async def _invalidate_caches():
+                    await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id))
+                    await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(_session_id))
+
+                _invalidate_task = asyncio.create_task(_invalidate_caches())
+                _fire_and_forget_tasks.add(_invalidate_task)
+                _invalidate_task.add_done_callback(_fire_and_forget_tasks.discard)
+
+                return (
+                    _active_config,
+                    _session,
+                    _session_id,
+                    _title,
+                    _attachments,
+                    _model,
+                    _reasoning,
+                    _thinking_budget,
+                    _tool_configs,
+                    _fallbacks,
+                    _user_msg,
+                )
+
+            (
+                active_config,
+                session,
+                resolved_session_id,
+                title,
+                attachments,
+                model,
+                reasoning,
+                thinking_budget,
+                tool_configs,
+                fallbacks,
+                user_msg,
+            ) = await asyncio.shield(_shielded_prep())
+            session_id = resolved_session_id
+
+            if state is not None:
+                state["session_id"] = str(session_id)
+                state["user_message_id"] = str(user_msg.id)
+                state["resolved_model"] = model
+                state["resolved_reasoning"] = reasoning
+                state["attachment_ids"] = [str(a.id) for a in attachments]
+        except (asyncio.CancelledError, GeneratorExit):
+            # Client disconnected during prep
+            if state is not None and not state.get("completed") and not state.get("handled"):
+                _abandon_task = asyncio.create_task(handle_stream_abandonment(state, self))
+                _fire_and_forget_tasks.add(_abandon_task)
+                _abandon_task.add_done_callback(_fire_and_forget_tasks.discard)
+            raise
+
+        try:
+            yield f"event: session\ndata: {json.dumps({'session_id': str(session_id), 'title': title})}\n\n"
 
             current_parts = await self._prepare_current_parts(message_text, attachments)
             contents = await self._build_contents(user, session, active_config, current_parts)
@@ -630,111 +723,244 @@ class AgentService:
                 include_thoughts=True,
                 tool_configs=tool_configs,
             )
-        except HTTPException as exc:
-            yield self._error_event(str(exc.detail))
-            return
-        except Exception as exc:
-            logger.exception("[AgentService] Stream setup failed for session_id=%s", session_id)
-            yield self._error_event(f"Internal error during stream setup: {exc}")
-            return
 
-        models_to_attempt = [model] + [m for m in fallbacks if m != model]
-        used_model = model
-        last_exc = None
-        has_yielded_chunks = False
-        full_response = ""
-        total_tokens = 0
-
-        for attempt_idx, candidate_model in enumerate(models_to_attempt):
-            full_response = ""
-            total_tokens = 0
-            has_yielded_chunks = False
+            models_to_attempt = [model] + [m for m in fallbacks if m != model]
+            used_model = model
             last_exc = None
-            try:
+            has_yielded_chunks = False
+            full_response = ""
+            full_thoughts = ""
+            total_tokens = 0
+
+            for attempt_idx, candidate_model in enumerate(models_to_attempt):
+                full_response = ""
+                full_thoughts = ""
+                total_tokens = 0
+                used_model = candidate_model
+                last_exc = None
+
                 logger.info(
                     "[AgentService] Invoking provider generate_stream for model='%s' with %d contents",
                     candidate_model,
                     len(contents),
                 )
-                async for event in self.executor.generate_stream(candidate_model, contents, generation_config):
-                    if event.type == "text":
-                        full_response += event.token or ""
-                    elif event.type == "usage" and event.total_tokens:
-                        total_tokens = event.total_tokens
-                    yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
-                    has_yielded_chunks = True
 
-                used_model = candidate_model
-                break
-            except Exception as exc:
-                last_exc = exc
-                await blacklist_model(candidate_model)
-                if has_yielded_chunks:
-                    logger.warning("Stream failed mid-generation for model '%s', cannot retry.", candidate_model)
+                try:
+                    async for event in self.executor.generate_stream(candidate_model, contents, generation_config):
+                        if event.type == "text":
+                            chunk = event.token or ""
+                            full_response += chunk
+                            if state is not None:
+                                state["buffered_text"] = full_response
+                            yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
+                            has_yielded_chunks = True
+                        elif event.type == "reasoning":
+                            full_thoughts += event.token or ""
+                            if state is not None:
+                                state["buffered_thoughts"] = full_thoughts
+                            yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
+                            has_yielded_chunks = True
+                        elif event.type == "usage" and event.total_tokens:
+                            total_tokens = event.total_tokens
+                            yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
+
+                    last_exc = None
                     break
-                else:
-                    if attempt_idx < len(models_to_attempt) - 1:
-                        logger.warning(
-                            "Generation stream with model '%s' failed (%s). Attempting fallback '%s'.",
-                            candidate_model,
-                            exc,
-                            models_to_attempt[attempt_idx + 1],
-                        )
-                    else:
-                        logger.exception(
-                            "Model generation stream failed session_id=%s model=%s",
-                            session_id,
-                            candidate_model,
-                        )
+                except (asyncio.CancelledError, GeneratorExit):
+                    raise
+                except Exception as exc:
+                    last_exc = exc
+                    await blacklist_model(candidate_model)
+                    logger.warning(
+                        "[AgentService] Provider generate_stream failed for model='%s': %s",
+                        candidate_model,
+                        exc,
+                    )
+                    if has_yielded_chunks or attempt_idx >= len(models_to_attempt) - 1:
+                        break
 
-        if last_exc is not None:
-            status, error_code, message = classify_provider_error(last_exc)
-            logger.exception(
-                "Model generation failed session_id=%s model=%s error_code=%s status=%s",
-                session_id,
-                used_model,
-                error_code,
-                status,
-            )
-            await asyncio.gather(
-                user_msg_task,
-                self.chat_repo.add_message(
+            if last_exc is not None:
+                status, error_code, message = classify_provider_error(last_exc)
+
+                logger.error(
+                    "Stream generation failed for session %s with model %s: [%s] status=%d: %s",
                     session_id,
-                    role=MessageRole.AGENT,
-                    content=full_response,
-                    error=f"[{error_code}] {message}",
-                ),
+                    used_model,
+                    error_code,
+                    status,
+                    last_exc,
+                )
+                if state is not None:
+                    state["completed"] = True
+
+                if full_response:
+                    await self.chat_repo.add_message(
+                        session_id,
+                        role=MessageRole.AGENT,
+                        content=full_response,
+                        error=f"[{error_code}] {message}",
+                    )
+                else:
+                    await self.chat_repo.update_message(
+                        session_id,
+                        user_msg.id,
+                        error=f"[{error_code}] {message}",
+                    )
+
+                yield self._error_event(message, error_code)
+                return
+
+            from app.core.cache_keys import CacheKeys
+            from app.core.redis import redis_cache
+
+            # Concurrently ensure agent response is stored, quota is charged, and cache is evicted
+            try:
+                await self.chat_repo.add_message(session_id, role=MessageRole.AGENT, content=full_response)
+            except Exception as e:
+                logger.error("Failed to add agent message: %s", e)
+
+            if state is not None:
+                state["completed"] = True
+
+            persist_results = await asyncio.gather(
+                self._charge_usage(user, total_tokens, active_config),
+                redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id)),
+                redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id)),
                 return_exceptions=True,
             )
-            yield self._error_event(message, error_code)
+
+            within_limit = persist_results[0] if isinstance(persist_results[0], bool) else True
+            if not within_limit:
+                yield self._error_event("Token limit exceeded after generation. Please upgrade your plan.")
+                return
+
+            logger.info(
+                "[AgentService] Stream chat completed: session_id=%s, model='%s', tokens=%d, full_response='%s...'",
+                session_id,
+                used_model,
+                total_tokens,
+                full_response[:80].replace("\n", " ") if full_response else "",
+            )
+
+            yield (
+                "event: done\n"
+                f"data: {json.dumps({'session_id': str(session_id), 'title': title, 'tokens_used': total_tokens, 'model': used_model, 'reasoning': reasoning})}\n\n"
+            )
+        except (asyncio.CancelledError, GeneratorExit):
+            # Client disconnected anytime during the streaming lifecycle!
+            logger.info(
+                "Client disconnected during stream_chat for session %s. Relinquishing to background worker.",
+                session_id,
+            )
+            if state is not None and not state.get("completed") and not state.get("handled"):
+                _abandon_task = asyncio.create_task(handle_stream_abandonment(state, self))
+                _fire_and_forget_tasks.add(_abandon_task)
+                _abandon_task.add_done_callback(_fire_and_forget_tasks.discard)
+            raise
+        except HTTPException as exc:
+            yield self._error_event(str(exc.detail))
+            return
+        except Exception as exc:
+            logger.exception("[AgentService] Stream failed for session_id=%s", session_id)
+            yield self._error_event(f"Internal error during stream: {exc}")
             return
 
-        from app.core.redis import redis_cache
 
-        # Concurrently ensure user message is persisted, agent response is stored, quota is charged, and cache is evicted
-        persist_results = await asyncio.gather(
-            user_msg_task,
-            self.chat_repo.add_message(session_id, role=MessageRole.AGENT, content=full_response),
-            self._charge_usage(user, total_tokens, active_config),
-            redis_cache.delete_by_prefix(f"sessions:{user.id}"),
-            redis_cache.delete_by_prefix(f"session:{session_id}"),
-            return_exceptions=True,
-        )
+async def handle_stream_abandonment(state: dict, agent_service: AgentService) -> None:
+    """Handle premature stream disconnect by creating a GenerationDB and enqueuing a background task."""
+    if not state or state.get("completed") or state.get("handled"):
+        return
+    state["handled"] = True
 
-        within_limit = persist_results[2] if isinstance(persist_results[2], bool) else True
-        if not within_limit:
-            yield self._error_event("Token limit exceeded after generation. Please upgrade your plan.")
+    user_id_str = state.get("user_id")
+    if not user_id_str:
+        return
+
+    import uuid
+
+    from app.core.cache_keys import CacheKeys
+    from app.core.redis import redis_cache
+    from app.models.chats import GenerationDB, GenerationStatus
+    from app.schemas.task import GenerationTaskPayload
+
+    user_id = uuid.UUID(user_id_str)
+    session_id_str = state.get("session_id")
+    if not session_id_str:
+        user = await agent_service.user_repo.get_by_id(user_id_str)
+        if not user:
             return
+        _, session_id, _ = await agent_service._resolve_session(user, None, state.get("message_text", ""))
+        session_id_str = str(session_id)
+        state["session_id"] = session_id_str
+    else:
+        session_id = uuid.UUID(session_id_str)
 
-        logger.info(
-            "[AgentService] Stream chat completed: session_id=%s, model='%s', tokens=%d, full_response='%s...'",
-            session_id,
-            used_model,
-            total_tokens,
-            full_response[:80].replace("\n", " ") if full_response else "",
-        )
+    gen_id = uuid.uuid4()
 
-        yield (
-            "event: done\n"
-            f"data: {json.dumps({'session_id': str(session_id), 'title': title, 'tokens_used': total_tokens, 'model': used_model, 'reasoning': reasoning})}\n\n"
-        )
+    logger.info(
+        "[AgentService] Stream abandoned by client for session %s. Lazily creating Generation %s & dispatching worker.",
+        session_id,
+        gen_id,
+    )
+
+    user_msg_id_str = state.get("user_message_id")
+    user_msg_id = uuid.UUID(user_msg_id_str) if user_msg_id_str else None
+
+    gen = GenerationDB(
+        id=gen_id,
+        user_id=user_id,
+        session_id=session_id,
+        user_message_id=user_msg_id,
+        prompt=state.get("message_text"),
+        status=GenerationStatus.QUEUED,
+        requested_model=state.get("requested_model"),
+        resolved_model=state.get("resolved_model") or state.get("model"),
+        requested_reasoning=state.get("requested_reasoning"),
+        resolved_reasoning=state.get("resolved_reasoning"),
+        buffered_text=state.get("buffered_text", ""),
+        buffered_thoughts=state.get("buffered_thoughts", ""),
+    )
+
+    try:
+        await agent_service.generation_repo.create(gen)
+        state["generation_id"] = str(gen.id)
+    except Exception as e:
+        logger.error("Failed to create GenerationDB record for abandoned stream: %s", e)
+        return
+
+    # Invalidate Redis caches so sidebar immediately shows active_generation_id
+    try:
+        await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user_id))
+        await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))
+    except Exception as e:
+        logger.warning("Failed to invalidate Redis cache on stream abandonment: %s", e)
+
+    payload = GenerationTaskPayload(generation_id=str(gen.id))
+
+    # Dispatch to Cloud Tasks (or fallback to local background execution if Cloud Tasks is unavailable/fails)
+    enqueued = False
+    if agent_service.tasks_dispatcher is not None:
+        try:
+            await agent_service.tasks_dispatcher.enqueue_generation_task(payload)
+            enqueued = True
+        except Exception as e:
+            logger.warning("Cloud Tasks enqueue failed (%s). Falling back to background worker task.", e)
+
+    if not enqueued:
+        try:
+            from app.repositories.chats import ChatRepository
+            from app.repositories.config import ConfigRepository
+            from app.repositories.generations import GenerationRepository
+            from app.services.generation_worker import GenerationWorkerService
+
+            gen_repo = agent_service.generation_repo or GenerationRepository(agent_service.db)
+            worker = GenerationWorkerService(
+                generation_repo=gen_repo,
+                chat_repo=ChatRepository(agent_service.db),
+                user_repo=UserRepository(agent_service.db),
+                config_repo=ConfigRepository(agent_service.db),
+                agent_service=agent_service,
+            )
+            asyncio.create_task(worker.execute_task(payload))
+        except Exception as e:
+            logger.error("Failed to execute local fallback worker for abandoned generation %s: %s", gen.id, e)

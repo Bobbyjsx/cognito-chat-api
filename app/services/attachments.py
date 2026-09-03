@@ -13,6 +13,7 @@ import io
 import logging
 import re
 import zipfile
+from collections.abc import Sequence
 from datetime import datetime
 from uuid import UUID
 from xml.etree import ElementTree
@@ -108,19 +109,19 @@ class AttachmentService:
 
     # ── reads ─────────────────────────────────────────────────────────────────
 
-    async def resolve_many(self, user_id: UUID, ids: list[UUID]) -> list[AttachmentMetadata]:
+    async def resolve_many(self, user_id: UUID | str, ids: Sequence[UUID | str]) -> list[AttachmentMetadata]:
         if not ids:
             return []
         return await self.repo.get_many(user_id, ids)
 
-    async def bind_session(self, metadata: AttachmentMetadata, session_id: UUID) -> None:
+    async def bind_session(self, metadata: AttachmentMetadata, session_id: UUID | str) -> None:
         """Associate an attachment with a session (persisted)."""
         if metadata.session_id is None or str(metadata.session_id) != str(session_id):
             metadata.session_id = session_id
             await self.repo.update_session(metadata.id, session_id)
             await self._invalidate_cache(metadata.user_id)
 
-    async def make_permanent(self, user_id: UUID, ids: list[UUID]) -> None:
+    async def make_permanent(self, user_id: UUID | str, ids: Sequence[UUID | str]) -> None:
         """Mark a list of attachments as permanent (is_temporary = False) and move them out of temp."""
         if not ids:
             return
@@ -167,7 +168,7 @@ class AttachmentService:
 
     # ── delete ────────────────────────────────────────────────────────────────
 
-    async def delete(self, user_id: UUID, attachment_id: UUID) -> bool:
+    async def delete(self, user_id: UUID | str, attachment_id: UUID | str) -> bool:
         metadata = await self.repo.get(attachment_id, user_id)
         if metadata is None:
             return False

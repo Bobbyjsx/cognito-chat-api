@@ -1,0 +1,96 @@
+{
+  "branch": "master (base)",
+  "description": "Baseline endpoint latency measurements on master branch (Live Non-Mocked Execution, Redis GET bypass enabled)",
+  "results": {
+    "GET /health": {
+      "iterations": 15,
+      "mean_ms": 10.14,
+      "median_ms": 2.03,
+      "p95_ms": 119.81,
+      "min_ms": 1.51,
+      "max_ms": 119.81,
+      "std_dev_ms": 30.35,
+      "sample_status": 200
+    },
+    "GET /config": {
+      "iterations": 15,
+      "mean_ms": 750.42,
+      "median_ms": 413.18,
+      "p95_ms": 3793.49,
+      "min_ms": 287.97,
+      "max_ms": 3793.49,
+      "std_dev_ms": 892.25,
+      "sample_status": 200
+    },
+    "GET /agent/sessions": {
+      "iterations": 15,
+      "mean_ms": 873.47,
+      "median_ms": 762.7,
+      "p95_ms": 1529.35,
+      "min_ms": 465.66,
+      "max_ms": 1529.35,
+      "std_dev_ms": 338.07,
+      "sample_status": 200
+    },
+    "POST /agent/chat (Sync)": {
+      "iterations": 15,
+      "mean_ms": 9988.75,
+      "median_ms": 9108.87,
+      "p95_ms": 18470.87,
+      "min_ms": 6885.05,
+      "max_ms": 18470.87,
+      "std_dev_ms": 3501.97,
+      "sample_status": 200
+    },
+    "POST /agent/chat/stream": {
+      "iterations": 15,
+      "mean_ms": 5385.96,
+      "median_ms": 5191.75,
+      "p95_ms": 7276.14,
+      "min_ms": 4920.96,
+      "max_ms": 7276.14,
+      "std_dev_ms": 599.47,
+      "sample_status": 200
+    },
+    "GET /agent/sessions/{id}": {
+      "iterations": 15,
+      "mean_ms": 461.5,
+      "median_ms": 460.56,
+      "p95_ms": 468.98,
+      "min_ms": 454.83,
+      "max_ms": 468.98,
+      "std_dev_ms": 3.8,
+      "sample_status": 200
+    },
+    "GET /agent/generations/{id}": {
+      "iterations": 15,
+      "mean_ms": 1.05,
+      "median_ms": 0.95,
+      "p95_ms": 2.01,
+      "min_ms": 0.87,
+      "max_ms": 2.01,
+      "std_dev_ms": 0.29,
+      "sample_status": 404
+    },
+    "POST /agent/attachments": {
+      "iterations": 15,
+      "mean_ms": 822.37,
+      "median_ms": 825.0,
+      "p95_ms": 976.49,
+      "min_ms": 749.07,
+      "max_ms": 976.49,
+      "std_dev_ms": 58.44,
+      "sample_status": 201
+    },
+    "DELETE /agent/sessions/{id}": {
+      "iterations": 15,
+      "mean_ms": 1406.81,
+      "median_ms": 1326.69,
+      "p95_ms": 1735.96,
+      "min_ms": 1282.89,
+      "max_ms": 1735.96,
+      "std_dev_ms": 154.91,
+      "sample_status": 200
+    }
+  }
+}

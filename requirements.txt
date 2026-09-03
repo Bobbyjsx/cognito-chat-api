@@ -16,3 +16,4 @@ freezegun
 httpx
 redis
 pre-commit
+google-cloud-tasks

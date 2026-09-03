@@ -8,6 +8,10 @@ class CacheKeys:
         return f"sessions:{user_id}:limit={limit}:offset={offset}:q={q}"
 
     @staticmethod
+    def user_sessions_prefix(user_id: uuid.UUID | str) -> str:
+        return f"sessions:{user_id}"
+
+    @staticmethod
     def user_attachments(
         user_id: uuid.UUID | str,
         limit: int,
@@ -24,6 +28,10 @@ class CacheKeys:
     @staticmethod
     def session_details(session_id: uuid.UUID | str, limit: int, offset: int) -> str:
         return f"session:{session_id}:limit={limit}:offset={offset}"
+
+    @staticmethod
+    def session_details_prefix(session_id: uuid.UUID | str) -> str:
+        return f"session:{session_id}"
 
     @staticmethod
     def system_config() -> str:

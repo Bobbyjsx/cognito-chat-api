@@ -171,8 +171,9 @@ class HeuristicFallbackAnalyzer(BaseRequestAnalyzer):
     # Web keywords
     _WEB_KEYWORDS: ClassVar[set[str]] = {
         "latest",
-        "current news",
-        "today's news",
+        "current",
+        "news",
+        "today's",
         "current weather",
         "who is the current",
         "who is ",
@@ -186,6 +187,10 @@ class HeuristicFallbackAnalyzer(BaseRequestAnalyzer):
         "look up",
         "find online",
         "browse the web",
+        "date",
+        "today",
+        "tomorrow",
+        "yesterday",
     }
 
     # Summarization keywords
@@ -280,15 +285,15 @@ class HeuristicFallbackAnalyzer(BaseRequestAnalyzer):
             task_type = TaskType.SUMMARIZATION
         elif is_creative:
             task_type = TaskType.CREATIVE_WRITING
-        elif "analyze" in lower_text or "investigate" in lower_text:
-            task_type = TaskType.ANALYSIS
-        elif web_required:
-            task_type = TaskType.GENERAL_KNOWLEDGE
         elif is_greeting:
             task_type = TaskType.CONVERSATION
             complexity = 0.15
             reasoning_score = 0.1
             web_required = False
+        elif "analyze" in lower_text or "investigate" in lower_text:
+            task_type = TaskType.ANALYSIS
+        elif web_required:
+            task_type = TaskType.GENERAL_KNOWLEDGE
         else:
             task_type = TaskType.GENERAL_KNOWLEDGE
 

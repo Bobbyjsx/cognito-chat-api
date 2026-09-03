@@ -105,7 +105,7 @@ class UserRepository:
         doc_ref = self.collection.document(str(user_id))
 
         @async_transaction.async_transactional
-        async def _txn(transaction, doc_ref):
+        async def _txn(transaction: Any) -> bool:
             snapshot = await doc_ref.get(transaction=transaction)
             if not snapshot.exists:
                 return False
@@ -149,7 +149,8 @@ class UserRepository:
             transaction.update(doc_ref, updates)
             return is_within_limit
 
-        return await _txn(self.db.transaction(), doc_ref)
+        res = await _txn(self.db.transaction())
+        return bool(res)
 
     async def update_password(self, user_id: UUID | str, hashed_password: str) -> None:
         doc_ref = self.collection.document(str(user_id))

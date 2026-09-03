@@ -30,9 +30,9 @@ class AttachmentMetadata(BaseModel):
     storage backend (e.g. Google Cloud Storage) referenced by ``storage_uri``.
     """
 
-    id: UUID = Field(default_factory=uuid4)
-    user_id: UUID
-    session_id: UUID | None = None
+    id: UUID | str = Field(default_factory=uuid4)
+    user_id: UUID | str
+    session_id: UUID | str | None = None
     filename: str
     mime_type: str
     size: int = 0

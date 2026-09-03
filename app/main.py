@@ -23,7 +23,7 @@ from app.core.config import settings
 from app.core.jwks import prefetch_jwks
 from app.database import create_db_client, init_db
 from app.repositories.attachments import AttachmentRepository
-from app.router import attachments, auth, chats, config, stt
+from app.router import attachments, auth, chats, config, stt, tasks
 from app.services.attachments import AttachmentService
 
 
@@ -82,10 +82,24 @@ async def _init_ai_stack(app: FastAPI):
         HeuristicFallbackAnalyzer,
         SmartModelRouter,
     )
+    from app.integrations.cloud_tasks import CloudTasksDispatcher
     from app.providers.gemini import GeminiProvider
     from app.tools.registry import ToolRegistry
 
+    # Initialize Provider
     app.state.provider = GeminiProvider(api_key=settings.gemini_api_key)
+    logger.info("Initialized GeminiProvider with provided API key.")
+
+    # Initialize CloudTasksDispatcher
+    app.state.tasks_dispatcher = CloudTasksDispatcher(
+        project=settings.cloud_tasks_project,
+        location=settings.cloud_tasks_location,
+        queue=settings.cloud_tasks_queue,
+        worker_url=settings.cloud_tasks_worker_url,
+        service_account_email=settings.cloud_tasks_service_account_email,
+    )
+    logger.info("Initialized CloudTasksDispatcher.")
+
     registry = ToolRegistry()
     registry.register_defaults()
     app.state.tool_registry = registry
@@ -126,9 +140,14 @@ app = FastAPI(
 @app.middleware("http")
 async def add_cache_control_header(request: Request, call_next):
     response = await call_next(request)
-    if request.method == "GET" and response.status_code == 200 and "Cache-Control" not in response.headers:
-        # Cache all GET requests for 60 seconds, allowing stale-while-revalidate for smooth reloads
-        response.headers["Cache-Control"] = "private, max-age=60, stale-while-revalidate=60"
+    if "Cache-Control" not in response.headers:
+        if request.url.path.endswith("/content") and request.method == "GET" and response.status_code == 200:
+            # Only cache binary attachment files in browser cache
+            response.headers["Cache-Control"] = "private, max-age=3600"
+        else:
+            # Dynamic API data must not be cached by browser HTTP disk cache
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
     return response
 
 
@@ -149,6 +168,7 @@ app.include_router(chats.router)
 app.include_router(config.router)
 app.include_router(stt.router)
 app.include_router(attachments.router)
+app.include_router(tasks.router)
 
 
 @app.get("/health")
