@@ -128,11 +128,15 @@ class GenerationWorkerService:
                     duration_ms=(time.perf_counter() - start_time) * 1000,
                 )
 
-            prompt_in_messages = any(
-                m.role == MessageRole.USER and m.content == generation.prompt
+            has_user_msg = bool(generation.user_message_id) or any(
+                m.role == MessageRole.USER
+                and (
+                    m.content == generation.prompt
+                    or (generation.user_message_id and str(m.id) == str(generation.user_message_id))
+                )
                 for m in (session.messages if session else [])
             )
-            if not prompt_in_messages and generation.prompt:
+            if not has_user_msg and generation.prompt:
                 # User message was not committed yet due to early client disconnect; persist it now
                 user_msg = await self.chat_repo.add_message(
                     generation.session_id,
