@@ -71,6 +71,9 @@ class ClaudeProvider(BaseProvider):
 
     # Friendly model IDs mapped to Vertex AI Model Garden endpoints
     VERTEX_MODEL_MAP: dict[str, str] = {
+        "claude-sonnet-4-5": "claude-sonnet-4-5@20250929",
+        "claude-sonnet-4.5": "claude-sonnet-4-5@20250929",
+        "claude-sonnet-4-5@20250929": "claude-sonnet-4-5@20250929",
         "claude-3-7-sonnet": "claude-3-7-sonnet@20250219",
         "claude-3.7-sonnet": "claude-3-7-sonnet@20250219",
         "claude-3-7-sonnet-20250219": "claude-3-7-sonnet@20250219",
@@ -90,6 +93,8 @@ class ClaudeProvider(BaseProvider):
 
     # Friendly model IDs mapped to direct Anthropic API models
     DIRECT_MODEL_MAP: dict[str, str] = {
+        "claude-sonnet-4-5": "claude-3-5-sonnet-20241022",
+        "claude-sonnet-4.5": "claude-3-5-sonnet-20241022",
         "claude-3-7-sonnet": "claude-3-7-sonnet-20250219",
         "claude-3.7-sonnet": "claude-3-7-sonnet-20250219",
         "claude-3-5-sonnet": "claude-3-5-sonnet-20241022",
@@ -363,8 +368,7 @@ class ClaudeProvider(BaseProvider):
             params["thinking"] = {"type": "enabled", "budget_tokens": budget}
             # max_tokens must be greater than budget_tokens
             params["max_tokens"] = max(budget + 4096, self.default_max_tokens)
-        else:
-            # Standard generation without thinking
+        elif not self.is_vertex:
             params["temperature"] = 0.7
 
         return params
