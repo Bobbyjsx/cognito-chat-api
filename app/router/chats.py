@@ -4,8 +4,36 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
+from google.cloud.firestore_v1.async_client import AsyncClient
+
+from app.api.dependencies import (
+    get_current_user,
+    get_provider,
+    get_smart_router,
+    get_storage_backend,
+    get_tasks_dispatcher,
+    get_tool_registry,
+)
+from app.database import get_db
+from app.integrations.cloud_tasks import CloudTasksDispatcher
+from app.models.chats import ChatRequest, ChatResponse, ChatSessionListSchema, ReadStatus
+from app.models.pagination import PaginatedResponse
+from app.models.users import UserDB
+from app.providers.base import BaseProvider
+from app.repositories.attachments import AttachmentRepository
+from app.repositories.chats import ChatRepository
+from app.repositories.config import ConfigRepository
+from app.repositories.generations import GenerationRepository
+from app.repositories.users import UserRepository
+from app.services.attachments import AttachmentService
+from app.services.chats import AgentService
+from app.storage.base import StorageBackend
+from app.tools.executor import ToolExecutor
+from app.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/agent", tags=["agent"])
 
 
 class AgentStreamingResponse(StreamingResponse):
@@ -19,46 +47,9 @@ class AgentStreamingResponse(StreamingResponse):
             await super().__call__(scope, receive, send)
         finally:
             if not self.state.get("completed") and not self.state.get("handled"):
-                import asyncio
-
                 from app.services.chats import handle_stream_abandonment
 
                 asyncio.create_task(handle_stream_abandonment(self.state, self.agent_service))
-
-
-from fastapi.responses import StreamingResponse
-from google.cloud.firestore_v1.async_client import AsyncClient
-
-from app.api.dependencies import (
-    get_current_user,
-    get_provider,
-    get_smart_router,
-    get_storage_backend,
-    get_tool_registry,
-)
-from app.database import get_db
-from app.models.chats import ChatRequest, ChatResponse, ChatSessionListSchema, ReadStatus
-from app.models.pagination import PaginatedResponse
-from app.models.users import UserDB
-from app.providers.base import BaseProvider
-from app.repositories.attachments import AttachmentRepository
-from app.repositories.chats import ChatRepository
-from app.repositories.config import ConfigRepository
-from app.repositories.users import UserRepository
-from app.services.attachments import AttachmentService
-from app.services.chats import AgentService
-from app.storage.base import StorageBackend
-from app.tools.executor import ToolExecutor
-from app.tools.registry import ToolRegistry
-
-logger = logging.getLogger(__name__)
-
-router = APIRouter(prefix="/agent", tags=["agent"])
-
-
-from app.api.dependencies import get_tasks_dispatcher
-from app.integrations.cloud_tasks import CloudTasksDispatcher
-from app.repositories.generations import GenerationRepository
 
 
 def get_agent_service(
@@ -67,7 +58,7 @@ def get_agent_service(
     storage: StorageBackend = Depends(get_storage_backend),
     registry: ToolRegistry = Depends(get_tool_registry),
     smart_router=Depends(get_smart_router),
-    dispatcher: CloudTasksDispatcher = Depends(get_tasks_dispatcher),
+    dispatcher: CloudTasksDispatcher | None = Depends(get_tasks_dispatcher),
 ) -> AgentService:
     chat_repo = ChatRepository(db)
     user_repo = UserRepository(db)

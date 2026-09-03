@@ -130,3 +130,22 @@ def test_background_worker_claims_and_executes(client: TestClient, test_user_and
     gen_data = gen_doc.to_dict()
     assert gen_data["status"] == GenerationStatus.COMPLETED.value
     assert gen_data.get("message_id") is not None
+
+
+def test_local_worker_provider_returns_no_dispatcher():
+    """Test that when worker_provider is 'local', get_tasks_dispatcher returns None."""
+    from unittest.mock import MagicMock
+
+    from app.api.dependencies import get_tasks_dispatcher
+    from app.core.config import settings
+
+    orig_provider = settings.worker_provider
+    try:
+        settings.worker_provider = "local"
+        mock_request = MagicMock()
+        mock_request.app.state.tasks_dispatcher = None
+
+        dispatcher = get_tasks_dispatcher(mock_request)
+        assert dispatcher is None
+    finally:
+        settings.worker_provider = orig_provider

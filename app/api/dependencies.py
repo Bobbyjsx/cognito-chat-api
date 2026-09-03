@@ -187,11 +187,19 @@ async def get_current_user(
     return user
 
 
-def get_tasks_dispatcher(request: Request) -> CloudTasksDispatcher:
-    """Returns the shared CloudTasksDispatcher instance."""
+def get_tasks_dispatcher(request: Request) -> CloudTasksDispatcher | None:
+    """Returns the shared CloudTasksDispatcher instance if worker_provider is 'cloudtasks', otherwise None."""
+    if settings.worker_provider.lower() != "cloudtasks":
+        return None
     dispatcher = getattr(request.app.state, "tasks_dispatcher", None)
     if dispatcher is None:
-        dispatcher = CloudTasksDispatcher()
+        dispatcher = CloudTasksDispatcher(
+            project=settings.cloud_tasks_project,
+            location=settings.cloud_tasks_location,
+            queue=settings.cloud_tasks_queue,
+            worker_url=settings.cloud_tasks_worker_url,
+            service_account_email=settings.cloud_tasks_service_account_email,
+        )
     return dispatcher
 
 
