@@ -171,8 +171,9 @@ class HeuristicFallbackAnalyzer(BaseRequestAnalyzer):
     # Web keywords
     _WEB_KEYWORDS: ClassVar[set[str]] = {
         "latest",
-        "current news",
-        "today's news",
+        "current",
+        "news",
+        "today's",
         "current weather",
         "who is the current",
         "who is ",
@@ -186,6 +187,10 @@ class HeuristicFallbackAnalyzer(BaseRequestAnalyzer):
         "look up",
         "find online",
         "browse the web",
+        "date",
+        "today",
+        "tomorrow",
+        "yesterday",
     }
 
     # Summarization keywords

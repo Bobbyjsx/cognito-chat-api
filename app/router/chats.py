@@ -231,7 +231,7 @@ async def get_session(
         asyncio.create_task(redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(current_user.id)))
 
     messages = session.messages or []
-    session.messages = None
+    session.messages = []
 
     result = {
         "session": session.model_dump(mode="json"),
@@ -263,9 +263,16 @@ async def delete_session(
     db: AsyncClient = Depends(get_db),
 ):
     repo = ChatRepository(db)
+    gen_repo = GenerationRepository(db)
+
     success = await repo.soft_delete_session(session_id, current_user.id)
     if not success:
         raise HTTPException(status_code=404, detail="Session not found or already deleted")
+
+    # Cancel any in-flight live or background generations for this session
+    asyncio.create_task(
+        gen_repo.cancel_active_generations_for_session(session_id, reason="Session was deleted by user")
+    )
 
     from app.core.cache_keys import CacheKeys
     from app.core.redis import redis_cache

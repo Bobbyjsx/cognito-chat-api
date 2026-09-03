@@ -110,6 +110,23 @@ class GenerationWorkerService:
         try:
             active_config = await self.agent_service.get_active_config()
             session, _ = await self.chat_repo.get_session(generation.session_id, user.id, limit=100)
+            if not session:
+                logger.info(
+                    "Session %s for generation %s was deleted or not found. Aborting worker.",
+                    generation.session_id,
+                    generation_id,
+                )
+                await self.generation_repo.update_status(
+                    generation_id,
+                    GenerationStatus.CANCELLED,
+                    error="Session was deleted",
+                )
+                return TaskExecutionResponse(
+                    status="session_deleted",
+                    generation_id=generation_id,
+                    attempt_number=attempt_num,
+                    duration_ms=(time.perf_counter() - start_time) * 1000,
+                )
 
             prompt_in_messages = any(
                 m.role == MessageRole.USER and m.content == generation.prompt
@@ -122,14 +139,8 @@ class GenerationWorkerService:
                     role=MessageRole.USER,
                     content=generation.prompt,
                 )
-                if not session:
-                    session, _ = await self.chat_repo.get_session(generation.session_id, user.id, limit=100)
-                else:
-                    session.messages.append(user_msg)
+                session.messages.append(user_msg)
                 await self.generation_repo.update(generation_id, user_message_id=user_msg.id)
-
-            if not session:
-                raise ValueError("Session not found")
 
             # The last message from the user should be the trigger message.
             # For simplicity (V1), we take all messages, the last user message being the prompt.
@@ -232,6 +243,22 @@ class GenerationWorkerService:
                     logger.warning("Worker attempt for model '%s' failed: %s", candidate_model, exc)
                     if attempt_idx >= len(models_to_attempt) - 1:
                         raise
+
+            # Check if session was deleted while streaming
+            session_exists = await self.chat_repo.session_exists(session.id, user.id)
+            if not session_exists:
+                logger.info("Session %s was deleted during generation. Aborting final commit.", session.id)
+                await self.generation_repo.update_status(
+                    generation_id,
+                    GenerationStatus.CANCELLED,
+                    error="Session was deleted by user",
+                )
+                return TaskExecutionResponse(
+                    status="session_deleted_during_stream",
+                    generation_id=generation_id,
+                    attempt_number=attempt_num,
+                    duration_ms=(time.perf_counter() - start_time) * 1000,
+                )
 
             # Record success
             agent_msg = await self.chat_repo.add_message(

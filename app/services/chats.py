@@ -20,11 +20,13 @@ import logging
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
+from enum import Enum
 
 from fastapi import HTTPException, Request
 
 from app.ai.router.blacklist import blacklist_model
-from app.models.chats import ChatResponse
+from app.models.attachments import AttachmentMetadata
+from app.models.chats import ChatResponse, ChatSessionDB, MessageRole
 from app.models.config import AppConfigDB, normalize_reasoning_level
 from app.models.users import UserDB
 from app.providers.base import (
@@ -168,8 +170,8 @@ class AgentService:
             fallbacks = [m for m in cfg.allowed_text_models if m != model]
 
         allowed_for_model = cfg.get_reasoning_modes_for_model(model)
-        allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in allowed_for_model]
-        global_allowed_vals = [m.value if hasattr(m, "value") else str(m) for m in cfg.allowed_reasoning_levels]
+        allowed_vals = [m.value if isinstance(m, Enum) else str(m) for m in allowed_for_model]
+        global_allowed_vals = [m.value if isinstance(m, Enum) else str(m) for m in cfg.allowed_reasoning_levels]
 
         # Resolve reasoning mode
         if effective_reasoning:
@@ -309,7 +311,7 @@ class AgentService:
         user: UserDB,
         session_id: uuid.UUID | None,
         message_text: str,
-    ) -> tuple[object, uuid.UUID, str | None]:
+    ) -> tuple[ChatSessionDB, uuid.UUID, str | None]:
         title = None
         if session_id is None:
             title = await self._generate_title(message_text)
@@ -334,30 +336,25 @@ class AgentService:
         config: AppConfigDB,
         attachment_ids: list[uuid.UUID] | None,
         session_id: uuid.UUID | None,
-    ) -> list:
+    ) -> list[AttachmentMetadata]:
         if not attachment_ids:
             return []
         if len(attachment_ids) > config.attachment_max_count:
             raise HTTPException(
                 status_code=400,
-                detail=f"Too many attachments. Maximum is {config.attachment_max_count} per message.",
+                detail=f"Too many attachments. Maximum allowed is {config.attachment_max_count}.",
             )
-        if not config.enable_attachments:
-            raise HTTPException(status_code=403, detail="Attachments are currently disabled by admin.")
-
         attachments = await self.attachment_service.resolve_many(user.id, attachment_ids)
-        missing = {str(i) for i in attachment_ids} - {str(a.id) for a in attachments}
-        if missing:
-            raise HTTPException(status_code=400, detail=f"Attachment(s) not found: {sorted(missing)}")
-
-        for attachment in attachments:
-            if attachment.session_id is None and session_id is not None:
-                await self.attachment_service.bind_session(attachment, session_id)
-
-        if attachment_ids:
+        if len(attachments) != len(attachment_ids):
+            raise HTTPException(status_code=404, detail="One or more attachments not found or not owned by you.")
+        # If this is a new session that was just created, bind the attachments to it
+        # and make them permanent (remove from temp)
+        if session_id:
+            for att in attachments:
+                if att.session_id is None:
+                    await self.attachment_service.bind_session(att, session_id)
             await self.attachment_service.make_permanent(user.id, attachment_ids)
             attachments = await self.attachment_service.resolve_many(user.id, attachment_ids)
-
         return attachments
 
     async def _prepare_current_parts(
@@ -370,12 +367,12 @@ class AgentService:
             parts.extend(await self.attachment_service.prepare_parts(attachment))
         return parts
 
-    # ── history / context ─────────────────────────────────────────────────────
+    # ── prompt construction ───────────────────────────────────────────────────
 
     async def _build_contents(
         self,
         user: UserDB,
-        session: object | None,
+        session: ChatSessionDB | None,
         config: AppConfigDB,
         current_parts: list[dict],
     ) -> list[ContentPart]:
@@ -388,7 +385,7 @@ class AgentService:
             )
 
         attachment_ids = [a_id for msg in history for a_id in (msg.attachment_ids or [])]
-        attachment_map: dict[str, object] = {}
+        attachment_map: dict[str, AttachmentMetadata] = {}
         if attachment_ids:
             try:
                 parsed = [uuid.UUID(str(i)) for i in attachment_ids]
@@ -468,7 +465,6 @@ class AgentService:
         attachments = await self._prepare_attachments(user, active_config, attachment_ids, session_id)
 
         from app.ai.router.schemas import RequestContext
-        from app.models.chats import MessageRole
 
         routing_context = RequestContext(
             conversation_message_count=len(session.messages) if session and session.messages else 0,
@@ -544,6 +540,7 @@ class AgentService:
                 detail={"code": error_code, "message": message},
             ) from last_exc
 
+        assert result is not None
         await self.chat_repo.add_message(session_id, role=MessageRole.AGENT, content=result.text)
 
         within_limit = await self._charge_usage(user, result.total_tokens, active_config)
@@ -942,11 +939,12 @@ async def handle_stream_abandonment(state: dict, agent_service: AgentService) ->
 
     # Dispatch to Cloud Tasks (or fallback to local background execution if Cloud Tasks is unavailable/fails)
     enqueued = False
-    try:
-        await agent_service.tasks_dispatcher.enqueue_generation_task(payload)
-        enqueued = True
-    except Exception as e:
-        logger.warning("Cloud Tasks enqueue failed (%s). Falling back to background worker task.", e)
+    if agent_service.tasks_dispatcher is not None:
+        try:
+            await agent_service.tasks_dispatcher.enqueue_generation_task(payload)
+            enqueued = True
+        except Exception as e:
+            logger.warning("Cloud Tasks enqueue failed (%s). Falling back to background worker task.", e)
 
     if not enqueued:
         try:

@@ -40,7 +40,9 @@ class GenerationRepository:
         mapping = {}
         now = datetime.now(timezone.utc)
         async for doc in docs:
-            data = doc.to_dict()
+            data = doc.to_dict() or {}
+            if not data:
+                continue
             session_id = data.get("session_id")
             # Auto-expire generations with no heartbeat/update > GENERATION_TIMEOUT_SECONDS ago
             check_time_val = data.get("updated_at") or data.get("created_at")
@@ -84,7 +86,10 @@ class GenerationRepository:
         )
         if not docs:
             return None
-        generation = GenerationDB(**docs[0].to_dict())
+        data = docs[0].to_dict() or {}
+        if not data:
+            return None
+        generation = GenerationDB(**data)
         now = datetime.now(timezone.utc)
         check_time = generation.updated_at or generation.created_at
         if check_time.tzinfo is None:
@@ -95,8 +100,35 @@ class GenerationRepository:
                 GenerationStatus.FAILED,
                 error=f"Generation timed out after {GENERATION_TIMEOUT_SECONDS} seconds",
             )
-            return None
-        return generation
+
+    async def cancel_active_generations_for_session(
+        self, session_id: UUID | str, reason: str = "Session deleted by user"
+    ) -> int:
+        """Finds and cancels all non-terminal generations for a session."""
+        docs = (
+            await self.collection.where(filter=FieldFilter("session_id", "==", str(session_id)))
+            .where(
+                filter=FieldFilter(
+                    "status",
+                    "in",
+                    [
+                        GenerationStatus.QUEUED.value,
+                        GenerationStatus.RUNNING_LIVE.value,
+                        GenerationStatus.RUNNING_WORKER.value,
+                    ],
+                )
+            )
+            .get()
+        )
+        count = 0
+        for doc in docs:
+            await self.update_status(
+                doc.id,
+                GenerationStatus.CANCELLED,
+                error=reason,
+            )
+            count += 1
+        return count
 
     async def create(self, generation: GenerationDB) -> GenerationDB:
         doc_ref = self.collection.document(str(generation.id))
@@ -109,7 +141,10 @@ class GenerationRepository:
         doc = await doc_ref.get()
         if not doc.exists:
             return None
-        generation = GenerationDB(**doc.to_dict())
+        data = doc.to_dict() or {}
+        if not data:
+            return None
+        generation = GenerationDB(**data)
 
         # Check timeout expiration for active/non-terminal generations
         if generation.status in {
@@ -165,7 +200,7 @@ class GenerationRepository:
             try:
                 doc = await doc_ref.get()
                 if doc.exists:
-                    gen_data = doc.to_dict()
+                    gen_data = doc.to_dict() or {}
                     session_id = gen_data.get("session_id")
                     user_id = gen_data.get("user_id")
                     user_message_id = gen_data.get("user_message_id") or gen_data.get("message_id")
@@ -264,4 +299,5 @@ class GenerationRepository:
             )
             return True
 
-        return await _transition_in_transaction(self.db.transaction())
+        res = await _transition_in_transaction(self.db.transaction())
+        return bool(res)

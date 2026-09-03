@@ -193,3 +193,6 @@ class BaseProvider(ABC):
         prompt: str,
     ) -> tuple[str, int]:
         """Transcribe audio bytes, returning ``(transcript, tokens_used)``."""
+
+    async def delete_file(self, file_uri: str) -> None:
+        """Delete an uploaded file from the provider (optional)."""

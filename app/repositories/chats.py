@@ -16,29 +16,29 @@ class ChatRepository:
         self.db = db
         self.collection = self.db.collection("sessions")
 
-    async def create_session(self, user_id: UUID, title: str | None = None) -> ChatSessionDB:
+    async def create_session(self, user_id: UUID | str, title: str | None = None) -> ChatSessionDB:
         session_db = ChatSessionDB(user_id=user_id, title=title)
         doc_ref = self.collection.document(str(session_db.id))
         data = session_db.model_dump(mode="json")
         await doc_ref.set(data)
         return session_db
 
-    async def update_session_title(self, session_id: UUID, title: str) -> None:
+    async def update_session_title(self, session_id: UUID | str, title: str) -> None:
         doc_ref = self.collection.document(str(session_id))
         await doc_ref.update({"title": title})
 
-    async def session_exists(self, session_id: UUID, user_id: UUID) -> bool:
+    async def session_exists(self, session_id: UUID | str, user_id: UUID | str) -> bool:
         doc_ref = self.collection.document(str(session_id))
         doc = await doc_ref.get()
         if not doc.exists:
             return False
-        data = doc.to_dict()
+        data = doc.to_dict() or {}
         if data.get("user_id") != str(user_id):
             return False
         return data.get("is_deleted") is False
 
     async def get_session(
-        self, session_id: UUID, user_id: UUID, limit: int = 10, offset: int = 0
+        self, session_id: UUID | str, user_id: UUID | str, limit: int = 10, offset: int = 0
     ) -> tuple[ChatSessionDB | None, bool]:
         doc_ref = self.collection.document(str(session_id))
         from google.cloud import firestore
@@ -53,7 +53,9 @@ class ChatRepository:
         async def _fetch_messages():
             msgs = []
             async for msg_doc in messages_query.stream():
-                msgs.append(ChatMessageDB(**msg_doc.to_dict()))
+                msg_data = msg_doc.to_dict() or {}
+                if msg_data:
+                    msgs.append(ChatMessageDB(**msg_data))
             return msgs
 
         # Concurrently fetch parent session document and messages subcollection
@@ -62,8 +64,8 @@ class ChatRepository:
         if not doc.exists:
             return None, False
 
-        data = doc.to_dict()
-        if data.get("user_id") != str(user_id) or data.get("is_deleted") is True:
+        data = doc.to_dict() or {}
+        if not data or data.get("user_id") != str(user_id) or data.get("is_deleted") is True:
             return None, False
 
         session = ChatSessionDB(**data)
@@ -77,15 +79,15 @@ class ChatRepository:
         return session, has_more
 
     async def get_user_sessions(
-        self, user_id: UUID, search_query: str | None = None, limit: int = 10, offset: int = 0
+        self, user_id: UUID | str, search_query: str | None = None, limit: int = 10, offset: int = 0
     ) -> tuple[list[ChatSessionDB], bool, int]:
         sessions = []
         docs = self.collection.where(filter=FieldFilter("user_id", "==", str(user_id))).stream()
         q_lower = search_query.strip().lower() if search_query and search_query.strip() else None
 
         async for doc in docs:
-            data = doc.to_dict()
-            if data.get("is_deleted") is True:
+            data = doc.to_dict() or {}
+            if not data or data.get("is_deleted") is True:
                 continue
 
             session = ChatSessionDB(**data)
@@ -99,7 +101,7 @@ class ChatRepository:
                     messages_ref = self.collection.document(str(session.id)).collection("messages")
                     deep_match = False
                     async for msg_doc in messages_ref.stream():
-                        msg_data = msg_doc.to_dict()
+                        msg_data = msg_doc.to_dict() or {}
                         msg_content = msg_data.get("content", "")
                         if msg_content and q_lower in msg_content.lower():
                             deep_match = True
@@ -115,15 +117,15 @@ class ChatRepository:
         has_more = offset + limit < total
         return paginated_sessions, has_more, total
 
-    async def soft_delete_session(self, session_id: UUID, user_id: UUID) -> bool:
+    async def soft_delete_session(self, session_id: UUID | str, user_id: UUID | str) -> bool:
         try:
             doc_ref = self.collection.document(str(session_id))
             doc = await doc_ref.get()
             if not doc.exists:
                 return False
 
-            data = doc.to_dict()
-            if data.get("user_id") != str(user_id):
+            data = doc.to_dict() or {}
+            if not data or data.get("user_id") != str(user_id):
                 return False
 
             await doc_ref.update(
@@ -139,7 +141,7 @@ class ChatRepository:
 
     async def add_message(
         self,
-        session_id: UUID,
+        session_id: UUID | str,
         role: MessageRole | str,
         content: str,
         error: str | None = None,
@@ -167,7 +169,7 @@ class ChatRepository:
         doc_ref = self.collection.document(str(session_id)).collection("messages").document(str(message_db.id))
         data = message_db.model_dump(mode="json")
 
-        role_val = role.value if hasattr(role, "value") else str(role)
+        role_val = role.value if isinstance(role, MessageRole) else str(role)
         read_status = ReadStatus.READ if role_val == MessageRole.USER.value else ReadStatus.NOT_READ
         session_ref = self.collection.document(str(session_id))
 
@@ -187,7 +189,7 @@ class ChatRepository:
 
         return message_db
 
-    async def mark_session_read(self, session_id: UUID) -> None:
+    async def mark_session_read(self, session_id: UUID | str) -> None:
         session_ref = self.collection.document(str(session_id))
         await session_ref.update({"read_status": ReadStatus.READ.value})
 
