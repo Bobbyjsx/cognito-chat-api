@@ -227,8 +227,8 @@ async def get_session(
 
     if session.read_status != ReadStatus.READ:
         session.read_status = ReadStatus.READ
-        asyncio.create_task(repo.mark_session_read(session_id))
-        asyncio.create_task(redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(current_user.id)))
+        await repo.mark_session_read(session_id)
+        await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(current_user.id))
 
     messages = session.messages or []
     session.messages = []
@@ -283,6 +283,7 @@ async def delete_session(
 
 
 @router.patch("/sessions/{session_id}/read", status_code=200)
+@router.post("/sessions/{session_id}/read", status_code=200)
 async def mark_session_read(
     session_id: uuid.UUID,
     current_user: UserDB = Depends(get_current_user),

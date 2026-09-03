@@ -346,7 +346,7 @@ class AgentService:
             )
         attachments = await self.attachment_service.resolve_many(user.id, attachment_ids)
         if len(attachments) != len(attachment_ids):
-            raise HTTPException(status_code=404, detail="One or more attachments not found or not owned by you.")
+            raise HTTPException(status_code=400, detail="One or more attachments not found or not owned by you.")
         # If this is a new session that was just created, bind the attachments to it
         # and make them permanent (remove from temp)
         if session_id:

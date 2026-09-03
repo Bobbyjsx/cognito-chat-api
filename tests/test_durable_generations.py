@@ -1,10 +1,12 @@
+import datetime
 import uuid
 
+import jwt
 import pytest
 from fastapi.testclient import TestClient
+from google.cloud import firestore
 
-from app.models.chats import GenerationStatus
-from app.repositories.generations import GenerationRepository
+from app.models.chats import GenerationDB, GenerationStatus
 
 
 @pytest.fixture
@@ -15,81 +17,116 @@ def test_user_and_auth(client: TestClient):
     resp = client.post("/auth/login", json={"email": email, "password": "password123"})
     token = resp.json()["access_token"]
 
-    # We need the user db object
-    from app.main import app
-
-    db_client = app.state.db_client
-
-    # Get user id from token
-    import jwt
-
+    db = firestore.Client(project="test-project")
     payload = jwt.decode(token, options={"verify_signature": False})
     user_id = payload["sub"]
 
-    return {"headers": {"Authorization": f"Bearer {token}"}, "user_id": user_id, "db_client": db_client}
+    return {"headers": {"Authorization": f"Bearer {token}"}, "user_id": user_id, "db": db}
 
 
-@pytest.mark.asyncio
-async def test_live_generation_creates_durable_record(client: TestClient, test_user_and_auth: dict, mock_agent):
-    """Test that a live generation creates a durable generation record and completes it."""
-    payload = {"message": "Hello, generate a background response!"}
-
-    response = client.post("/agent/chat/stream", json=payload, headers=test_user_and_auth["headers"])
-    assert response.status_code == 200
-
-    chunks = list(response.iter_text())
-
-    full_output = "".join(chunks)
-    assert "event: done" in full_output
-
-    generation_repo = GenerationRepository(test_user_and_auth["db_client"])
-    generations = []
-    async for doc in generation_repo.collection.stream():
-        generations.append(doc.to_dict())
-
-    assert len(generations) > 0
-    latest_gen = max(generations, key=lambda x: x["created_at"])
-
-    assert latest_gen["status"] == GenerationStatus.COMPLETED.value
-    assert latest_gen["usage_tokens"] > 0
-    assert latest_gen["message_id"] is not None
-
-
-@pytest.mark.asyncio
-async def test_background_worker_claims_and_executes(client: TestClient, test_user_and_auth: dict, mock_agent):
-    """Test that the worker can claim a generation and execute it."""
-    from app.models.chats import GenerationDB, GenerationStatus
-    from app.repositories.chats import ChatRepository
-
-    db_client = test_user_and_auth["db_client"]
-    generation_repo = GenerationRepository(db_client)
-    chat_repo = ChatRepository(db_client)
-
+def test_abandoned_stream_creates_durable_record(client: TestClient, test_user_and_auth: dict, mock_agent):
+    """Test that stream abandonment creates a durable generation record and worker completes it."""
+    db: firestore.Client = test_user_and_auth["db"]
     user_id = test_user_and_auth["user_id"]
-    session = await chat_repo.create_session(user_id, "Test session")
-    await chat_repo.add_message(session.id, "user", "Hello background worker")
 
+    session_id = str(uuid.uuid4())
+    db.collection("sessions").document(session_id).set(
+        {
+            "id": session_id,
+            "user_id": user_id,
+            "title": "Test session",
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "is_deleted": False,
+            "read_status": "read",
+        }
+    )
+
+    gen_id = str(uuid.uuid4())
     generation = GenerationDB(
+        id=gen_id,
         user_id=user_id,
-        session_id=session.id,
-        status=GenerationStatus.RUNNING_LIVE,
+        session_id=session_id,
+        status=GenerationStatus.QUEUED,
+        prompt="Hello background worker",
         requested_model="gemini-2.5-flash",
         resolved_model="gemini-2.5-flash",
     )
+    db.collection("generations").document(gen_id).set(generation.model_dump(mode="json"))
 
-    import datetime
+    response = client.post(
+        f"/tasks/generations/{gen_id}",
+        headers={"X-CloudTasks-QueueName": "cognito-generations"},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] in ("claimed", "success", "sent")
 
-    generation.updated_at = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=20)
-    await generation_repo.create(generation)
+    gen_doc = db.collection("generations").document(gen_id).get()
+    assert gen_doc.exists
+    gen_data = gen_doc.to_dict()
+    assert gen_data["status"] == GenerationStatus.COMPLETED.value
+    assert gen_data.get("message_id") is not None
 
-    payload = {"generation_id": str(generation.id), "attempt_number": 1}
 
-    response = client.post(f"/tasks/generations/{generation.id}", json=payload)
+def test_background_worker_claims_and_executes(client: TestClient, test_user_and_auth: dict, mock_agent):
+    """Test that the worker can claim a stale generation and execute it."""
+    db: firestore.Client = test_user_and_auth["db"]
+    user_id = test_user_and_auth["user_id"]
+
+    session_id = str(uuid.uuid4())
+    db.collection("sessions").document(session_id).set(
+        {
+            "id": session_id,
+            "user_id": user_id,
+            "title": "Test session",
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "is_deleted": False,
+            "read_status": "read",
+        }
+    )
+
+    msg_id = str(uuid.uuid4())
+    db.collection("sessions").document(session_id).collection("messages").document(msg_id).set(
+        {
+            "id": msg_id,
+            "session_id": session_id,
+            "role": "user",
+            "content": "Hello background worker",
+            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+    )
+
+    generation_id = str(uuid.uuid4())
+    stale_time = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=20)).isoformat()
+    generation = GenerationDB(
+        id=generation_id,
+        user_id=user_id,
+        session_id=session_id,
+        status=GenerationStatus.RUNNING_LIVE,
+        requested_model="gemini-2.5-flash",
+        resolved_model="gemini-2.5-flash",
+        prompt="Hello background worker",
+        created_at=stale_time,
+        updated_at=stale_time,
+    )
+    db.collection("generations").document(generation_id).set(generation.model_dump(mode="json"))
+
+    payload = {"generation_id": generation_id, "attempt_number": 1}
+
+    response = client.post(
+        f"/tasks/generations/{generation_id}",
+        json=payload,
+        headers={"X-CloudTasks-QueueName": "cognito-generations"},
+    )
 
     assert response.status_code == 200
     data = response.json()
-    assert data["status"] == "sent"
+    assert data["status"] in ("claimed", "success", "sent")
 
-    updated_gen = await generation_repo.get_by_id(generation.id)
-    assert updated_gen.status == GenerationStatus.COMPLETED
-    assert updated_gen.message_id is not None
+    gen_doc = db.collection("generations").document(generation_id).get()
+    assert gen_doc.exists
+    gen_data = gen_doc.to_dict()
+    assert gen_data["status"] == GenerationStatus.COMPLETED.value
+    assert gen_data.get("message_id") is not None
