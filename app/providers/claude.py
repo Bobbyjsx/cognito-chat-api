@@ -20,6 +20,7 @@ from anthropic import (
     APIError,
     APITimeoutError,
     AsyncAnthropic,
+    AsyncAnthropicVertex,
     AuthenticationError,
     BadRequestError,
     InternalServerError,
@@ -59,30 +60,156 @@ _ANTHROPIC_ERROR_HANDLED = (APIError, APIConnectionError, APITimeoutError)
 
 
 class ClaudeProvider(BaseProvider):
-    """Concrete provider for Anthropic Claude models."""
+    """Concrete provider for Anthropic Claude models.
+
+    Supports dual-execution backends:
+    1. Google Cloud Vertex AI infrastructure (AsyncAnthropicVertex)
+    2. Direct Anthropic API (AsyncAnthropic)
+    """
 
     name = "anthropic"
+
+    # Friendly model IDs mapped to Vertex AI Model Garden endpoints
+    VERTEX_MODEL_MAP: dict[str, str] = {
+        "claude-3-7-sonnet": "claude-3-7-sonnet@20250219",
+        "claude-3.7-sonnet": "claude-3-7-sonnet@20250219",
+        "claude-3-7-sonnet-20250219": "claude-3-7-sonnet@20250219",
+        "claude-3-5-sonnet": "claude-3-5-sonnet-v2@20241022",
+        "claude-3.5-sonnet": "claude-3-5-sonnet-v2@20241022",
+        "claude-3-5-sonnet-20241022": "claude-3-5-sonnet-v2@20241022",
+        "claude-3-5-sonnet-latest": "claude-3-5-sonnet-v2@20241022",
+        "claude-3-5-haiku": "claude-3-5-haiku@20241022",
+        "claude-3.5-haiku": "claude-3-5-haiku@20241022",
+        "claude-3-5-haiku-20241022": "claude-3-5-haiku@20241022",
+        "claude-3-5-haiku-latest": "claude-3-5-haiku@20241022",
+        "claude-3-opus": "claude-3-opus@20240229",
+        "claude-3-opus-20240229": "claude-3-opus@20240229",
+        "claude-3-haiku": "claude-3-haiku@20240307",
+        "claude-3-haiku-20240307": "claude-3-haiku@20240307",
+    }
+
+    # Friendly model IDs mapped to direct Anthropic API models
+    DIRECT_MODEL_MAP: dict[str, str] = {
+        "claude-3-7-sonnet": "claude-3-7-sonnet-20250219",
+        "claude-3.7-sonnet": "claude-3-7-sonnet-20250219",
+        "claude-3-5-sonnet": "claude-3-5-sonnet-20241022",
+        "claude-3.5-sonnet": "claude-3-5-sonnet-20241022",
+        "claude-3-5-haiku": "claude-3-5-haiku-20241022",
+        "claude-3.5-haiku": "claude-3-5-haiku-20241022",
+        "claude-3-opus": "claude-3-opus-20240229",
+        "claude-3-haiku": "claude-3-haiku-20240307",
+    }
 
     def __init__(
         self,
         api_key: str | None = None,
-        client: AsyncAnthropic | None = None,
+        client: AsyncAnthropic | AsyncAnthropicVertex | None = None,
+        backend: str = "auto",
+        project_id: str | None = None,
+        region: str | None = None,
+        credentials_path: str | None = None,
+        credentials: Any | None = None,
         default_max_tokens: int = 8192,
     ):
         self._api_key = api_key
         self._client = client
-        self._lazy_client: AsyncAnthropic | None = None
+        self._lazy_client: AsyncAnthropic | AsyncAnthropicVertex | None = None
+        self.backend = (backend or "auto").lower()
+        self.project_id = project_id
+        self.region = region or "us-east5"
+        self.credentials_path = credentials_path
+        self.credentials = credentials
         self.default_max_tokens = default_max_tokens
+
+    @property
+    def is_vertex(self) -> bool:
+        """Whether the provider routes requests via Google Cloud Vertex AI."""
+        if self.backend == "vertex":
+            return True
+        if self.backend == "anthropic":
+            return False
+        if isinstance(self._client, AsyncAnthropicVertex):
+            return True
+        if self._client is not None:
+            return False
+        # In auto mode, prefer Vertex if project or credentials are provided, or if no Anthropic API key
+        return bool(self.project_id or self.credentials_path or self.credentials or not self._api_key)
 
     # ── client lifecycle ─────────────────────────────────────────────────────
 
     @property
-    def client(self) -> AsyncAnthropic:
+    def client(self) -> AsyncAnthropic | AsyncAnthropicVertex:
         if self._client is not None:
             return self._client
         if self._lazy_client is None:
-            self._lazy_client = AsyncAnthropic(api_key=self._api_key) if self._api_key else AsyncAnthropic()
+            self._lazy_client = self._init_client()
         return self._lazy_client
+
+    def _init_client(self) -> AsyncAnthropic | AsyncAnthropicVertex:
+        if self.is_vertex:
+            return self._init_vertex_client()
+        return AsyncAnthropic(api_key=self._api_key) if self._api_key else AsyncAnthropic()
+
+    def _init_vertex_client(self) -> AsyncAnthropicVertex:
+        import os
+
+        creds = self.credentials
+        project = self.project_id
+
+        # 1. If credentials_path is given, load service account credentials
+        if creds is None and self.credentials_path and os.path.exists(self.credentials_path):
+            try:
+                from google.oauth2 import service_account
+
+                creds = service_account.Credentials.from_service_account_file(
+                    self.credentials_path,
+                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
+                )
+                if not project:
+                    import json
+
+                    with open(self.credentials_path, "r") as f:
+                        project = json.load(f).get("project_id")
+            except Exception as exc:
+                logger.warning("Could not load Vertex credentials from %s: %s", self.credentials_path, exc)
+
+        # 2. If project still not known, try environment variables and Google ADC
+        if not project:
+            project = os.getenv("ANTHROPIC_VERTEX_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT")
+            if not project:
+                try:
+                    import google.auth
+
+                    _, project = google.auth.default()
+                except Exception as exc:
+                    logger.debug("Google ADC project discovery encountered: %s", exc)
+
+        kwargs: dict[str, Any] = {
+            "region": self.region or os.getenv("ANTHROPIC_VERTEX_REGION", "us-east5"),
+        }
+        if project:
+            kwargs["project_id"] = project
+        if creds:
+            kwargs["credentials"] = creds
+
+        logger.info(
+            "Initialized ClaudeProvider with Google Cloud Vertex AI backend (project=%s, region=%s)",
+            project or "ADC",
+            kwargs["region"],
+        )
+        return AsyncAnthropicVertex(**kwargs)
+
+    def resolve_model_id(self, model: str) -> str:
+        """Resolve friendly model identifier into provider/backend-native model ID."""
+        cleaned = model.strip()
+        if self.is_vertex:
+            if "@" in cleaned:
+                return cleaned
+            return self.VERTEX_MODEL_MAP.get(cleaned.lower(), cleaned)
+        else:
+            if "@" in cleaned:
+                return cleaned.replace("@", "-")
+            return self.DIRECT_MODEL_MAP.get(cleaned.lower(), cleaned)
 
     # ── conversion helpers ───────────────────────────────────────────────────
 
@@ -210,8 +337,10 @@ class ClaudeProvider(BaseProvider):
             system_instruction=config.system_instruction,
         )
 
+        native_model = self.resolve_model_id(model)
+
         params: dict[str, Any] = {
-            "model": model,
+            "model": native_model,
             "messages": messages,
             "max_tokens": self.default_max_tokens,
         }
@@ -243,16 +372,23 @@ class ClaudeProvider(BaseProvider):
     # ── error handling ───────────────────────────────────────────────────────
 
     def normalize_error(self, exc: Exception) -> Exception:
-        """Map Anthropic SDK exceptions into Cognito normalized ProviderError subclasses."""
+        """Map Anthropic / Vertex SDK exceptions into Cognito normalized ProviderError subclasses."""
         if isinstance(exc, ProviderError):
             return exc
 
         msg = str(exc) or "Claude model generation failed."
         if isinstance(exc, NotFoundError):
-            return ProviderModelNotFoundError(msg or "Model not found on Anthropic.")
+            backend_label = "Google Cloud Vertex AI" if self.is_vertex else "Anthropic"
+            return ProviderModelNotFoundError(msg or f"Model not found on {backend_label}.")
         if isinstance(exc, RateLimitError):
-            return ProviderRateLimitError(msg or "Anthropic rate limit exceeded.", status_code=429)
+            return ProviderRateLimitError(msg or "Rate limit exceeded.", status_code=429)
         if isinstance(exc, (AuthenticationError, PermissionDeniedError)):
+            msg_lower = msg.lower()
+            if self.is_vertex or "vertex" in msg_lower or "cloud" in msg_lower or "serviceusage" in msg_lower:
+                return ProviderAuthError(
+                    f"Google Cloud Vertex AI permission denied: {msg}. Please ensure the Vertex AI API (aiplatform.googleapis.com) is enabled and the service account or caller has the 'Vertex AI User' (roles/aiplatform.user) role.",
+                    status_code=403 if isinstance(exc, PermissionDeniedError) else 401,
+                )
             return ProviderAuthError(msg or "Anthropic authentication failed.", status_code=401)
         if isinstance(exc, BadRequestError):
             # Check for context window overflow
@@ -260,11 +396,11 @@ class ClaudeProvider(BaseProvider):
                 return ProviderInvalidRequestError(msg, status_code=400)
             return ProviderInvalidRequestError(msg, status_code=400)
         if isinstance(exc, InternalServerError):
-            return ProviderOverloadedError(msg or "Anthropic servers overloaded.", status_code=503)
+            return ProviderOverloadedError(msg or "Provider servers overloaded.", status_code=503)
         if isinstance(exc, APITimeoutError):
-            return ProviderTimeoutError(msg or "Anthropic request timed out.", status_code=504)
+            return ProviderTimeoutError(msg or "Request timed out.", status_code=504)
         if isinstance(exc, APIConnectionError):
-            return ProviderConnectionError(msg or "Failed to connect to Anthropic API.", status_code=502)
+            return ProviderConnectionError(msg or "Failed to connect to provider endpoint.", status_code=502)
         if isinstance(exc, APIError):
             status = getattr(exc, "status_code", 500) or 500
             return ProviderGenerationError(msg, status_code=int(status))
@@ -279,7 +415,13 @@ class ClaudeProvider(BaseProvider):
         return capability not in ("audio", "audio_transcription", "google_search", "code_execution")
 
     def supports_model(self, model: str) -> bool:
-        return model.lower().startswith("claude") or "anthropic" in model.lower()
+        lower = model.lower()
+        return (
+            lower.startswith("claude")
+            or "anthropic" in lower
+            or lower in self.VERTEX_MODEL_MAP
+            or lower in self.DIRECT_MODEL_MAP
+        )
 
     # ── tool construction ────────────────────────────────────────────────────
 

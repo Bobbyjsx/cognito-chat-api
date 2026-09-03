@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     openai_api_key: str = ""
 
+    # Claude / Anthropic Backend ("vertex" for Google Cloud Vertex AI, "anthropic" for direct API, "auto")
+    claude_backend: str = "vertex"
+    anthropic_vertex_project_id: str = ""
+    anthropic_vertex_region: str = "us-east5"
+    anthropic_vertex_credentials_path: str = ""
+
     # Database Configuration (Firebase)
     firebase_credentials_path: str = ""
     firestore_database: str = ""

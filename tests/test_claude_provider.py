@@ -381,3 +381,76 @@ def test_claude_error_normalization():
 
     err_time = APITimeoutError(request=req)
     assert isinstance(provider.normalize_error(err_time), ProviderTimeoutError)
+
+
+# ── Google Cloud Vertex AI Backend Tests ─────────────────────────────────────
+
+
+def test_claude_vertex_mode_detection():
+    # Explicit vertex backend
+    p1 = ClaudeProvider(backend="vertex", project_id="gcp-project-123")
+    assert p1.is_vertex is True
+
+    # Explicit direct anthropic backend
+    p2 = ClaudeProvider(api_key="sk-ant-test", backend="anthropic")
+    assert p2.is_vertex is False
+
+    # Auto mode with project_id
+    p3 = ClaudeProvider(project_id="gcp-project-123")
+    assert p3.is_vertex is True
+
+    # Auto mode with only api_key
+    p4 = ClaudeProvider(api_key="sk-ant-test")
+    assert p4.is_vertex is False
+
+
+def test_claude_vertex_model_resolution():
+    vertex_provider = ClaudeProvider(backend="vertex", project_id="gcp-proj")
+    assert vertex_provider.resolve_model_id("claude-3-7-sonnet") == "claude-3-7-sonnet@20250219"
+    assert vertex_provider.resolve_model_id("claude-3-5-sonnet") == "claude-3-5-sonnet-v2@20241022"
+    assert vertex_provider.resolve_model_id("claude-3-5-haiku") == "claude-3-5-haiku@20241022"
+    assert vertex_provider.resolve_model_id("claude-3-7-sonnet@20250219") == "claude-3-7-sonnet@20250219"
+
+    direct_provider = ClaudeProvider(backend="anthropic", api_key="sk-test")
+    assert direct_provider.resolve_model_id("claude-3-7-sonnet") == "claude-3-7-sonnet-20250219"
+    assert direct_provider.resolve_model_id("claude-3-5-sonnet") == "claude-3-5-sonnet-20241022"
+    assert direct_provider.resolve_model_id("claude-3-5-haiku") == "claude-3-5-haiku-20241022"
+
+
+@pytest.mark.asyncio
+async def test_claude_vertex_generate_translates_model():
+    client = _build_mock_client()
+    mock_text = MagicMock(type="text", text="Response from Vertex Claude")
+    mock_resp = MagicMock(content=[mock_text], usage=MagicMock(input_tokens=10, output_tokens=20))
+    client.messages.create.return_value = mock_resp
+
+    provider = ClaudeProvider(backend="vertex", project_id="gcp-proj", client=client)
+    result = await provider.generate(
+        model="claude-3-7-sonnet",
+        contents=[ContentPart(role="user", parts=[{"text": "Explain quantum computing"}])],
+    )
+
+    assert result.text == "Response from Vertex Claude"
+    assert result.total_tokens == 30
+    client.messages.create.assert_awaited_once()
+    called_kwargs = client.messages.create.call_args.kwargs
+    assert called_kwargs["model"] == "claude-3-7-sonnet@20250219"
+
+
+def test_claude_vertex_permission_denied_guidance():
+    from anthropic import PermissionDeniedError
+
+    provider = ClaudeProvider(backend="vertex", project_id="gcp-proj")
+    resp = _build_dummy_response(403)
+    exc = PermissionDeniedError("Cloud IAM permission denied: aiplatform.endpoints.predict", response=resp, body=None)
+
+    norm = provider.normalize_error(exc)
+    assert isinstance(norm, ProviderAuthError)
+    assert "Vertex AI API (aiplatform.googleapis.com)" in str(norm)
+
+
+def test_claude_vertex_lazy_client_instantiation():
+    from anthropic import AsyncAnthropicVertex
+
+    provider = ClaudeProvider(backend="vertex", project_id="gcp-test-project", region="us-east5")
+    assert isinstance(provider.client, AsyncAnthropicVertex)

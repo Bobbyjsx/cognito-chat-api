@@ -124,10 +124,31 @@ def create_default_provider_registry(settings: Settings | None = None) -> Provid
     registry.register("google", gemini_provider)
     registry.register(ModelProvider.GOOGLE, gemini_provider)
 
-    # Register Claude provider
-    claude_provider = ClaudeProvider(api_key=settings.anthropic_api_key)
+    # Register Claude provider (Google Cloud Vertex AI or direct Anthropic based on settings)
+    import os
+
+    vertex_project_id = (
+        getattr(settings, "anthropic_vertex_project_id", "")
+        or getattr(settings, "cloud_tasks_project", "")
+        or os.getenv("ANTHROPIC_VERTEX_PROJECT_ID", "")
+        or os.getenv("GOOGLE_CLOUD_PROJECT", "")
+    )
+    vertex_region = getattr(settings, "anthropic_vertex_region", "us-east5")
+    vertex_creds = getattr(settings, "anthropic_vertex_credentials_path", "") or getattr(
+        settings, "firebase_credentials_path", ""
+    )
+
+    claude_provider = ClaudeProvider(
+        api_key=settings.anthropic_api_key,
+        backend=getattr(settings, "claude_backend", "vertex"),
+        project_id=vertex_project_id,
+        region=vertex_region,
+        credentials_path=vertex_creds,
+    )
     registry.register("anthropic", claude_provider)
     registry.register("claude", claude_provider)
+    registry.register("vertex_claude", claude_provider)
+    registry.register("google_claude", claude_provider)
     registry.register(ModelProvider.ANTHROPIC, claude_provider)
 
     return registry

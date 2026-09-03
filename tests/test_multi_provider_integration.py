@@ -322,3 +322,24 @@ async def test_router_selects_claude_for_high_complexity_coding():
         "gemini-3.6-flash",
     )
     assert decision.provider in (ModelProvider.ANTHROPIC, ModelProvider.GOOGLE)
+
+
+def test_create_default_provider_registry_vertex_claude():
+    from app.core.config import Settings
+    from app.providers.registry import create_default_provider_registry
+
+    settings = Settings(
+        claude_backend="vertex",
+        anthropic_vertex_project_id="test-vertex-project",
+        anthropic_vertex_region="us-east5",
+    )
+
+    registry = create_default_provider_registry(settings)
+    assert "anthropic" in registry._providers
+    assert "vertex_claude" in registry._providers
+
+    claude_provider = registry.get("anthropic")
+    assert isinstance(claude_provider, ClaudeProvider)
+    assert claude_provider.is_vertex is True
+    assert claude_provider.project_id == "test-vertex-project"
+    assert claude_provider.region == "us-east5"
