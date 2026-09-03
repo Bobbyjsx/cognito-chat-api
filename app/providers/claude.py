@@ -464,7 +464,11 @@ class ClaudeProvider(BaseProvider):
     ) -> GenerationResult:
         params = self._to_sdk_params(model=model, contents=contents, config=config)
         try:
-            response = await self.client.messages.create(**params)
+            if params.get("thinking") or params.get("max_tokens", 0) > 21333:
+                async with self.client.messages.stream(**params) as stream:
+                    response = await stream.get_final_message()
+            else:
+                response = await self.client.messages.create(**params)
         except _ANTHROPIC_ERROR_HANDLED as exc:
             raise self.normalize_error(exc) from exc
         except Exception as exc:

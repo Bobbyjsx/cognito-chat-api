@@ -160,12 +160,13 @@ class AgentService:
         effective_routing_mode = routing_mode
         effective_reasoning = requested_reasoning
 
-        # When smart routing is used, normalize any policy/effort passed
+        # When model is 'auto' (not explicit), use reasoning as the routing policy.
+        # When model is explicit, reasoning acts as the model reasoning effort.
+        # This unifies both into `reasoning`, making `routing_mode` redundant.
         if not is_explicit and requested_reasoning:
             norm_policy = normalize_reasoning_level(requested_reasoning)
             if norm_policy:
                 effective_routing_mode = effective_routing_mode or norm_policy.value
-                effective_reasoning = None
 
         if is_explicit:
             model = requested_model
