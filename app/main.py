@@ -90,15 +90,22 @@ async def _init_ai_stack(app: FastAPI):
     app.state.provider = GeminiProvider(api_key=settings.gemini_api_key)
     logger.info("Initialized GeminiProvider with provided API key.")
 
-    # Initialize CloudTasksDispatcher
-    app.state.tasks_dispatcher = CloudTasksDispatcher(
-        project=settings.cloud_tasks_project,
-        location=settings.cloud_tasks_location,
-        queue=settings.cloud_tasks_queue,
-        worker_url=settings.cloud_tasks_worker_url,
-        service_account_email=settings.cloud_tasks_service_account_email,
-    )
-    logger.info("Initialized CloudTasksDispatcher.")
+    # Initialize CloudTasksDispatcher only if worker_provider is 'cloudtasks'
+    if settings.worker_provider.lower() == "cloudtasks":
+        app.state.tasks_dispatcher = CloudTasksDispatcher(
+            project=settings.cloud_tasks_project,
+            location=settings.cloud_tasks_location,
+            queue=settings.cloud_tasks_queue,
+            worker_url=settings.cloud_tasks_worker_url,
+            service_account_email=settings.cloud_tasks_service_account_email,
+        )
+        logger.info("Initialized CloudTasksDispatcher for background generations.")
+    else:
+        app.state.tasks_dispatcher = None
+        logger.info(
+            "Using local in-process worker for background generations (WORKER_PROVIDER=%s).",
+            settings.worker_provider,
+        )
 
     registry = ToolRegistry()
     registry.register_defaults()
