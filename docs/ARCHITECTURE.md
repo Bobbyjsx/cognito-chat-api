@@ -1,6 +1,6 @@
 # Cognito Chat API — Architecture
 
-This document describes the architecture of the Cognito Chat API, including the Gemini tools & attachments pipeline, and the transparent server-side authentication & token lifecycle architecture.
+This document describes the architecture of the Cognito Chat API, including the Gemini tools & attachments pipeline, transparent server-side authentication, and [Durable Background Generations](./DURABLE_BACKGROUND_GENERATIONS.md).
 
 ## System overview
 
@@ -9,6 +9,8 @@ Client (Web/Mobile) ──▶ Direct HTTP API (FastAPI)
                           ├── /auth/signup, /auth/login, /auth/refresh, /auth/me
                           ├── /agent/chat       chat (SSE) + non-streaming chat
                           ├── /agent/sessions   session persistence & management
+                          ├── /agent/generations active background generation polling
+                          ├── /tasks/generations Cloud Tasks asynchronous worker
                           ├── /agent/attachments attachment upload / lookup / delete / library
                           └── /config           app config, /agent/stt transcription
 

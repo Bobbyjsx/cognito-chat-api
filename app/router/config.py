@@ -8,7 +8,11 @@ from app.repositories.config import ConfigRepository
 router = APIRouter(prefix="/config", tags=["config"])
 
 
-@router.get("", response_model=AppConfigDB)
+@router.get(
+    "",
+    response_model=AppConfigDB,
+    response_model_exclude={"default_token_limit_6h", "default_token_limit_weekly"},
+)
 async def get_system_config(db: AsyncClient = Depends(get_db)):
     from app.core.cache_keys import CacheKeys
     from app.core.redis import redis_cache

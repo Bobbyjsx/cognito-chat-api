@@ -508,5 +508,5 @@ class AppConfigDB(BaseModel):
         allowed_reasoning_levels. Global list is always the authority."""
         model_cfg = self.models_list.get(model_name)
         if not model_cfg:
-            return self.allowed_reasoning_levels
-        return [m for m in model_cfg.reasoning_modes if m in self.allowed_reasoning_levels]
+            return [m.value for m in self.allowed_reasoning_levels]
+        return [m.value for m in model_cfg.reasoning_modes if m in self.allowed_reasoning_levels]

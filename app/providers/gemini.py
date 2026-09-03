@@ -208,12 +208,6 @@ class GeminiProvider(BaseProvider):
     def supports_model(self, model: str) -> bool:
         return model.startswith("gemini") or "imagen" in model or "veo" in model
 
-    async def delete_file(self, file_uri: str) -> None:
-        try:
-            await self.client.aio.files.delete(name=file_uri)
-        except Exception as exc:
-            logger.warning("Failed to delete Gemini file %s: %s", file_uri, exc)
-
     # ── tool construction ────────────────────────────────────────────────────
 
     def build_tools(self, tool_configs: list[dict[str, Any]]) -> list[Any]:
@@ -492,7 +486,7 @@ class GeminiProvider(BaseProvider):
             tmp.write(data)
             tmp.flush()
             uploaded = await self.client.aio.files.upload(
-                path=tmp.name,
+                file=tmp.name,
                 config=types.UploadFileConfig(mime_type=mime_type),
             )
 
@@ -537,3 +531,13 @@ class GeminiProvider(BaseProvider):
         if getattr(response, "usage_metadata", None):
             tokens_used = getattr(response.usage_metadata, "total_token_count", 0) or 0
         return transcript, tokens_used
+
+    async def delete_file(self, file_uri: str) -> None:
+        """Delete an uploaded file from Gemini File API."""
+        try:
+            name = file_uri.split("/")[-1]
+            if not name.startswith("files/"):
+                name = f"files/{name}"
+            await self.client.aio.files.delete(name=name)
+        except Exception as exc:
+            logger.warning("Failed to delete gemini file %s: %s", file_uri, exc)

@@ -107,12 +107,18 @@ class SmartModelRouter:
             analysis = await fallback.analyze(message, context)
         analysis_latency_ms = (time.perf_counter() - analysis_start) * 1000.0
 
+        # Check blacklist
+        from app.ai.router.blacklist import get_blacklisted_models
+
+        blacklisted = await get_blacklisted_models(list(models.keys()))
+
         # 4. Filter candidate models
         eligible_models, filtered_reasons = self.filter.filter_candidates(
             models=models,
             analysis=analysis,
             policy=resolved_policy,
             context=context,
+            blacklisted_models=blacklisted,
         )
         logger.info(
             "[SmartRouter][Filter] %d/%d candidate models eligible. Excluded: %s",
@@ -253,6 +259,7 @@ class SmartModelRouter:
 
         is_explicit = requested_model and requested_model not in ("auto", "smart", "default")
         if is_explicit:
+            assert requested_model is not None
             logger.info(
                 "[SmartRouter] Explicit model '%s' requested by user. Bypassing smart routing.", requested_model
             )

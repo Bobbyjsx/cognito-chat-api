@@ -31,13 +31,17 @@ class RedisCache:
             await self.redis_client.aclose()
             logger.info("Disconnected from Redis cache.")
 
-    async def get(self, key: str) -> Any | None:
+    async def get(self, key: str, model_cls: Any | None = None) -> Any | None:
         if not self.redis_client:
             return None
         try:
             val = await self.redis_client.get(key)
-            if val:
-                return json.loads(val)
+            if not val:
+                return None
+            data = json.loads(val)
+            if model_cls is not None:
+                return model_cls.model_validate(data)
+            return data
         except Exception as e:
             logger.error(f"Redis get error for key {key}: {e}")
         return None
@@ -66,11 +70,13 @@ class RedisCache:
         if not self.redis_client:
             return
         try:
-            cursor = "0"
-            while cursor != 0:
+            cursor = 0
+            while True:
                 cursor, keys = await self.redis_client.scan(cursor=cursor, match=f"{prefix}*", count=100)
                 if keys:
                     await self.redis_client.delete(*keys)
+                if cursor == 0:
+                    break
         except Exception as e:
             logger.error(f"Redis delete_by_prefix error for prefix {prefix}: {e}")
 

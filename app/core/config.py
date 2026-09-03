@@ -41,6 +41,21 @@ class Settings(BaseSettings):
     # Cache (Redis)
     redis_url: str = ""
 
+    # Background Generation Worker Provider ("cloudtasks" or "local")
+    worker_provider: str = "local"
+
+    # Cloud Tasks
+    cloud_tasks_project: str = ""
+    cloud_tasks_location: str = "us-central1"
+    cloud_tasks_queue: str = "cognito-generations"
+    cloud_tasks_worker_url: str = ""
+    cloud_tasks_service_account_email: str = ""
+
+    # Generation Timeout (seconds)
+    generation_timeout_seconds: int = 300
+
+    environment: str = ""
+
     class Config:
         env_file = ".env"
         extra = "ignore"

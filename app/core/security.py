@@ -1,6 +1,6 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 
-import anyio
 import bcrypt
 import jwt
 
@@ -17,7 +17,7 @@ async def verify_password(plain_password: str, hashed_password: str) -> bool:
         except ValueError:
             return False
 
-    return await anyio.to_thread.run_sync(check)
+    return await asyncio.to_thread(check)
 
 
 async def get_password_hash(password: str) -> str:
@@ -28,7 +28,7 @@ async def get_password_hash(password: str) -> str:
         hashed_bytes = bcrypt.hashpw(password_bytes, salt)
         return hashed_bytes.decode("utf-8")
 
-    return await anyio.to_thread.run_sync(hash_pw)
+    return await asyncio.to_thread(hash_pw)
 
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:

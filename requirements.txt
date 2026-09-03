@@ -17,3 +17,4 @@ httpx
 redis
 anthropic
 pre-commit
+google-cloud-tasks

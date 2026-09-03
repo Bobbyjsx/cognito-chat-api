@@ -104,7 +104,7 @@ class ServerTokenRefreshManager:
                     refresh_url,
                 )
                 try:
-                    async with httpx.AsyncClient(timeout=5.0) as client:
+                    async with httpx.AsyncClient(timeout=20.0) as client:
                         resp = await client.post(
                             refresh_url,
                             json={"refresh_token": refresh_token, "refreshToken": refresh_token},

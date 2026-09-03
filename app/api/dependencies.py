@@ -1,14 +1,16 @@
 import logging
 
 import jwt
-from fastapi import Depends, HTTPException, Request, Response, status
+from fastapi import Depends, Header, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordBearer
 from google.cloud.firestore_v1.async_client import AsyncClient
-from jwt import PyJWKClient, PyJWTError
+from jwt import PyJWTError
 
 from app.core.config import settings
+from app.core.jwks import IDENTITY_ALGORITHMS, decode_identity_jwt
 from app.core.token_manager import server_token_manager
 from app.database import get_db
+from app.integrations.cloud_tasks import CloudTasksDispatcher
 from app.models.users import UserDB
 from app.providers.base import BaseProvider
 from app.repositories.users import UserRepository
@@ -18,21 +20,6 @@ from app.tools.registry import ToolRegistry
 logger = logging.getLogger(__name__)
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
-
-_jwks_client: PyJWKClient | None = None
-
-
-def get_jwks_client() -> PyJWKClient | None:
-    global _jwks_client
-    if _jwks_client is None and settings.identity_service_url:
-        jwks_url = settings.identity_jwks_url or f"{settings.identity_service_url.rstrip('/')}/.well-known/jwks.json"
-        _jwks_client = PyJWKClient(
-            jwks_url,
-            cache_jwk_set=True,
-            lifespan=3600,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; cognito-chat-api)"},
-        )
-    return _jwks_client
 
 
 def get_provider_registry(request: Request):
@@ -80,23 +67,11 @@ def build_storage_backend_instance() -> StorageBackend:
     return _storage_backend
 
 
-def decode_jwt_payload(token: str) -> dict:
-    """Decode JWT token using JWKS or symmetric secret."""
-    # 1. Try JWKS / Identity Service token verification
-    try:
-        jwk_client = get_jwks_client()
-        if jwk_client:
-            signing_key = jwk_client.get_signing_key_from_jwt(token)
-            return jwt.decode(
-                token,
-                signing_key.key,
-                algorithms=["EdDSA", "RS256", "ES256", "HS256"],
-                options={"verify_aud": False},
-            )
-    except Exception as exc:
-        logger.debug("JWKS token verification bypassed: %s", exc)
-
-    # 2. Fallback to symmetric secret key verification (local dev / tests)
+async def decode_jwt_payload(token: str) -> dict:
+    header = jwt.get_unverified_header(token)
+    alg = header.get("alg") or ""
+    if alg in IDENTITY_ALGORITHMS:
+        return await decode_identity_jwt(token)
     return jwt.decode(
         token,
         settings.secret_key,
@@ -120,7 +95,7 @@ async def get_current_user(
     refresh_token = request.headers.get("x-refresh-token") or request.headers.get("X-Refresh-Token")
 
     try:
-        payload = decode_jwt_payload(token)
+        payload = await decode_jwt_payload(token)
         # Check if token is near expiration and refresh proactively if refresh token is supplied
         exp = payload.get("exp")
         if exp and server_token_manager.is_near_expiry(exp) and refresh_token:
@@ -150,7 +125,7 @@ async def get_current_user(
                 refreshed = await server_token_manager.refresh_tokens(refresh_token, db)
                 response.headers["X-New-Access-Token"] = refreshed.access_token
                 response.headers["X-New-Refresh-Token"] = refreshed.refresh_token
-                payload = decode_jwt_payload(refreshed.access_token)
+                payload = await decode_jwt_payload(refreshed.access_token)
                 logger.info(
                     "get_current_user: Transparent server-side token refresh successful. Injected updated token headers for '%s'.",
                     request.url.path,
@@ -221,3 +196,42 @@ async def get_current_user(
         logger.debug("Failed to cache user in Redis: %s", exc)
 
     return user
+
+
+def get_tasks_dispatcher(request: Request) -> CloudTasksDispatcher | None:
+    """Returns the shared CloudTasksDispatcher instance if worker_provider is 'cloudtasks', otherwise None."""
+    if settings.worker_provider.lower() != "cloudtasks":
+        return None
+    dispatcher = getattr(request.app.state, "tasks_dispatcher", None)
+    if dispatcher is None:
+        dispatcher = CloudTasksDispatcher(
+            project=settings.cloud_tasks_project,
+            location=settings.cloud_tasks_location,
+            queue=settings.cloud_tasks_queue,
+            worker_url=settings.cloud_tasks_worker_url,
+            service_account_email=settings.cloud_tasks_service_account_email,
+        )
+    return dispatcher
+
+
+async def verify_cloud_tasks_caller(
+    request: Request,
+    x_cloudtasks_queuename: str | None = Header(None, alias="X-CloudTasks-QueueName"),
+) -> bool:
+    """
+    Validates that a task request originates from Google Cloud Tasks or an authorized internal worker.
+    """
+    # Cloud Tasks injects specific HTTP headers
+    if x_cloudtasks_queuename:
+        return True
+
+    # Allow in local development
+    if settings.debug or getattr(settings, "environment", "development") == "development":
+        return True
+
+    # We could also verify OIDC token here if we used one
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Unauthorized Cloud Tasks invocation",
+    )
