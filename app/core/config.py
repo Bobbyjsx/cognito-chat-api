@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     # Cache (Redis)
     redis_url: str = ""
 
+    # Background Generation Worker Provider ("cloudtasks" or "local")
+    worker_provider: str = "local"
+
     # Cloud Tasks
     cloud_tasks_project: str = ""
     cloud_tasks_location: str = "us-central1"
