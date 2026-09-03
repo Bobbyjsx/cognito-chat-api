@@ -360,10 +360,18 @@ class ClaudeProvider(BaseProvider):
                 params["tools"] = tools
 
         # Configure reasoning / extended thinking
-        # For Claude models with thinking support (e.g. Claude 3.7 Sonnet):
+        # For Claude models with thinking support (e.g. Claude 3.7 Sonnet, Claude Sonnet 4.5):
         # thinking parameter requires {"type": "enabled", "budget_tokens": N}
         # and temperature must be 1.0 (or omitted/default).
-        if config.thinking_budget is not None and config.thinking_budget > 0:
+        supports_thinking = (
+            "3-7" in native_model
+            or "3.7" in native_model
+            or "sonnet-4" in native_model
+            or "4-5" in native_model
+            or "4.5" in native_model
+            or "opus-4" in native_model
+        )
+        if supports_thinking and config.thinking_budget is not None and config.thinking_budget > 0:
             budget = max(1024, config.thinking_budget)
             params["thinking"] = {"type": "enabled", "budget_tokens": budget}
             # max_tokens must be greater than budget_tokens
