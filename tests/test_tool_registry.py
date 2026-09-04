@@ -67,3 +67,13 @@ def test_function_tool_only_returns_app_executed_tools():
     assert registry.function_tool("code_execution") is None  # server-side
     registry.register(AddTool())
     assert registry.function_tool("add") is not None
+
+
+def test_tool_registry_alias_normalization():
+    registry = ToolRegistry()
+    registry.register_defaults()
+    assert registry.function_tool("google:search") is not None
+    assert registry.function_tool("google-search") is not None
+    assert registry.function_tool("google_search") is not None
+    assert registry.get("google:search") is not None
+    assert registry.get("google-search") is not None

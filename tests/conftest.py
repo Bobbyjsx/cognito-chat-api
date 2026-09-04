@@ -4,9 +4,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # Set environment variables for the Firestore emulator
-os.environ["FIRESTORE_EMULATOR_HOST"] = "127.0.0.1:8080"
-os.environ["GOOGLE_CLOUD_PROJECT"] = "test-project"
-os.environ["FIRESTORE_DATABASE"] = "(default)"
+os.environ["FIRESTORE_EMULATOR_HOST"] = os.environ.get("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080")
+os.environ["GOOGLE_CLOUD_PROJECT"] = os.environ.get("GOOGLE_CLOUD_PROJECT", "test-project")
+os.environ["FIRESTORE_DATABASE"] = os.environ.get("FIRESTORE_DATABASE", "(default)")
 
 # Attachments use the local storage backend in tests
 os.environ["STORAGE_BACKEND"] = "local"
@@ -87,14 +87,16 @@ def clear_database():
     try:
         import urllib.request
 
+        emulator_host = os.environ.get("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080")
         # Emulator REST API for wiping the database
         req = urllib.request.Request(
-            "http://127.0.0.1:8080/emulator/v1/projects/test-project/databases/(default)/documents",
+            f"http://{emulator_host}/emulator/v1/projects/test-project/databases/(default)/documents",
             method="DELETE",
         )
         urllib.request.urlopen(req, timeout=2.0)
     except Exception:
-        print("Warning: Could not connect to Firestore emulator at 127.0.0.1:8080. Is it running?")
+        emulator_host = os.environ.get("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080")
+        print(f"Warning: Could not connect to Firestore emulator at {emulator_host}. Is it running?")
 
     # Chat/config paths require configs/app_config; seed defaults after wipe.
     try:

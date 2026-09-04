@@ -95,15 +95,19 @@ class GeminiProvider(BaseProvider):
                     )
                 elif "function_call" in part:
                     fc = part["function_call"]
-                    parts.append(
-                        types.Part(
-                            function_call=types.FunctionCall(
-                                id=fc["id"],
-                                name=fc["name"],
-                                args=fc.get("args", {}),
-                            )
-                        )
+                    thought_sig = part.get("thought_signature") or (
+                        fc.get("thought_signature") if isinstance(fc, dict) else None
                     )
+                    part_kwargs: dict[str, Any] = {
+                        "function_call": types.FunctionCall(
+                            id=fc["id"],
+                            name=fc["name"],
+                            args=fc.get("args", {}),
+                        )
+                    }
+                    if thought_sig is not None:
+                        part_kwargs["thought_signature"] = thought_sig
+                    parts.append(types.Part(**part_kwargs))
                 elif "function_response" in part:
                     fr = part["function_response"]
                     parts.append(
@@ -154,6 +158,7 @@ class GeminiProvider(BaseProvider):
                     name=function_call.name,
                     args=function_call.args or {},
                     kind=TOOL_KIND_FUNCTION,
+                    thought_signature=getattr(part, "thought_signature", None),
                 )
             )
         return calls
@@ -354,6 +359,7 @@ class GeminiProvider(BaseProvider):
                                 name=function_call.name,
                                 args=function_call.args or {},
                                 kind=TOOL_KIND_FUNCTION,
+                                thought_signature=getattr(part, "thought_signature", None),
                             ),
                         )
                     )

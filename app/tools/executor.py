@@ -156,16 +156,19 @@ class ToolExecutor:
     ) -> list[ContentPart]:
         """Append the model's function-call parts and the app's function
         responses so the provider can continue the conversation."""
-        model_parts = [
-            {
-                "function_call": {
-                    "id": call.id,
-                    "name": call.name,
-                    "args": call.args or {},
-                }
+        model_parts = []
+        for call in function_calls:
+            fc_data: dict[str, Any] = {
+                "id": call.id,
+                "name": call.name,
+                "args": call.args or {},
             }
-            for call in function_calls
-        ]
+            thought_sig = getattr(call, "thought_signature", None)
+            part_data: dict[str, Any] = {"function_call": fc_data}
+            if thought_sig is not None:
+                part_data["thought_signature"] = thought_sig
+                fc_data["thought_signature"] = thought_sig
+            model_parts.append(part_data)
         user_parts = [
             {
                 "function_response": {

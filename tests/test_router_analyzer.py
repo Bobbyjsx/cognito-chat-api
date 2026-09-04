@@ -162,3 +162,18 @@ async def test_composite_analyzer_prefers_heuristic():
     mock_primary.analyze.assert_not_called()
     assert res.web_required is False
     assert res.task_type == TaskType.CONVERSATION
+
+
+@pytest.mark.asyncio
+async def test_heuristic_analyzer_news_queries():
+    analyzer = HeuristicFallbackAnalyzer()
+    news_queries = [
+        "whats the news in nigeria?",
+        "what are the latest headlines?",
+        "what is happening in Nigeria right now?",
+        "tell me the news",
+    ]
+    for q in news_queries:
+        res = await analyzer.analyze(q)
+        assert res.web_required is True, f"Query '{q}' should require web search"
+        assert res.tool_calling_required is True

@@ -2,6 +2,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
+from typing import Any
 
 from app.models.chats import GenerationStatus, MessageRole
 from app.repositories.chats import ChatRepository
@@ -211,10 +212,12 @@ class GenerationWorkerService:
             full_thoughts = ""
             total_tokens = 0
 
+            collected_tools: dict[str, dict[str, Any]] = {}
             for attempt_idx, candidate_model in enumerate(models_to_attempt):
                 full_response = ""
                 full_thoughts = ""
                 total_tokens = 0
+                collected_tools = {}
                 last_heartbeat_time = asyncio.get_running_loop().time()
                 try:
                     logger.info(
@@ -229,6 +232,35 @@ class GenerationWorkerService:
                             full_response += event.token or ""
                         elif event.type == "reasoning":
                             full_thoughts += event.token or ""
+                        elif event.type == "tool_call":
+                            call = event.tool_call
+                            if call:
+                                collected_tools[call.id] = {
+                                    "type": "dynamic-tool",
+                                    "toolName": call.name,
+                                    "tool_name": call.name,
+                                    "toolCallId": call.id,
+                                    "tool_call_id": call.id,
+                                    "state": "output-available",
+                                    "input": call.args or {},
+                                    "output": {},
+                                }
+                        elif event.type == "tool_result":
+                            res = event.tool_result
+                            if res:
+                                if res.id in collected_tools:
+                                    collected_tools[res.id]["output"] = res.output or {}
+                                else:
+                                    collected_tools[res.id] = {
+                                        "type": "dynamic-tool",
+                                        "toolName": res.name,
+                                        "tool_name": res.name,
+                                        "toolCallId": res.id,
+                                        "tool_call_id": res.id,
+                                        "state": "output-available",
+                                        "input": {},
+                                        "output": res.output or {},
+                                    }
                         elif event.type == "usage" and event.total_tokens:
                             total_tokens = event.total_tokens
 
@@ -264,9 +296,56 @@ class GenerationWorkerService:
                     duration_ms=(time.perf_counter() - start_time) * 1000,
                 )
 
+            if not full_response.strip():
+                logger.warning(
+                    "Worker model '%s' generated thoughts but no text response. Triggering fallback recovery...",
+                    candidate_model,
+                )
+                try:
+                    recovery_config = GenerationConfig(
+                        system_instruction=generation_config.system_instruction,
+                        thinking_budget=0,
+                        include_thoughts=False,
+                        tool_configs=generation_config.tool_configs,
+                    )
+                    recovery_res = await self.agent_service.executor.generate(
+                        candidate_model, contents, recovery_config
+                    )
+                    if recovery_res and recovery_res.text:
+                        full_response = recovery_res.text
+                        if recovery_res.total_tokens:
+                            total_tokens = max(total_tokens, recovery_res.total_tokens)
+                except Exception as rec_exc:
+                    logger.error("Worker recovery generation failed: %s", rec_exc)
+
+            worker_parts: list[dict[str, Any]] = []
+            if full_response.strip():
+                worker_parts.append({"type": "text", "text": full_response})
+
+            # Extract and persist ONLY sources (do not persist thoughts or tool calls across reloads)
+            extracted_sources: list[dict[str, str]] = []
+            seen_source_urls: set[str] = set()
+            for tool_item in collected_tools.values():
+                tool_output = tool_item.get("output") or {}
+                raw_sources = tool_output.get("sources") or []
+                if isinstance(raw_sources, list):
+                    for src in raw_sources:
+                        if isinstance(src, dict):
+                            url = src.get("uri") or src.get("url") or ""
+                            if url and url not in seen_source_urls:
+                                seen_source_urls.add(url)
+                                title = src.get("title") or "Web Source"
+                                extracted_sources.append({"title": title, "url": url, "uri": url})
+            if extracted_sources:
+                worker_parts.append({"type": "sources", "sources": extracted_sources})
+
             # Record success
             agent_msg = await self.chat_repo.add_message(
-                session.id, role=MessageRole.AGENT, content=full_response, generation_id=str(generation.id)
+                session.id,
+                role=MessageRole.AGENT,
+                content=full_response,
+                generation_id=str(generation.id),
+                parts=worker_parts,
             )
 
             # Clear any transient error on user message

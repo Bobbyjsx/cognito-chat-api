@@ -143,6 +143,7 @@ class ToolCall:
     name: str
     args: dict[str, Any]
     kind: str = TOOL_KIND_FUNCTION  # "function" → executed by the app, "server" → handled by the provider
+    thought_signature: Any = None
 
 
 @dataclass

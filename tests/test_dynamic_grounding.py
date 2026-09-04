@@ -20,6 +20,8 @@ def test_get_base_system_instructions_includes_current_date():
     assert now_year in instructions
     assert "Cognito" in instructions
     assert "Today's date is" in instructions
+    assert "confidential" in instructions.lower()
+    assert "system prompt" in instructions.lower()
 
 
 def test_gemini_extract_grounding_events_from_candidates():
@@ -97,6 +99,8 @@ async def test_dynamic_tool_attachment_in_validate_and_resolve_config():
     analysis_simple = MagicMock(coding_required=0.0, task_type=MagicMock(value="conversation"), web_required=False)
     analysis_web = MagicMock(coding_required=0.0, task_type=MagicMock(value="information"), web_required=True)
 
+    mock_analyzer.fallback_analyzer = None
+    mock_router.heuristic_analyzer = None
     mock_analyzer.analyze = AsyncMock(side_effect=[analysis_simple, analysis_web])
     mock_router.analyzer = mock_analyzer
 
@@ -122,3 +126,75 @@ async def test_dynamic_tool_attachment_in_validate_and_resolve_config():
     )
     assert len(tools_web) == 1
     assert tools_web[0]["kind"] == "google_search"
+
+
+@pytest.mark.asyncio
+async def test_heuristic_analyzer_factual_queries():
+    from app.ai.router.analyzer import HeuristicFallbackAnalyzer
+
+    analyzer = HeuristicFallbackAnalyzer()
+
+    factual_queries = [
+        "Why did Uber leave Nigeria?",
+        "Who is Godswill Ezeala?",
+        "What happened to Silicon Valley Bank?",
+        "Brief me about events in Lagos state nigeria?",
+        "Did Uber leave Nigeria?",
+        "Is Uber still available in Nigeria?",
+    ]
+    for q in factual_queries:
+        res = await analyzer.analyze(q)
+        assert res.web_required is True, f"Expected web_required=True for query: {q}"
+
+    non_web_queries = [
+        "Write a poem about rain",
+        "Hello",
+        "What date is it today?",
+        "def add(a, b): return a + b",
+    ]
+    for q in non_web_queries:
+        res = await analyzer.analyze(q)
+        assert res.web_required is False, f"Expected web_required=False for query: {q}"
+
+
+@pytest.mark.asyncio
+async def test_uber_leave_nigeria_query_resolution():
+    config_repo = MagicMock()
+    mock_config = AppConfigDB(
+        allowed_tools=[ToolName.GOOGLE_SEARCH, ToolName.CODE_EXECUTION],
+        allowed_reasoning_levels=[ReasoningLevel.FAST],
+        default_reasoning_level=ReasoningLevel.FAST,
+        default_text_model="gemini-3.5-flash",
+    )
+    config_repo.get_config = AsyncMock(return_value=mock_config)
+
+    registry = ToolRegistry()
+    registry.register_defaults()
+
+    from app.ai.router.analyzer import CompositeRequestAnalyzer, HeuristicFallbackAnalyzer
+    from app.ai.router.router import SmartModelRouter
+
+    heuristic = HeuristicFallbackAnalyzer()
+    composite = CompositeRequestAnalyzer(
+        primary_analyzer=heuristic,
+        fallback_analyzer=heuristic,
+        prefer_heuristic=True,
+    )
+    router = SmartModelRouter(analyzer=composite)
+
+    service = AgentService(
+        chat_repo=MagicMock(),
+        user_repo=MagicMock(),
+        config_repo=config_repo,
+        attachment_service=None,
+        provider=MagicMock(),
+        registry=registry,
+        router=router,
+    )
+
+    _, _, _, tools, _ = await service.validate_and_resolve_config(
+        requested_model="gemini-3.5-flash",
+        message_text="Why did Uber leave Nigeria?",
+    )
+    assert len(tools) == 1
+    assert tools[0]["kind"] == "google_search"

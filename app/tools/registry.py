@@ -28,8 +28,14 @@ class ToolRegistry:
         self.register(CodeExecutionTool())
         self.register(GoogleSearchTool())
 
+    def _normalize_name(self, name: str) -> str:
+        return name.replace(":", "_").replace("-", "_").lower()
+
     def get(self, name: str) -> BaseTool | None:
-        return self._tools.get(name)
+        tool = self._tools.get(name)
+        if tool is None:
+            tool = self._tools.get(self._normalize_name(name))
+        return tool
 
     def names(self) -> list[str]:
         return list(self._tools.keys())
@@ -42,7 +48,7 @@ class ToolRegistry:
 
     def function_tool(self, name: str) -> BaseTool | None:
         """Look up an app-executed (``kind == "function"`` or custom execute override) tool by name."""
-        tool = self._tools.get(name)
+        tool = self.get(name)
         if tool is None:
             return None
         if tool.kind == "function":

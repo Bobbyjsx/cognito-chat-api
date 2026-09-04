@@ -254,13 +254,16 @@ class AgentService:
         analysis = decision.analysis if decision else None
         if analysis is None and message_text and self.router:
             try:
-                heuristic = getattr(self.router, "heuristic_analyzer", None) or getattr(
-                    self.router.analyzer, "fallback_analyzer", None
+                from app.ai.router.analyzer import BaseRequestAnalyzer
+
+                analyzer = getattr(self.router, "analyzer", None)
+                heuristic = getattr(analyzer, "fallback_analyzer", None) or getattr(
+                    self.router, "heuristic_analyzer", None
                 )
-                if heuristic:
+                if isinstance(heuristic, BaseRequestAnalyzer):
                     analysis = await heuristic.analyze(message_text, context=context)
-                else:
-                    analysis = await self.router.analyzer.analyze(message_text, context=context)
+                elif analyzer and hasattr(analyzer, "analyze"):
+                    analysis = await analyzer.analyze(message_text, context=context)
             except Exception as exc:
                 logger.warning("[AgentService] Dynamic request analysis for tools failed: %s", exc)
 
@@ -273,7 +276,9 @@ class AgentService:
         if analysis:
             if (analysis.coding_required >= 0.4 or analysis.task_type.value == "coding") and supports_code:
                 allowed_tools = [t for t in cfg.allowed_tools if t == ToolName.CODE_EXECUTION]
-            elif analysis.web_required and supports_search:
+            elif (
+                analysis.web_required or analysis.task_type.value in ("general_knowledge", "information")
+            ) and supports_search:
                 allowed_tools = [t for t in cfg.allowed_tools if t == ToolName.GOOGLE_SEARCH]
             else:
                 allowed_tools = [
@@ -593,7 +598,24 @@ class AgentService:
             ) from last_exc
 
         assert result is not None
-        await self.chat_repo.add_message(session_id, role=MessageRole.AGENT, content=result.text)
+        proc_parts: list[dict[str, Any]] = []
+        if getattr(result, "tool_calls", None):
+            for call in result.tool_calls:
+                proc_parts.append(
+                    {
+                        "type": "dynamic-tool",
+                        "toolName": call.name,
+                        "tool_name": call.name,
+                        "toolCallId": call.id,
+                        "tool_call_id": call.id,
+                        "state": "output-available",
+                        "input": call.args or {},
+                        "output": {},
+                    }
+                )
+        if result.text:
+            proc_parts.append({"type": "text", "text": result.text})
+        await self.chat_repo.add_message(session_id, role=MessageRole.AGENT, content=result.text, parts=proc_parts)
 
         within_limit = await self._charge_usage(user, result.total_tokens, active_config)
         if not within_limit:
@@ -797,10 +819,12 @@ class AgentService:
             stream_start_time = time.perf_counter()
             ttft_ms: float | None = None
 
+            collected_tools: dict[str, dict[str, Any]] = {}
             for attempt_idx, candidate_model in enumerate(models_to_attempt):
                 full_response = ""
                 full_thoughts = ""
                 total_tokens = 0
+                collected_tools = {}
                 used_model = candidate_model
                 last_exc = None
 
@@ -828,7 +852,37 @@ class AgentService:
                                 state["buffered_thoughts"] = full_thoughts
                             yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
                             has_yielded_chunks = True
-                        elif event.type in ("tool_call", "tool_result"):
+                        elif event.type == "tool_call":
+                            call = event.tool_call
+                            if call:
+                                collected_tools[call.id] = {
+                                    "type": "dynamic-tool",
+                                    "toolName": call.name,
+                                    "tool_name": call.name,
+                                    "toolCallId": call.id,
+                                    "tool_call_id": call.id,
+                                    "state": "output-available",
+                                    "input": call.args or {},
+                                    "output": {},
+                                }
+                            yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
+                            has_yielded_chunks = True
+                        elif event.type == "tool_result":
+                            res = event.tool_result
+                            if res:
+                                if res.id in collected_tools:
+                                    collected_tools[res.id]["output"] = res.output or {}
+                                else:
+                                    collected_tools[res.id] = {
+                                        "type": "dynamic-tool",
+                                        "toolName": res.name,
+                                        "tool_name": res.name,
+                                        "toolCallId": res.id,
+                                        "tool_call_id": res.id,
+                                        "state": "output-available",
+                                        "input": {},
+                                        "output": res.output or {},
+                                    }
                             yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
                             has_yielded_chunks = True
                         elif event.type == "usage" and event.total_tokens:
@@ -852,6 +906,48 @@ class AgentService:
                     if has_yielded_chunks or attempt_idx >= len(models_to_attempt) - 1 or not is_retryable:
                         break
 
+            if not full_response.strip() and last_exc is None:
+                logger.warning(
+                    "[AgentService] Model '%s' generated thoughts but no text response. Triggering fallback recovery...",
+                    used_model,
+                )
+                try:
+                    recovery_config = GenerationConfig(
+                        system_instruction=generation_config.system_instruction,
+                        thinking_budget=0,
+                        include_thoughts=False,
+                        tool_configs=generation_config.tool_configs,
+                    )
+                    recovery_res = await self.executor.generate(used_model, contents, recovery_config)
+                    if recovery_res and recovery_res.text:
+                        full_response = recovery_res.text
+                        yield f"event: chunk\ndata: {json.dumps(self._serialize_event(GenerationEvent(type='text', token=full_response)))}\n\n"
+                        if recovery_res.total_tokens:
+                            total_tokens = max(total_tokens, recovery_res.total_tokens)
+                except Exception as rec_exc:
+                    logger.error("[AgentService] Recovery generation failed: %s", rec_exc)
+
+            final_parts: list[dict[str, Any]] = []
+            if full_response.strip():
+                final_parts.append({"type": "text", "text": full_response})
+
+            # Extract and persist ONLY sources (do not persist thoughts or tool calls across reloads)
+            extracted_sources: list[dict[str, str]] = []
+            seen_source_urls: set[str] = set()
+            for tool_item in collected_tools.values():
+                tool_output = tool_item.get("output") or {}
+                raw_sources = tool_output.get("sources") or []
+                if isinstance(raw_sources, list):
+                    for src in raw_sources:
+                        if isinstance(src, dict):
+                            url = src.get("uri") or src.get("url") or ""
+                            if url and url not in seen_source_urls:
+                                seen_source_urls.add(url)
+                                title = src.get("title") or "Web Source"
+                                extracted_sources.append({"title": title, "url": url, "uri": url})
+            if extracted_sources:
+                final_parts.append({"type": "sources", "sources": extracted_sources})
+
             if last_exc is not None:
                 status, error_code, message = classify_provider_error(last_exc)
 
@@ -872,6 +968,7 @@ class AgentService:
                         role=MessageRole.AGENT,
                         content=full_response,
                         error=f"[{error_code}] {message}",
+                        parts=final_parts,
                     )
                 else:
                     await self.chat_repo.update_message(
@@ -888,7 +985,12 @@ class AgentService:
 
             # Concurrently ensure agent response is stored, quota is charged, and cache is evicted
             try:
-                await self.chat_repo.add_message(session_id, role=MessageRole.AGENT, content=full_response)
+                await self.chat_repo.add_message(
+                    session_id,
+                    role=MessageRole.AGENT,
+                    content=full_response,
+                    parts=final_parts,
+                )
             except Exception as e:
                 logger.error("Failed to add agent message: %s", e)
 

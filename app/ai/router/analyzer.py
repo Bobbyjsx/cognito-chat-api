@@ -198,6 +198,39 @@ class HeuristicFallbackAnalyzer(BaseRequestAnalyzer):
         re.IGNORECASE,
     )
 
+    # News & current events pattern (always requires web search)
+    _NEWS_PATTERN: ClassVar[Pattern[str]] = re.compile(
+        r"\b("
+        r"news|headlines?|"
+        r"current events|recent events|latest events|events in|activities in|"
+        r"recent happenings|latest developments|"
+        r"what('?s| is) (happening|going on)( in)?|"
+        r"what happened( in| to)?|"
+        r"brief(ing)? (me )?(on|about)|"
+        r"updates? (on|in|about)|"
+        r"latest (on|in|from|about)|"
+        r"situation in|status of"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    # Factual & real-world entity/event questions pattern (requires web search grounding)
+    _FACTUAL_QUERY_PATTERN: ClassVar[Pattern[str]] = re.compile(
+        r"\b("
+        r"why did|why is|why are|why does|why was|why were|"
+        r"what happened( to| in| with| after)?|"
+        r"who (is|was|are|were|founded|created|built|invented|leads|runs|bought|sold|owns)|"
+        r"when (did|was|is|were|will)|"
+        r"where (is|are|was|were|did)|"
+        r"how did|how does|how is|"
+        r"did \w+ (leave|exit|close|shut down|acquire|buy|sell|launch|ban|announce|merge|win|lose)|"
+        r"is \w+ (still|leaving|closing|shutting down|available|active|dead|alive|banned)|"
+        r"has \w+ (left|exited|closed|shut down|acquired|bought|sold|launched|banned|announced)|"
+        r"tell me about|info(rmation)? (on|about)|background (on|about)"
+        r")\b",
+        re.IGNORECASE,
+    )
+
     # Web keywords (real-time facts, live metrics, breaking events, search commands)
     _WEB_KEYWORDS: ClassVar[set[str]] = {
         # Explicit search commands
@@ -234,14 +267,43 @@ class HeuristicFallbackAnalyzer(BaseRequestAnalyzer):
         "live score",
         "match score",
         "standings",
-        # News & politics
+        # News & politics & current events
+        "headline",
+        "headlines",
         "latest news",
         "breaking news",
         "recent news",
         "today's news",
+        "current events",
+        "recent events",
+        "latest events",
+        "events in",
+        "activities in",
+        "brief me on",
+        "brief me about",
+        "brief me",
+        "latest on",
+        "latest in",
+        "latest from",
+        "updates on",
+        "updates in",
+        "what's happening in",
+        "whats happening in",
+        "what is happening in",
+        "what's happening",
+        "whats happening",
+        "what is happening",
+        "what happened in",
+        "what is going on in",
+        "what's going on in",
+        "whats going on in",
+        "situation in",
+        "status of",
+        "developments in",
         "election results",
         "who is currently the president",
         "who is currently the prime minister",
+        "find",
         "who won the",
     }
 
@@ -319,6 +381,8 @@ class HeuristicFallbackAnalyzer(BaseRequestAnalyzer):
 
         # 8. Web requirement
         has_web_kw = any(kw in lower_text for kw in self._WEB_KEYWORDS)
+        has_news_event = bool(self._NEWS_PATTERN.search(text))
+        has_factual_query = bool(self._FACTUAL_QUERY_PATTERN.search(text))
         has_temporal_year = bool(re.search(r"\b(202[5-9]|203\d)\b", lower_text))
         has_temporal_event = bool(
             re.search(
@@ -326,7 +390,12 @@ class HeuristicFallbackAnalyzer(BaseRequestAnalyzer):
                 lower_text,
             )
         )
-        web_required = not is_date_query and (has_web_kw or (has_temporal_year and has_temporal_event))
+        web_required = (
+            not is_date_query
+            and not is_creative
+            and not is_coding
+            and (has_web_kw or has_news_event or has_factual_query or (has_temporal_year and has_temporal_event))
+        )
 
         # 9. Complexity calculation
         base_complexity = 0.25  # default simple prompt

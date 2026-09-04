@@ -41,7 +41,17 @@ class GoogleSearchTool(BaseTool):
 
     async def execute(self, args: dict[str, Any]) -> ToolOutput:
         """Execute web search and return verifiable sources and summary."""
-        query = args.get("query", "").strip() if isinstance(args, dict) else ""
+        query = ""
+        if isinstance(args, dict):
+            raw_query = args.get("query")
+            if raw_query and isinstance(raw_query, str):
+                query = raw_query.strip()
+            elif "queries" in args:
+                raw_queries = args.get("queries")
+                if isinstance(raw_queries, list):
+                    query = " ".join(str(q).strip() for q in raw_queries if str(q).strip())
+                elif isinstance(raw_queries, str):
+                    query = raw_queries.strip()
         if not query:
             return ToolOutput(content={"error": "Empty search query.", "query": ""}, is_error=True)
 
