@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID
 
 from google.cloud.firestore_v1.async_client import AsyncClient
@@ -148,6 +149,7 @@ class ChatRepository:
         attachment_ids: list[str] | None = None,
         generation_id: str | UUID | None = None,
         created_at: datetime | str | None = None,
+        parts: list[dict[str, Any]] | None = None,
         update_session_summary: bool = True,
     ) -> ChatMessageDB:
         # Convert generation_id to UUID if it's a string
@@ -161,6 +163,7 @@ class ChatRepository:
             "error": error,
             "attachment_ids": attachment_ids or [],
             "generation_id": generation_id,
+            "parts": parts or [],
         }
         if created_at is not None:
             msg_kwargs["created_at"] = created_at

@@ -28,6 +28,7 @@ from app.providers.base import (
     GenerationConfig,
     GenerationEvent,
     GenerationResult,
+    ProviderError,
     ProviderGenerationError,
     ProviderModelNotFoundError,
     ToolCall,
@@ -94,15 +95,19 @@ class GeminiProvider(BaseProvider):
                     )
                 elif "function_call" in part:
                     fc = part["function_call"]
-                    parts.append(
-                        types.Part(
-                            function_call=types.FunctionCall(
-                                id=fc["id"],
-                                name=fc["name"],
-                                args=fc.get("args", {}),
-                            )
-                        )
+                    thought_sig = part.get("thought_signature") or (
+                        fc.get("thought_signature") if isinstance(fc, dict) else None
                     )
+                    part_kwargs: dict[str, Any] = {
+                        "function_call": types.FunctionCall(
+                            id=fc["id"],
+                            name=fc["name"],
+                            args=fc.get("args", {}),
+                        )
+                    }
+                    if thought_sig is not None:
+                        part_kwargs["thought_signature"] = thought_sig
+                    parts.append(types.Part(**part_kwargs))
                 elif "function_response" in part:
                     fr = part["function_response"]
                     parts.append(
@@ -153,18 +158,60 @@ class GeminiProvider(BaseProvider):
                     name=function_call.name,
                     args=function_call.args or {},
                     kind=TOOL_KIND_FUNCTION,
+                    thought_signature=getattr(part, "thought_signature", None),
                 )
             )
         return calls
 
-    def _wrap_error(self, exc: Exception) -> Exception:
+    def normalize_error(self, exc: Exception) -> Exception:
         if isinstance(exc, genai_errors.APIError):
             status = getattr(exc, "code", None) or 500
             message = getattr(exc, "message", None) or str(exc) or ""
             if status == 404 or getattr(exc, "status", None) == "NOT_FOUND":
                 return ProviderModelNotFoundError(message or "Model not found.")
+            if status == 429 or getattr(exc, "status", None) == "RESOURCE_EXHAUSTED":
+                from app.providers.base import ProviderRateLimitError
+
+                return ProviderRateLimitError(message or "Gemini quota / rate limit exceeded.", status_code=429)
+            if status in (401, 403) or getattr(exc, "status", None) == "PERMISSION_DENIED":
+                from app.providers.base import ProviderAuthError
+
+                return ProviderAuthError(message or "Gemini authentication failed.", status_code=int(status))
+            if status == 400 or getattr(exc, "status", None) == "INVALID_ARGUMENT":
+                from app.providers.base import ProviderInvalidRequestError
+
+                return ProviderInvalidRequestError(message or "Invalid Gemini request.", status_code=400)
+            if status == 503 or getattr(exc, "status", None) == "UNAVAILABLE":
+                from app.providers.base import ProviderOverloadedError
+
+                return ProviderOverloadedError(message or "Gemini service is temporarily unavailable.", status_code=503)
+            if status == 504 or getattr(exc, "status", None) == "DEADLINE_EXCEEDED":
+                from app.providers.base import ProviderTimeoutError
+
+                return ProviderTimeoutError(message or "Gemini request timed out.", status_code=504)
             return ProviderGenerationError(message or "Model generation failed.", status_code=int(status))
-        return exc
+        if isinstance(exc, ProviderError):
+            return exc
+        return ProviderGenerationError(str(exc) or "Model generation failed.", status_code=500)
+
+    def _wrap_error(self, exc: Exception) -> Exception:
+        return self.normalize_error(exc)
+
+    def supports(self, capability: str) -> bool:
+        if capability in (
+            "audio",
+            "audio_transcription",
+            "vision",
+            "tools",
+            "reasoning",
+            "web_search",
+            "code_execution",
+        ):
+            return True
+        return True
+
+    def supports_model(self, model: str) -> bool:
+        return model.startswith("gemini") or "imagen" in model or "veo" in model
 
     # ── tool construction ────────────────────────────────────────────────────
 
@@ -229,9 +276,22 @@ class GeminiProvider(BaseProvider):
 
         tool_calls: list[ToolCall] = []
         if response.candidates:
-            content = getattr(response.candidates[0], "content", None)
+            cand = response.candidates[0]
+            content = getattr(cand, "content", None)
             if content is not None:
                 tool_calls = self._extract_function_calls(content)
+            grounding = getattr(cand, "grounding_metadata", None)
+            if grounding:
+                queries = getattr(grounding, "web_search_queries", None) or []
+                query_text = queries[0] if queries else "Web search"
+                tool_calls.append(
+                    ToolCall(
+                        id=f"call_{uuid.uuid4().hex[:8]}",
+                        name="google_search",
+                        args={"query": query_text},
+                        kind=TOOL_KIND_SERVER,
+                    )
+                )
 
         return GenerationResult(text=text, total_tokens=total_tokens, tool_calls=tool_calls)
 
@@ -251,9 +311,10 @@ class GeminiProvider(BaseProvider):
             raise self._wrap_error(exc) from exc
 
         search_announced = False
+        search_call_id = f"call_{uuid.uuid4().hex[:8]}"
         try:
             async for chunk in stream:
-                for event in self._extract_stream_events(chunk, search_announced):
+                for event in self._extract_stream_events(chunk, search_announced, search_call_id):
                     if event.type == "tool_call" and event.tool_call and event.tool_call.name == "google_search":
                         search_announced = True
                     yield event
@@ -264,6 +325,7 @@ class GeminiProvider(BaseProvider):
         self,
         chunk: Any,
         search_announced: bool,
+        search_call_id: str | None = None,
     ) -> list[GenerationEvent]:
         events: list[GenerationEvent] = []
         code_tool_ids: deque[str] = deque()
@@ -297,6 +359,7 @@ class GeminiProvider(BaseProvider):
                                 name=function_call.name,
                                 args=function_call.args or {},
                                 kind=TOOL_KIND_FUNCTION,
+                                thought_signature=getattr(part, "thought_signature", None),
                             ),
                         )
                     )
@@ -342,12 +405,24 @@ class GeminiProvider(BaseProvider):
             total_tokens = getattr(chunk.usage_metadata, "total_token_count", 0) or 0
             events.append(GenerationEvent(type="usage", total_tokens=total_tokens))
 
-        events.extend(self._extract_grounding_events(chunk, search_announced))
+        events.extend(self._extract_grounding_events(chunk, search_announced, search_call_id))
         return events
 
-    def _extract_grounding_events(self, chunk: Any, search_announced: bool) -> list[GenerationEvent]:
+    def _extract_grounding_events(
+        self,
+        chunk: Any,
+        search_announced: bool,
+        search_call_id: str | None = None,
+    ) -> list[GenerationEvent]:
         """Surface Google Search grounding as tool_call/tool_result events."""
         grounding = getattr(chunk, "grounding_metadata", None)
+        if grounding is None:
+            for cand in getattr(chunk, "candidates", None) or []:
+                cand_grounding = getattr(cand, "grounding_metadata", None)
+                if cand_grounding is not None:
+                    grounding = cand_grounding
+                    break
+
         if grounding is None:
             return []
 
@@ -357,12 +432,16 @@ class GeminiProvider(BaseProvider):
             if web is not None:
                 sources.append(
                     {
-                        "title": getattr(web, "title", None),
-                        "uri": getattr(web, "uri", None),
+                        "title": getattr(web, "title", None) or "Web Source",
+                        "uri": getattr(web, "uri", None) or "",
                     }
                 )
         if not sources:
             return []
+
+        queries = getattr(grounding, "web_search_queries", None) or []
+        query_text = queries[0] if queries else "Web search"
+        call_id = search_call_id or f"call_{uuid.uuid4().hex[:8]}"
 
         events: list[GenerationEvent] = []
         if not search_announced:
@@ -370,9 +449,9 @@ class GeminiProvider(BaseProvider):
                 GenerationEvent(
                     type="tool_call",
                     tool_call=ToolCall(
-                        id=f"call_{uuid.uuid4().hex[:8]}",
+                        id=call_id,
                         name="google_search",
-                        args={"query": "Web search"},
+                        args={"query": query_text},
                         kind=TOOL_KIND_SERVER,
                     ),
                 )
@@ -381,9 +460,9 @@ class GeminiProvider(BaseProvider):
             GenerationEvent(
                 type="tool_result",
                 tool_result=ToolResult(
-                    id=f"call_{uuid.uuid4().hex[:8]}",
+                    id=call_id,
                     name="google_search",
-                    output={"sources": sources},
+                    output={"sources": sources, "queries": queries},
                     kind=TOOL_KIND_SERVER,
                 ),
             )

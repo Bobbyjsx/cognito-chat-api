@@ -22,9 +22,20 @@ logger = logging.getLogger(__name__)
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
 
 
+def get_provider_registry(request: Request):
+    """Return the shared ProviderRegistry instance (created at app startup)."""
+    if hasattr(request.app.state, "provider_registry"):
+        return request.app.state.provider_registry
+    from app.providers.registry import create_default_provider_registry
+
+    return create_default_provider_registry()
+
+
 def get_provider(request: Request) -> BaseProvider:
-    """Return the shared AI provider instance (created at app startup)."""
-    return request.app.state.provider
+    """Return the shared default AI provider instance (created at app startup)."""
+    if hasattr(request.app.state, "provider"):
+        return request.app.state.provider
+    return get_provider_registry(request).get("gemini")
 
 
 def get_tool_registry(request: Request) -> ToolRegistry:

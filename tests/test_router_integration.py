@@ -144,3 +144,43 @@ def test_http_chat_with_explicit_model_override(client: TestClient, mock_agent):
     data = response.json()
     assert data["model"] == "gemini-3.5-flash"
     assert data["reasoning"] == "balanced"
+
+
+def test_http_chat_with_auto_model_uses_reasoning_as_policy(client: TestClient, mock_agent):
+    headers = _get_auth_headers(client, "user_auto_reasoning@example.com")
+    payload = {
+        "message": "What is 2 + 2?",
+        "model": "auto",
+        "reasoning": "fast",
+        # Note: no routing_mode needed!
+    }
+    response = client.post("/agent/chat", json=payload, headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert "response" in data
+    assert "flash-lite" in data["model"]
+    assert data["reasoning"] == "fast"
+
+
+def test_http_chat_with_explicit_claude_uses_reasoning_as_effort(client: TestClient, mock_agent):
+    from unittest.mock import AsyncMock, patch
+
+    from app.providers.base import GenerationResult
+
+    headers = _get_auth_headers(client, "user_claude_effort@example.com")
+    payload = {
+        "message": "Solve complex architecture task",
+        "model": "claude-3-7-sonnet",
+        "reasoning": "extended",
+        # Note: no routing_mode needed!
+    }
+    with patch(
+        "app.providers.claude.ClaudeProvider.generate",
+        new_callable=AsyncMock,
+        return_value=GenerationResult(text="Claude answer", total_tokens=100),
+    ):
+        response = client.post("/agent/chat", json=payload, headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["model"] == "claude-3-7-sonnet"
+    assert data["reasoning"] == "extended"

@@ -9,6 +9,7 @@ from google.cloud.firestore_v1.async_client import AsyncClient
 from app.api.dependencies import (
     get_current_user,
     get_provider,
+    get_provider_registry,
     get_smart_router,
     get_storage_backend,
     get_tasks_dispatcher,
@@ -55,6 +56,7 @@ class AgentStreamingResponse(StreamingResponse):
 def get_agent_service(
     db: AsyncClient = Depends(get_db),
     provider: BaseProvider = Depends(get_provider),
+    provider_registry=Depends(get_provider_registry),
     storage: StorageBackend = Depends(get_storage_backend),
     registry: ToolRegistry = Depends(get_tool_registry),
     smart_router=Depends(get_smart_router),
@@ -65,13 +67,14 @@ def get_agent_service(
     config_repo = ConfigRepository(db)
     generation_repo = GenerationRepository(db)
     attachment_service = AttachmentService(AttachmentRepository(db), storage, provider)
-    executor = ToolExecutor(registry, provider)
+    executor = ToolExecutor(registry, provider_registry)
     return AgentService(
         chat_repo=chat_repo,
         user_repo=user_repo,
         config_repo=config_repo,
         attachment_service=attachment_service,
         provider=provider,
+        provider_registry=provider_registry,
         registry=registry,
         executor=executor,
         router=smart_router,

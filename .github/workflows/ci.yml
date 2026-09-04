@@ -1,0 +1,99 @@
+name: CI - Lint & Test
+
+on:
+  pull_request:
+    branches:
+      - master
+      - main
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Code Quality & Style
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Set up Environment
+        run: |
+          cp -n .env.example .env || true
+
+      - name: Run Ruff Linter
+        run: |
+          ruff check .
+
+      - name: Check Code Formatting
+        run: |
+          ruff format --check .
+
+  test:
+    name: Unit & Integration Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Set up Environment
+        run: |
+          cp -n .env.example .env || true
+
+      - name: Start Firestore Emulator
+        run: |
+          docker run -d --name firestore-emulator -p 8080:8080 -e FIRESTORE_PROJECT_ID=test-project google/cloud-sdk:latest gcloud beta emulators firestore start --host-port=0.0.0.0:8080
+          echo "Waiting for Firestore emulator to become healthy..."
+          timeout 60s bash -c 'until curl -s http://127.0.0.1:8080/ > /dev/null; do sleep 1; done'
+          echo "Firestore emulator is up and running!"
+
+      - name: Run Pytest
+        env:
+          FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080"
+          GOOGLE_CLOUD_PROJECT: "test-project"
+          FIRESTORE_DATABASE: "(default)"
+          STORAGE_BACKEND: "local"
+          PYTHONPATH: "."
+        run: |
+          pytest -v tests/
+
+      - name: Verify Migration Idempotency
+        env:
+          FIRESTORE_EMULATOR_HOST: "127.0.0.1:8080"
+          GOOGLE_CLOUD_PROJECT: "test-project"
+          PYTHONPATH: "."
+        run: |
+          python scripts/migrate.py --list
+          python scripts/migrate.py all
+
+      - name: Teardown Services
+        if: always()
+        run: |
+          docker rm -f firestore-emulator 2>/dev/null || true

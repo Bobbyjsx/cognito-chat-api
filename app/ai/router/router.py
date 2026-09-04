@@ -52,8 +52,17 @@ class SmartModelRouter:
             # Default composite analyzer with Flash-Lite primary and heuristic fallback
             flash_lite = GeminiFlashLiteAnalyzer()
             heuristic = HeuristicFallbackAnalyzer()
-            analyzer = CompositeRequestAnalyzer(primary_analyzer=flash_lite, fallback_analyzer=heuristic)
+            analyzer = CompositeRequestAnalyzer(
+                primary_analyzer=flash_lite,
+                fallback_analyzer=heuristic,
+                prefer_heuristic=True,
+            )
         self.analyzer = analyzer
+        self.heuristic_analyzer = (
+            getattr(analyzer, "fallback_analyzer", None)
+            if isinstance(analyzer, CompositeRequestAnalyzer)
+            else (analyzer if isinstance(analyzer, HeuristicFallbackAnalyzer) else HeuristicFallbackAnalyzer())
+        )
 
         self.filter = candidate_filter or CandidateFilter()
         self.scorer = scorer or ScoringEngine()
@@ -263,7 +272,7 @@ class SmartModelRouter:
             logger.info(
                 "[SmartRouter] Explicit model '%s' requested by user. Bypassing smart routing.", requested_model
             )
-            fallbacks = [m for m in config.allowed_text_models if m != requested_model]
+            fallbacks = [m for m in config.allowed_text_models if m != requested_model and m.lower() != "auto"]
             return requested_model, fallbacks, None
 
         # Execute smart routing
@@ -274,7 +283,8 @@ class SmartModelRouter:
                 policy=policy,
                 config=config,
             )
-            return decision.selected_model_id, decision.fallback_models, decision
+            fallback_models = [m for m in decision.fallback_models if m.lower() != "auto"]
+            return decision.selected_model_id, fallback_models, decision
         except Exception as exc:
             err_type = type(exc).__name__
             err_msg = getattr(exc, "message", None) or str(exc) or repr(exc)
@@ -284,5 +294,7 @@ class SmartModelRouter:
                 err_msg,
                 config.default_text_model,
             )
-            fallbacks = [m for m in config.allowed_text_models if m != config.default_text_model]
+            fallbacks = [
+                m for m in config.allowed_text_models if m != config.default_text_model and m.lower() != "auto"
+            ]
             return config.default_text_model, fallbacks, None

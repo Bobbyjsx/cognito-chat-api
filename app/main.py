@@ -83,12 +83,14 @@ async def _init_ai_stack(app: FastAPI):
         SmartModelRouter,
     )
     from app.integrations.cloud_tasks import CloudTasksDispatcher
-    from app.providers.gemini import GeminiProvider
+    from app.providers.registry import create_default_provider_registry
     from app.tools.registry import ToolRegistry
 
-    # Initialize Provider
-    app.state.provider = GeminiProvider(api_key=settings.gemini_api_key)
-    logger.info("Initialized GeminiProvider with provided API key.")
+    # Initialize Provider Registry
+    provider_registry = create_default_provider_registry(settings)
+    app.state.provider_registry = provider_registry
+    app.state.provider = provider_registry.get("gemini")
+    logger.info("Initialized ProviderRegistry with Gemini and other configured providers.")
 
     # Initialize CloudTasksDispatcher only if worker_provider is 'cloudtasks'
     if settings.worker_provider.lower() == "cloudtasks":
@@ -115,6 +117,7 @@ async def _init_ai_stack(app: FastAPI):
     composite_analyzer = CompositeRequestAnalyzer(
         primary_analyzer=flash_analyzer,
         fallback_analyzer=heuristic_analyzer,
+        prefer_heuristic=True,
     )
     app.state.smart_router = SmartModelRouter(analyzer=composite_analyzer)
 

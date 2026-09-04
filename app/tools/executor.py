@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator
+from typing import Any
 
 from app.providers.base import (
+    BaseProvider,
     ContentPart,
     GenerationConfig,
     GenerationEvent,
@@ -36,10 +38,26 @@ MAX_TOOL_ITERATIONS = 4
 
 
 class ToolExecutor:
-    def __init__(self, registry: ToolRegistry, provider, max_iterations: int = MAX_TOOL_ITERATIONS):
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        provider: BaseProvider | Any | None = None,
+        max_iterations: int = MAX_TOOL_ITERATIONS,
+    ):
         self.registry = registry
+        if provider is None:
+            from app.providers.registry import create_default_provider_registry
+
+            provider = create_default_provider_registry()
         self.provider = provider
         self.max_iterations = max_iterations
+
+    def _resolve_provider(self, model: str) -> BaseProvider:
+        from app.providers.registry import ProviderRegistry
+
+        if isinstance(self.provider, ProviderRegistry):
+            return self.provider.get_for_model(model)
+        return self.provider
 
     # ── streaming path ────────────────────────────────────────────────────────
 
@@ -50,9 +68,10 @@ class ToolExecutor:
         config: GenerationConfig | None = None,
     ) -> AsyncIterator[GenerationEvent]:
         """Yields generation events, executing function tools mid-stream."""
+        provider = self._resolve_provider(model)
         for _ in range(self.max_iterations):
             function_calls = []
-            async for event in self.provider.generate_stream(model, contents, config):
+            async for event in provider.generate_stream(model, contents, config):
                 yield event
                 if event.type == "tool_call" and event.tool_call is not None and event.tool_call.kind == "function":
                     function_calls.append(event.tool_call)
@@ -78,8 +97,9 @@ class ToolExecutor:
     ) -> GenerationResult:
         """Generate a complete response, executing function tools between
         rounds. Returns the final model result (no tool calls pending)."""
+        provider = self._resolve_provider(model)
         for _ in range(self.max_iterations):
-            result = await self.provider.generate(model, contents, config)
+            result = await provider.generate(model, contents, config)
             function_calls = [call for call in result.tool_calls if call.kind == "function"]
             if not function_calls:
                 return result
@@ -136,16 +156,19 @@ class ToolExecutor:
     ) -> list[ContentPart]:
         """Append the model's function-call parts and the app's function
         responses so the provider can continue the conversation."""
-        model_parts = [
-            {
-                "function_call": {
-                    "id": call.id,
-                    "name": call.name,
-                    "args": call.args or {},
-                }
+        model_parts = []
+        for call in function_calls:
+            fc_data: dict[str, Any] = {
+                "id": call.id,
+                "name": call.name,
+                "args": call.args or {},
             }
-            for call in function_calls
-        ]
+            thought_sig = getattr(call, "thought_signature", None)
+            part_data: dict[str, Any] = {"function_call": fc_data}
+            if thought_sig is not None:
+                part_data["thought_signature"] = thought_sig
+                fc_data["thought_signature"] = thought_sig
+            model_parts.append(part_data)
         user_parts = [
             {
                 "function_response": {

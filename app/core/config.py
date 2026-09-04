@@ -1,3 +1,5 @@
+import os
+
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
 
@@ -10,6 +12,17 @@ class Settings(BaseSettings):
 
     # Explicitly define this so Pydantic expects it from the .env file
     gemini_api_key: str = ""
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    anthropic_api_key: str = ""
+    openai_api_key: str = ""
+
+    # Claude on AWS Bedrock
+    aws_bedrock_api_key: str = ""
+    aws_bearer_token_bedrock: str = ""
+    aws_region: str = "eu-west-1"
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    aws_session_token: str = ""
 
     # Database Configuration (Firebase)
     firebase_credentials_path: str = ""

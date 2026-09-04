@@ -17,10 +17,12 @@ _fire_and_forget_tasks = set()
 
 import json
 import logging
+import time
 import uuid
 from collections.abc import AsyncGenerator
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Any
 
 from fastapi import HTTPException, Request
 
@@ -35,6 +37,7 @@ from app.providers.base import (
     GenerationConfig,
     GenerationEvent,
     classify_provider_error,
+    is_retryable_provider_error,
 )
 from app.repositories.chats import ChatRepository
 from app.repositories.config import ConfigRepository
@@ -72,6 +75,7 @@ class AgentService:
         config_repo: ConfigRepository,
         attachment_service: AttachmentService,
         provider: BaseProvider | None = None,
+        provider_registry: Any | None = None,
         registry: ToolRegistry | None = None,
         executor: ToolExecutor | None = None,
         context_manager: ContextManager | None = None,
@@ -83,28 +87,42 @@ class AgentService:
         self.user_repo = user_repo
         self.config_repo = config_repo
         self.attachment_service = attachment_service
-        self.db = chat_repo.db
+        self.db = getattr(chat_repo, "db", None)
 
-        if generation_repo is None:
+        if generation_repo is None and self.db is not None:
             from app.repositories.generations import GenerationRepository
 
             generation_repo = GenerationRepository(self.db)
         self.generation_repo = generation_repo
         self.tasks_dispatcher = tasks_dispatcher
 
-        if provider is None:
-            from app.core.config import settings
-            from app.providers.gemini import GeminiProvider
+        if provider_registry is None:
+            if provider is not None:
+                from app.models.config import ModelProvider
+                from app.providers.registry import ProviderRegistry
 
-            provider = GeminiProvider(api_key=settings.gemini_api_key)
-        self.provider = provider
+                provider_registry = ProviderRegistry()
+                provider_registry.register("default", provider)
+                provider_registry.register("gemini", provider)
+                provider_registry.register("google", provider)
+                provider_registry.register(ModelProvider.GOOGLE, provider)
+                provider_registry.register("anthropic", provider)
+                provider_registry.register("claude", provider)
+                provider_registry.register(ModelProvider.ANTHROPIC, provider)
+            else:
+                from app.providers.registry import create_default_provider_registry
+
+                provider_registry = create_default_provider_registry()
+
+        self.provider_registry = provider_registry
+        self.provider = provider or provider_registry.get("gemini")
 
         if registry is None:
             registry = ToolRegistry()
             registry.register_defaults()
         self.registry = registry
 
-        self.executor = executor or ToolExecutor(self.registry, self.provider)
+        self.executor = executor or ToolExecutor(self.registry, self.provider_registry)
         self.context_manager = context_manager or ContextManager()
 
         if router is None:
@@ -142,12 +160,13 @@ class AgentService:
         effective_routing_mode = routing_mode
         effective_reasoning = requested_reasoning
 
-        # When smart routing is used, normalize any policy/effort passed
+        # When model is 'auto' (not explicit), use reasoning as the routing policy.
+        # When model is explicit, reasoning acts as the model reasoning effort.
+        # This unifies both into `reasoning`, making `routing_mode` redundant.
         if not is_explicit and requested_reasoning:
             norm_policy = normalize_reasoning_level(requested_reasoning)
             if norm_policy:
                 effective_routing_mode = effective_routing_mode or norm_policy.value
-                effective_reasoning = None
 
         if is_explicit:
             model = requested_model
@@ -156,7 +175,7 @@ class AgentService:
                     status_code=400,
                     detail=f"Model '{model}' is not in the allowed text models list: {cfg.allowed_text_models}",
                 )
-            fallbacks = [m for m in cfg.allowed_text_models if m != model]
+            fallbacks = [m for m in cfg.allowed_text_models if m != model and m.lower() != "auto"]
         elif cfg.enable_smart_routing and self.router and message_text:
             model, fallbacks, decision = await self.router.route_or_default(
                 message=message_text,
@@ -165,9 +184,14 @@ class AgentService:
                 policy=effective_routing_mode,
                 config=cfg,
             )
+            fallbacks = [m for m in fallbacks if m != model and m.lower() != "auto"]
         else:
             model = cfg.default_text_model
-            fallbacks = [m for m in cfg.allowed_text_models if m != model]
+            fallbacks = [m for m in cfg.allowed_text_models if m != model and m.lower() != "auto"]
+
+        # Ensure model is never virtual 'auto'
+        if model.lower() == "auto":
+            model = cfg.default_text_model if cfg.default_text_model.lower() != "auto" else "gemini-3.5-flash"
 
         allowed_for_model = cfg.get_reasoning_modes_for_model(model)
         allowed_vals = [m.value if isinstance(m, Enum) else str(m) for m in allowed_for_model]
@@ -226,26 +250,47 @@ class AgentService:
 
         thinking_budget = _REASONING_BUDGETS.get(reasoning, 0)
 
-        # Smart tool filtering: only attach heavy external tools (code_exec / google_search) when explicitly required
-        if decision and decision.analysis:
-            analysis = decision.analysis
-            from app.models.config import ToolName
+        # Smart tool filtering: dynamically attach tools (code_exec / google_search) based on request requirements
+        analysis = decision.analysis if decision else None
+        if analysis is None and message_text and self.router:
+            try:
+                from app.ai.router.analyzer import BaseRequestAnalyzer
 
-            if analysis.coding_required >= 0.4 or analysis.task_type.value == "coding":
-                allowed_tools = [t for t in cfg.allowed_tools if t != ToolName.GOOGLE_SEARCH]
-            elif analysis.web_required:
-                allowed_tools = [t for t in cfg.allowed_tools if t != ToolName.CODE_EXECUTION]
+                analyzer = getattr(self.router, "analyzer", None)
+                heuristic = getattr(analyzer, "fallback_analyzer", None) or getattr(
+                    self.router, "heuristic_analyzer", None
+                )
+                if isinstance(heuristic, BaseRequestAnalyzer):
+                    analysis = await heuristic.analyze(message_text, context=context)
+                elif analyzer and hasattr(analyzer, "analyze"):
+                    analysis = await analyzer.analyze(message_text, context=context)
+            except Exception as exc:
+                logger.warning("[AgentService] Dynamic request analysis for tools failed: %s", exc)
+
+        model_cfg = cfg.models_list.get(model)
+        supports_search = model_cfg.supports_web_search if model_cfg else True
+        supports_code = model_cfg.supports_code_execution if model_cfg else True
+
+        from app.models.config import ToolName
+
+        if analysis:
+            if (analysis.coding_required >= 0.4 or analysis.task_type.value == "coding") and supports_code:
+                allowed_tools = [t for t in cfg.allowed_tools if t == ToolName.CODE_EXECUTION]
+            elif (
+                analysis.web_required or analysis.task_type.value in ("general_knowledge", "information")
+            ) and supports_search:
+                allowed_tools = [t for t in cfg.allowed_tools if t == ToolName.GOOGLE_SEARCH]
             else:
                 allowed_tools = [
                     t for t in cfg.allowed_tools if t not in (ToolName.CODE_EXECUTION, ToolName.GOOGLE_SEARCH)
                 ]
             tool_configs = self.registry.to_provider_configs([t.value for t in allowed_tools])
         else:
-            from app.models.config import ToolName
-
             allowed_tools = list(cfg.allowed_tools)
-            if ToolName.CODE_EXECUTION in allowed_tools and ToolName.GOOGLE_SEARCH in allowed_tools:
+            if not supports_code:
                 allowed_tools = [t for t in allowed_tools if t != ToolName.CODE_EXECUTION]
+            if not supports_search:
+                allowed_tools = [t for t in allowed_tools if t != ToolName.GOOGLE_SEARCH]
             tool_configs = self.registry.to_provider_configs([t.value for t in allowed_tools])
 
         logger.info(
@@ -422,6 +467,7 @@ class AgentService:
                 "type": "tool_call",
                 "tool_name": call.name,
                 "tool_call_id": call.id,
+                "args": call.args,
                 "input": call.args,
             }
         if event.type == "tool_result" and event.tool_result is not None:
@@ -500,10 +546,11 @@ class AgentService:
         )
 
         # Attempt primary model with fallback candidates if available
-        models_to_attempt = [model] + [m for m in fallbacks if m != model]
+        models_to_attempt = [m for m in [model] + [m for m in fallbacks if m != model] if m and m.lower() != "auto"]
         result = None
         used_model = model
         last_exc = None
+        gen_start_time = time.perf_counter()
 
         for attempt_idx, candidate_model in enumerate(models_to_attempt):
             try:
@@ -513,19 +560,29 @@ class AgentService:
             except Exception as exc:
                 last_exc = exc
                 await blacklist_model(candidate_model)
-                if attempt_idx < len(models_to_attempt) - 1:
+                is_retryable = is_retryable_provider_error(exc)
+
+                if attempt_idx < len(models_to_attempt) - 1 and is_retryable:
                     logger.warning(
-                        "Generation with model '%s' failed (%s). Attempting fallback '%s'.",
+                        "Generation with model '%s' failed with retryable error (%s). Attempting fallback '%s'.",
                         candidate_model,
                         exc,
                         models_to_attempt[attempt_idx + 1],
                     )
                 else:
-                    logger.exception(
-                        "Model generation failed session_id=%s model=%s",
-                        session_id,
-                        candidate_model,
-                    )
+                    if not is_retryable:
+                        logger.warning(
+                            "Generation with model '%s' failed with non-retryable error (%s). Bypassing fallbacks.",
+                            candidate_model,
+                            exc,
+                        )
+                    else:
+                        logger.exception(
+                            "Model generation failed session_id=%s model=%s",
+                            session_id,
+                            candidate_model,
+                        )
+                    break
 
         if result is None and last_exc is not None:
             status, error_code, message = classify_provider_error(last_exc)
@@ -541,7 +598,24 @@ class AgentService:
             ) from last_exc
 
         assert result is not None
-        await self.chat_repo.add_message(session_id, role=MessageRole.AGENT, content=result.text)
+        proc_parts: list[dict[str, Any]] = []
+        if getattr(result, "tool_calls", None):
+            for call in result.tool_calls:
+                proc_parts.append(
+                    {
+                        "type": "dynamic-tool",
+                        "toolName": call.name,
+                        "tool_name": call.name,
+                        "toolCallId": call.id,
+                        "tool_call_id": call.id,
+                        "state": "output-available",
+                        "input": call.args or {},
+                        "output": {},
+                    }
+                )
+        if result.text:
+            proc_parts.append({"type": "text", "text": result.text})
+        await self.chat_repo.add_message(session_id, role=MessageRole.AGENT, content=result.text, parts=proc_parts)
 
         within_limit = await self._charge_usage(user, result.total_tokens, active_config)
         if not within_limit:
@@ -555,11 +629,16 @@ class AgentService:
         await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user.id))
         await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))
 
+        duration_ms = (time.perf_counter() - gen_start_time) * 1000.0
+        provider_name = getattr(self.provider_registry.get_for_model(used_model, active_config), "name", "unknown")
+
         logger.info(
-            "[AgentService] Chat completed: session_id=%s, model='%s', tokens=%d, response='%s...'",
+            "[AgentService] Chat completed: session_id=%s, provider='%s', model='%s', tokens=%d, duration=%.1fms, response='%s...'",
             session_id,
+            provider_name,
             used_model,
             result.total_tokens,
+            duration_ms,
             result.text[:80].replace("\n", " ") if result.text else "",
         )
 
@@ -711,6 +790,12 @@ class AgentService:
                 _fire_and_forget_tasks.add(_abandon_task)
                 _abandon_task.add_done_callback(_fire_and_forget_tasks.discard)
             raise
+        except Exception as prep_exc:
+            if state is not None:
+                state["handled"] = True
+            detail = prep_exc.detail if isinstance(prep_exc, HTTPException) else str(prep_exc)
+            yield f"event: error\ndata: {json.dumps({'error': detail})}\n\n"
+            return
 
         try:
             yield f"event: session\ndata: {json.dumps({'session_id': str(session_id), 'title': title})}\n\n"
@@ -724,18 +809,22 @@ class AgentService:
                 tool_configs=tool_configs,
             )
 
-            models_to_attempt = [model] + [m for m in fallbacks if m != model]
+            models_to_attempt = [m for m in [model] + [m for m in fallbacks if m != model] if m and m.lower() != "auto"]
             used_model = model
             last_exc = None
             has_yielded_chunks = False
             full_response = ""
             full_thoughts = ""
             total_tokens = 0
+            stream_start_time = time.perf_counter()
+            ttft_ms: float | None = None
 
+            collected_tools: dict[str, dict[str, Any]] = {}
             for attempt_idx, candidate_model in enumerate(models_to_attempt):
                 full_response = ""
                 full_thoughts = ""
                 total_tokens = 0
+                collected_tools = {}
                 used_model = candidate_model
                 last_exc = None
 
@@ -747,6 +836,9 @@ class AgentService:
 
                 try:
                     async for event in self.executor.generate_stream(candidate_model, contents, generation_config):
+                        if (event.type in ("text", "reasoning")) and ttft_ms is None:
+                            ttft_ms = (time.perf_counter() - stream_start_time) * 1000.0
+
                         if event.type == "text":
                             chunk = event.token or ""
                             full_response += chunk
@@ -760,6 +852,39 @@ class AgentService:
                                 state["buffered_thoughts"] = full_thoughts
                             yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
                             has_yielded_chunks = True
+                        elif event.type == "tool_call":
+                            call = event.tool_call
+                            if call:
+                                collected_tools[call.id] = {
+                                    "type": "dynamic-tool",
+                                    "toolName": call.name,
+                                    "tool_name": call.name,
+                                    "toolCallId": call.id,
+                                    "tool_call_id": call.id,
+                                    "state": "output-available",
+                                    "input": call.args or {},
+                                    "output": {},
+                                }
+                            yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
+                            has_yielded_chunks = True
+                        elif event.type == "tool_result":
+                            res = event.tool_result
+                            if res:
+                                if res.id in collected_tools:
+                                    collected_tools[res.id]["output"] = res.output or {}
+                                else:
+                                    collected_tools[res.id] = {
+                                        "type": "dynamic-tool",
+                                        "toolName": res.name,
+                                        "tool_name": res.name,
+                                        "toolCallId": res.id,
+                                        "tool_call_id": res.id,
+                                        "state": "output-available",
+                                        "input": {},
+                                        "output": res.output or {},
+                                    }
+                            yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
+                            has_yielded_chunks = True
                         elif event.type == "usage" and event.total_tokens:
                             total_tokens = event.total_tokens
                             yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
@@ -771,13 +896,57 @@ class AgentService:
                 except Exception as exc:
                     last_exc = exc
                     await blacklist_model(candidate_model)
+                    is_retryable = is_retryable_provider_error(exc)
                     logger.warning(
-                        "[AgentService] Provider generate_stream failed for model='%s': %s",
+                        "[AgentService] Provider generate_stream failed for model='%s' (retryable=%s): %s",
                         candidate_model,
+                        is_retryable,
                         exc,
                     )
-                    if has_yielded_chunks or attempt_idx >= len(models_to_attempt) - 1:
+                    if has_yielded_chunks or attempt_idx >= len(models_to_attempt) - 1 or not is_retryable:
                         break
+
+            if not full_response.strip() and last_exc is None:
+                logger.warning(
+                    "[AgentService] Model '%s' generated thoughts but no text response. Triggering fallback recovery...",
+                    used_model,
+                )
+                try:
+                    recovery_config = GenerationConfig(
+                        system_instruction=generation_config.system_instruction,
+                        thinking_budget=0,
+                        include_thoughts=False,
+                        tool_configs=generation_config.tool_configs,
+                    )
+                    recovery_res = await self.executor.generate(used_model, contents, recovery_config)
+                    if recovery_res and recovery_res.text:
+                        full_response = recovery_res.text
+                        yield f"event: chunk\ndata: {json.dumps(self._serialize_event(GenerationEvent(type='text', token=full_response)))}\n\n"
+                        if recovery_res.total_tokens:
+                            total_tokens = max(total_tokens, recovery_res.total_tokens)
+                except Exception as rec_exc:
+                    logger.error("[AgentService] Recovery generation failed: %s", rec_exc)
+
+            final_parts: list[dict[str, Any]] = []
+            if full_response.strip():
+                final_parts.append({"type": "text", "text": full_response})
+
+            # Extract and persist ONLY sources (do not persist thoughts or tool calls across reloads)
+            extracted_sources: list[dict[str, str]] = []
+            seen_source_urls: set[str] = set()
+            for tool_item in collected_tools.values():
+                tool_output = tool_item.get("output") or {}
+                raw_sources = tool_output.get("sources") or []
+                if isinstance(raw_sources, list):
+                    for src in raw_sources:
+                        if isinstance(src, dict):
+                            url = src.get("uri") or src.get("url") or ""
+                            if url and url not in seen_source_urls:
+                                seen_source_urls.add(url)
+                                title = src.get("title") or "Web Source"
+                                extracted_sources.append({"title": title, "url": url, "uri": url})
+            if extracted_sources:
+                final_parts.append({"type": "sources", "sources": extracted_sources})
 
             if last_exc is not None:
                 status, error_code, message = classify_provider_error(last_exc)
@@ -799,6 +968,7 @@ class AgentService:
                         role=MessageRole.AGENT,
                         content=full_response,
                         error=f"[{error_code}] {message}",
+                        parts=final_parts,
                     )
                 else:
                     await self.chat_repo.update_message(
@@ -815,7 +985,12 @@ class AgentService:
 
             # Concurrently ensure agent response is stored, quota is charged, and cache is evicted
             try:
-                await self.chat_repo.add_message(session_id, role=MessageRole.AGENT, content=full_response)
+                await self.chat_repo.add_message(
+                    session_id,
+                    role=MessageRole.AGENT,
+                    content=full_response,
+                    parts=final_parts,
+                )
             except Exception as e:
                 logger.error("Failed to add agent message: %s", e)
 
@@ -834,11 +1009,21 @@ class AgentService:
                 yield self._error_event("Token limit exceeded after generation. Please upgrade your plan.")
                 return
 
+            total_duration_ms = (time.perf_counter() - stream_start_time) * 1000.0
+            provider_name = (
+                getattr(self.provider_registry.get_for_model(used_model, active_config), "name", "unknown")
+                if hasattr(self, "provider_registry")
+                else "unknown"
+            )
+
             logger.info(
-                "[AgentService] Stream chat completed: session_id=%s, model='%s', tokens=%d, full_response='%s...'",
+                "[AgentService] Stream chat completed: session_id=%s, provider='%s', model='%s', tokens=%d, TTFT=%.1fms, total_duration=%.1fms, full_response='%s...'",
                 session_id,
+                provider_name,
                 used_model,
                 total_tokens,
+                ttft_ms if ttft_ms is not None else 0.0,
+                total_duration_ms,
                 full_response[:80].replace("\n", " ") if full_response else "",
             )
 

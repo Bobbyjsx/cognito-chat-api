@@ -43,6 +43,7 @@ async def migrate():
     for model_name, default_model_cfg in default_config.models_list.items():
         if model_name in models_list:
             item = dict(models_list[model_name])
+            item["enabled"] = default_model_cfg.enabled
             item["reasoning_modes"] = [
                 mode.value if isinstance(mode, ReasoningLevel) else str(mode)
                 for mode in default_model_cfg.reasoning_modes

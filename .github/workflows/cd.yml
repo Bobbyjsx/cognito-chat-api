@@ -1,0 +1,77 @@
+name: CD - Database Migrations
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+      feature:
+        description: 'Specific feature migration to run (default: "all")'
+        required: false
+        default: 'all'
+
+concurrency:
+  group: cd-migrations-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    name: Run Database Migrations
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Set up Environment
+        run: |
+          cp -n .env.example .env || true
+
+      - name: Configure Firebase / GCP Credentials
+        env:
+          FIREBASE_CREDENTIALS: ${{ secrets.FIREBASE_CREDENTIALS || secrets.GCP_SA_KEY || secrets.GOOGLE_APPLICATION_CREDENTIALS }}
+          FIREBASE_CREDENTIALS_BASE64: ${{ secrets.FIREBASE_CREDENTIALS_BASE64 }}
+        run: |
+          if [ -n "$FIREBASE_CREDENTIALS" ]; then
+            echo "$FIREBASE_CREDENTIALS" > firebase-credentials.json
+            chmod 600 firebase-credentials.json
+            echo "FIREBASE_CREDENTIALS_PATH=firebase-credentials.json" >> $GITHUB_ENV
+            echo "GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/firebase-credentials.json" >> $GITHUB_ENV
+            echo "Successfully configured credentials from secret."
+          elif [ -n "$FIREBASE_CREDENTIALS_BASE64" ]; then
+            echo "$FIREBASE_CREDENTIALS_BASE64" | base64 -d > firebase-credentials.json
+            chmod 600 firebase-credentials.json
+            echo "FIREBASE_CREDENTIALS_PATH=firebase-credentials.json" >> $GITHUB_ENV
+            echo "GOOGLE_APPLICATION_CREDENTIALS=$(pwd)/firebase-credentials.json" >> $GITHUB_ENV
+            echo "Successfully configured base64 credentials from secret."
+          else
+            echo "Warning: No Firebase credentials secret found. Relying on default GCP environment."
+          fi
+
+      - name: Execute Migrations
+        env:
+          PYTHONPATH: "."
+          FIRESTORE_DATABASE: ${{ secrets.FIRESTORE_DATABASE || 'cognito-prod-db' }}
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT || 'project-atlas-501612' }}
+          REDIS_URL: ${{ secrets.REDIS_URL }}
+        run: |
+          FEATURE="${{ github.event.inputs.feature || 'all' }}"
+          echo "Running database migrations for: $FEATURE"
+          python scripts/migrate.py "$FEATURE"
+
+      - name: Secure Cleanup
+        if: always()
+        run: |
+          rm -f firebase-credentials.json

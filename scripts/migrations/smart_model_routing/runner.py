@@ -10,6 +10,8 @@ Migrations in order:
      Verifies and populates complete model descriptions and capability score metadata.
   3. 003_migrate_unified_effort_modes (Date: 2026-04-10):
      Unifies reasoning effort levels and routing policies to ['fast', 'balanced', 'extended'] and clears Redis cache.
+  4. 004_configure_claude_models (Date: 2026-09-04):
+     Configures the canonical 3 Claude models (haiku, sonnet-3.5, sonnet-3.7) in Firestore app_config.
 """
 
 import asyncio
@@ -36,6 +38,12 @@ MIGRATION_STEPS = [
         "2026-04-10",
         "Unify reasoning effort levels to ['fast', 'balanced', 'extended'] and invalidate Redis cache",
         "scripts.migrations.smart_model_routing.003_migrate_unified_effort_modes",
+    ),
+    (
+        "004_configure_claude_models",
+        "2026-09-04",
+        "Configure canonical 3 Claude models in Firestore app_config and invalidate Redis cache",
+        "scripts.migrations.smart_model_routing.004_configure_claude_models",
     ),
 ]
 

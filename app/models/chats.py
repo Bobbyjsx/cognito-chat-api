@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -61,6 +62,7 @@ class ChatMessageDB(BaseModel):
     error: str | None = None
     attachment_ids: list[str] = Field(default_factory=list)
     generation_id: UUID | None = None
+    parts: list[dict[str, Any]] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -96,10 +98,12 @@ class ChatResponse(BaseModel):
 
 
 class MessageSchema(BaseModel):
+    id: UUID | None = None
     role: MessageRole
     content: str
     error: str | None = None
     attachment_ids: list[str] = Field(default_factory=list)
+    parts: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ChatSessionSchema(BaseModel):
