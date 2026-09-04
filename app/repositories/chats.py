@@ -4,10 +4,9 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
+from google.cloud import firestore
 from google.cloud.firestore_v1.async_client import AsyncClient
 from google.cloud.firestore_v1.base_query import FieldFilter
-
-from google.cloud import firestore
 
 from app.models.chats import ChatMessageDB, ChatSessionDB, MessageRole, ReadStatus, clip_session_preview
 
