@@ -191,7 +191,7 @@ async def get_current_user(
 
     # Cache user auth for 120 seconds
     try:
-        await redis_cache.set(CacheKeys.user_auth(user_id), user, expire=120)
+        await redis_cache.set(CacheKeys.user_auth(user_id), user, expire=1800)
     except Exception as exc:
         logger.debug("Failed to cache user in Redis: %s", exc)
 

@@ -5,6 +5,14 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
+SESSION_LIST_PREVIEW_CHARS = 280
+
+
+def clip_session_preview(content: str | None) -> str | None:
+    if not isinstance(content, str) or len(content) <= SESSION_LIST_PREVIEW_CHARS:
+        return content
+    return content[:SESSION_LIST_PREVIEW_CHARS].rstrip() + "…"
+
 
 class MessageRole(str, Enum):
     """Supported roles in a chat conversation."""

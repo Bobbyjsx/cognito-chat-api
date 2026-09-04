@@ -27,6 +27,7 @@ from app.models.chats import (
     CreateSharedChatResponse,
     ReadStatus,
     SharedChatResponse,
+    clip_session_preview,
 )
 from app.models.pagination import PaginatedResponse
 from app.models.users import UserDB
@@ -45,6 +46,13 @@ from app.tools.registry import ToolRegistry
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/agent", tags=["agent"])
+
+
+def _clip_session_list_item(s_dict: dict) -> dict:
+    merged = dict(s_dict)
+    merged.pop("messages", None)
+    merged["last_message_content"] = clip_session_preview(merged.get("last_message_content"))
+    return merged
 
 
 class AgentStreamingResponse(StreamingResponse):
@@ -181,22 +189,18 @@ async def list_sessions(
             gen_repo.get_active_generations_for_user(current_user.id),
         )
         sessions, has_more, total = sessions_res
-        sessions_data = [s.model_dump(mode="json") for s in sessions]
+        sessions_data = [_clip_session_list_item(s.model_dump(mode="json")) for s in sessions]
         await redis_cache.set(
             cache_key,
             {"sessions": sessions_data, "has_more": has_more, "total": total},
             expire=300,
         )
 
-    # Merge active_generation_id into each session item
     items = []
     for s_dict in sessions_data:
-        merged = dict(s_dict)
+        merged = _clip_session_list_item(s_dict)
         sid = str(s_dict.get("id", ""))
-        if sid in active_gens:
-            merged["active_generation_id"] = active_gens[sid]
-        else:
-            merged["active_generation_id"] = None
+        merged["active_generation_id"] = active_gens.get(sid)
         items.append(ChatSessionListSchema(**merged))
 
     return PaginatedResponse(items=items, total=total, limit=limit, offset=offset, has_more=has_more)

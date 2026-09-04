@@ -7,9 +7,14 @@ from uuid import UUID
 from google.cloud.firestore_v1.async_client import AsyncClient
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from app.models.chats import ChatMessageDB, ChatSessionDB, MessageRole, ReadStatus
+from google.cloud import firestore
+
+from app.models.chats import ChatMessageDB, ChatSessionDB, MessageRole, ReadStatus, clip_session_preview
 
 logger = logging.getLogger(__name__)
+
+# Extra docs to absorb soft-deleted rows that still sit in the ordered index.
+_LIST_DELETED_SLACK = 8
 
 
 class ChatRepository:
@@ -42,7 +47,6 @@ class ChatRepository:
         self, session_id: UUID | str, user_id: UUID | str, limit: int = 10, offset: int = 0
     ) -> tuple[ChatSessionDB | None, bool]:
         doc_ref = self.collection.document(str(session_id))
-        from google.cloud import firestore
 
         messages_query = (
             doc_ref.collection("messages")
@@ -79,40 +83,78 @@ class ChatRepository:
 
         return session, has_more
 
+    def _session_from_doc(self, data: dict[str, Any] | None) -> ChatSessionDB | None:
+        if not data or data.get("is_deleted") is True:
+            return None
+        return ChatSessionDB(**data)
+
     async def get_user_sessions(
         self, user_id: UUID | str, search_query: str | None = None, limit: int = 10, offset: int = 0
     ) -> tuple[list[ChatSessionDB], bool, int]:
-        sessions = []
-        docs = self.collection.where(filter=FieldFilter("user_id", "==", str(user_id))).stream()
+        limit = max(1, limit)
+        offset = max(0, offset)
         q_lower = search_query.strip().lower() if search_query and search_query.strip() else None
+        if q_lower:
+            return await self._search_user_sessions(user_id, q_lower, limit, offset)
+        return await self._list_user_sessions(user_id, limit, offset)
 
+    async def _list_user_sessions(
+        self, user_id: UUID | str, limit: int, offset: int
+    ) -> tuple[list[ChatSessionDB], bool, int]:
+        query = (
+            self.collection.where(filter=FieldFilter("user_id", "==", str(user_id)))
+            .order_by("updated_at", direction=firestore.Query.DESCENDING)
+            .limit(offset + limit + 1 + _LIST_DELETED_SLACK)
+        )
+        sessions: list[ChatSessionDB] = []
+        skipped = 0
+        async for doc in query.stream():
+            session = self._session_from_doc(doc.to_dict())
+            if session is None:
+                continue
+            if skipped < offset:
+                skipped += 1
+                continue
+            sessions.append(session)
+            if len(sessions) > limit:
+                break
+
+        has_more = len(sessions) > limit
+        if has_more:
+            sessions = sessions[:limit]
+        total = offset + len(sessions) + (1 if has_more else 0)
+        return sessions, has_more, total
+
+    async def _search_user_sessions(
+        self, user_id: UUID | str, q_lower: str, limit: int, offset: int
+    ) -> tuple[list[ChatSessionDB], bool, int]:
+        docs = (
+            self.collection.where(filter=FieldFilter("user_id", "==", str(user_id)))
+            .order_by("updated_at", direction=firestore.Query.DESCENDING)
+            .stream()
+        )
+        sessions: list[ChatSessionDB] = []
         async for doc in docs:
-            data = doc.to_dict() or {}
-            if not data or data.get("is_deleted") is True:
+            session = self._session_from_doc(doc.to_dict())
+            if session is None:
                 continue
 
-            session = ChatSessionDB(**data)
-
-            if q_lower:
-                title_match = bool(session.title and q_lower in session.title.lower())
-                content_match = bool(session.last_message_content and q_lower in session.last_message_content.lower())
-
-                if not (title_match or content_match):
-                    # Deep search message history using async stream
-                    messages_ref = self.collection.document(str(session.id)).collection("messages")
-                    deep_match = False
-                    async for msg_doc in messages_ref.stream():
-                        msg_data = msg_doc.to_dict() or {}
-                        msg_content = msg_data.get("content", "")
-                        if msg_content and q_lower in msg_content.lower():
-                            deep_match = True
-                            break
-                    if not deep_match:
-                        continue
+            title_match = bool(session.title and q_lower in session.title.lower())
+            content_match = bool(session.last_message_content and q_lower in session.last_message_content.lower())
+            if not (title_match or content_match):
+                messages_ref = self.collection.document(str(session.id)).collection("messages")
+                deep_match = False
+                async for msg_doc in messages_ref.stream():
+                    msg_data = msg_doc.to_dict() or {}
+                    msg_content = msg_data.get("content", "")
+                    if msg_content and q_lower in msg_content.lower():
+                        deep_match = True
+                        break
+                if not deep_match:
+                    continue
 
             sessions.append(session)
 
-        sessions.sort(key=lambda s: s.updated_at, reverse=True)
         total = len(sessions)
         paginated_sessions = sessions[offset : offset + limit]
         has_more = offset + limit < total
@@ -183,7 +225,7 @@ class ChatRepository:
                 session_ref,
                 {
                     "updated_at": datetime.now(timezone.utc).isoformat(),
-                    "last_message_content": content or (error or "Error responding"),
+                    "last_message_content": clip_session_preview(content or (error or "Error responding")),
                     "last_message_role": role_val,
                     "read_status": read_status.value,
                 },
