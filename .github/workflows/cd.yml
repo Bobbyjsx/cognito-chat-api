@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - master
+    paths:
+      - 'scripts/migrations/**'
+      - 'scripts/migrate.py'
   workflow_dispatch:
     inputs:
       feature:
