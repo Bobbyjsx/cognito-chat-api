@@ -1,6 +1,6 @@
 import asyncio
-from datetime import datetime, timezone
 import logging
+from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
 from google.cloud.firestore_v1.async_client import AsyncClient
@@ -82,7 +82,7 @@ class SharedChatRepository:
                 try:
                     return datetime.fromisoformat(val)
                 except Exception:
-                    pass
+                    logger.error(f"Invalid created_at value: {val}")
             return now
 
         raw_msgs.sort(key=_parse_created_at)
