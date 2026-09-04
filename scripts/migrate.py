@@ -15,6 +15,7 @@ Examples:
   python scripts/migrate.py user-auth
   python scripts/migrate.py speech-to-text
   python scripts/migrate.py core-config
+  python scripts/migrate.py chat-sessions
   python scripts/migrate.py all
 """
 
@@ -26,6 +27,7 @@ import sys
 # Ensure project root is on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from scripts.migrations.chat_sessions import runner as chat_sessions_runner
 from scripts.migrations.core_config import runner as core_config_runner
 from scripts.migrations.smart_model_routing import runner as smart_model_routing_runner
 from scripts.migrations.speech_to_text import runner as speech_to_text_runner
@@ -52,6 +54,11 @@ FEATURES = {
         "aliases": ["smart_model_routing", "routing", "models", "reasoning"],
         "runner": smart_model_routing_runner,
         "description": "Structured models_list, capability scoring, and unified effort levels",
+    },
+    "chat-sessions": {
+        "aliases": ["chat_sessions", "sessions", "session-list", "session-preview"],
+        "runner": chat_sessions_runner,
+        "description": "Session list documents and denormalized last_message_content previews",
     },
 }
 

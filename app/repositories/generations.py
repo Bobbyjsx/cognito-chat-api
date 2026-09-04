@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import logging
+import time
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -14,6 +15,8 @@ logger = logging.getLogger(__name__)
 
 # Maximum allowed duration (in seconds) for a generation before auto-marking as failed
 GENERATION_TIMEOUT_SECONDS = settings.generation_timeout_seconds
+_ACTIVE_GENS_TTL_SECONDS = 1.5
+_active_gens_memo: dict[str, tuple[float, dict[str, str]]] = {}
 
 
 class GenerationRepository:
@@ -22,6 +25,12 @@ class GenerationRepository:
         self.collection = self.db.collection("generations")
 
     async def get_active_generations_for_user(self, user_id: UUID | str) -> dict[str, str]:
+        memo_key = str(user_id)
+        hit = _active_gens_memo.get(memo_key)
+        now_mono = time.monotonic()
+        if hit and now_mono - hit[0] < _ACTIVE_GENS_TTL_SECONDS:
+            return dict(hit[1])
+
         docs = (
             self.collection.where(filter=FieldFilter("user_id", "==", str(user_id)))
             .where(
@@ -35,6 +44,7 @@ class GenerationRepository:
                     ],
                 )
             )
+            .limit(50)
             .stream()
         )
         mapping = {}
@@ -65,6 +75,9 @@ class GenerationRepository:
                         continue
             if session_id:
                 mapping[str(session_id)] = str(doc.id)
+        if len(_active_gens_memo) > 1024:
+            _active_gens_memo.clear()
+        _active_gens_memo[memo_key] = (now_mono, mapping)
         return mapping
 
     async def get_active_generation(self, session_id: UUID | str) -> GenerationDB | None:

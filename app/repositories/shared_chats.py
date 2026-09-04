@@ -14,6 +14,7 @@ from app.models.chats import (
     ReadStatus,
     SharedChatDB,
     SharedChatMessageDB,
+    clip_session_preview,
 )
 
 logger = logging.getLogger(__name__)
@@ -321,7 +322,7 @@ class SharedChatRepository:
             user_id=str(target_user_id),
             title=shared_chat.title or "Continued Chat",
             exclude_from_memory=True,
-            last_message_content=last_content,
+            last_message_content=clip_session_preview(last_content),
             last_message_role=last_role,
             read_status=ReadStatus.READ,
         )
@@ -351,6 +352,6 @@ class SharedChatRepository:
         # Invalidate target user's sessions list cache in Redis
         await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(target_user_id))
 
-        new_session.last_message_content = last_content
+        new_session.last_message_content = clip_session_preview(last_content)
         new_session.last_message_role = last_role
         return new_session
