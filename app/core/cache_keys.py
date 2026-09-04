@@ -52,3 +52,11 @@ class CacheKeys:
     @staticmethod
     def model_blacklist(model_id: str) -> str:
         return f"blacklist:model:{model_id}"
+
+    @staticmethod
+    def shared_chat(share_id: str) -> str:
+        return f"shared:{share_id}"
+
+    @staticmethod
+    def session_share(session_id: uuid.UUID | str) -> str:
+        return f"session:share:{session_id}"

@@ -235,3 +235,26 @@ async def verify_cloud_tasks_caller(
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Unauthorized Cloud Tasks invocation",
     )
+
+
+async def get_optional_current_user(
+    request: Request,
+    response: Response,
+    db: AsyncClient = Depends(get_db),
+) -> UserDB | None:
+    """
+    Safely resolves the current user if an Authorization Bearer header is present.
+    Returns None if unauthenticated or if the token is invalid/expired without throwing.
+    """
+    auth_header = request.headers.get("Authorization") or request.headers.get("authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        return None
+
+    token = auth_header.split(" ", 1)[1].strip()
+    if not token:
+        return None
+
+    try:
+        return await get_current_user(request=request, response=response, token=token, db=db)
+    except Exception:
+        return None
