@@ -59,10 +59,9 @@ jobs:
       - name: Execute Migrations
         env:
           PYTHONPATH: "."
-          FIRESTORE_DATABASE: ${{ secrets.FIRESTORE_DATABASE || 'agy-sdk' }}
+          FIRESTORE_DATABASE: ${{ secrets.FIRESTORE_DATABASE || 'cognito-prod-db' }}
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT || 'project-atlas-501612' }}
           REDIS_URL: ${{ secrets.REDIS_URL }}
-          UPSTASH_REDIS_REST_URL: ${{ secrets.UPSTASH_REDIS_REST_URL }}
-          UPSTASH_REDIS_REST_TOKEN: ${{ secrets.UPSTASH_REDIS_REST_TOKEN }}
         run: |
           FEATURE="${{ github.event.inputs.feature || 'all' }}"
           echo "Running database migrations for: $FEATURE"
