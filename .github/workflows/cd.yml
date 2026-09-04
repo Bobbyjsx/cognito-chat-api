@@ -35,6 +35,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Set up Environment
+        run: |
+          cp -n .env.example .env || true
+
       - name: Configure Firebase / GCP Credentials
         env:
           FIREBASE_CREDENTIALS: ${{ secrets.FIREBASE_CREDENTIALS || secrets.GCP_SA_KEY || secrets.GOOGLE_APPLICATION_CREDENTIALS }}
