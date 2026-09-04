@@ -250,26 +250,42 @@ class AgentService:
 
         thinking_budget = _REASONING_BUDGETS.get(reasoning, 0)
 
-        # Smart tool filtering: only attach heavy external tools (code_exec / google_search) when explicitly required
-        if decision and decision.analysis:
-            analysis = decision.analysis
-            from app.models.config import ToolName
+        # Smart tool filtering: dynamically attach tools (code_exec / google_search) based on request requirements
+        analysis = decision.analysis if decision else None
+        if analysis is None and message_text and self.router:
+            try:
+                heuristic = getattr(self.router, "heuristic_analyzer", None) or getattr(
+                    self.router.analyzer, "fallback_analyzer", None
+                )
+                if heuristic:
+                    analysis = await heuristic.analyze(message_text, context=context)
+                else:
+                    analysis = await self.router.analyzer.analyze(message_text, context=context)
+            except Exception as exc:
+                logger.warning("[AgentService] Dynamic request analysis for tools failed: %s", exc)
 
-            if analysis.coding_required >= 0.4 or analysis.task_type.value == "coding":
-                allowed_tools = [t for t in cfg.allowed_tools if t != ToolName.GOOGLE_SEARCH]
-            elif analysis.web_required:
-                allowed_tools = [t for t in cfg.allowed_tools if t != ToolName.CODE_EXECUTION]
+        model_cfg = cfg.models_list.get(model)
+        supports_search = model_cfg.supports_web_search if model_cfg else True
+        supports_code = model_cfg.supports_code_execution if model_cfg else True
+
+        from app.models.config import ToolName
+
+        if analysis:
+            if (analysis.coding_required >= 0.4 or analysis.task_type.value == "coding") and supports_code:
+                allowed_tools = [t for t in cfg.allowed_tools if t == ToolName.CODE_EXECUTION]
+            elif analysis.web_required and supports_search:
+                allowed_tools = [t for t in cfg.allowed_tools if t == ToolName.GOOGLE_SEARCH]
             else:
                 allowed_tools = [
                     t for t in cfg.allowed_tools if t not in (ToolName.CODE_EXECUTION, ToolName.GOOGLE_SEARCH)
                 ]
             tool_configs = self.registry.to_provider_configs([t.value for t in allowed_tools])
         else:
-            from app.models.config import ToolName
-
             allowed_tools = list(cfg.allowed_tools)
-            if ToolName.CODE_EXECUTION in allowed_tools and ToolName.GOOGLE_SEARCH in allowed_tools:
+            if not supports_code:
                 allowed_tools = [t for t in allowed_tools if t != ToolName.CODE_EXECUTION]
+            if not supports_search:
+                allowed_tools = [t for t in allowed_tools if t != ToolName.GOOGLE_SEARCH]
             tool_configs = self.registry.to_provider_configs([t.value for t in allowed_tools])
 
         logger.info(
@@ -446,6 +462,7 @@ class AgentService:
                 "type": "tool_call",
                 "tool_name": call.name,
                 "tool_call_id": call.id,
+                "args": call.args,
                 "input": call.args,
             }
         if event.type == "tool_result" and event.tool_result is not None:
@@ -809,6 +826,9 @@ class AgentService:
                             full_thoughts += event.token or ""
                             if state is not None:
                                 state["buffered_thoughts"] = full_thoughts
+                            yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
+                            has_yielded_chunks = True
+                        elif event.type in ("tool_call", "tool_result"):
                             yield f"event: chunk\ndata: {json.dumps(self._serialize_event(event))}\n\n"
                             has_yielded_chunks = True
                         elif event.type == "usage" and event.total_tokens:

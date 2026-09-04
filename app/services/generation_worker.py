@@ -222,7 +222,7 @@ class GenerationWorkerService:
                         candidate_model,
                         len(contents),
                     )
-                    async for event in self.agent_service.provider.generate_stream(
+                    async for event in self.agent_service.executor.generate_stream(
                         candidate_model, contents, generation_config
                     ):
                         if event.type == "text":

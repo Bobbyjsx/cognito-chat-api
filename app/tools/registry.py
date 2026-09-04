@@ -41,9 +41,15 @@ class ToolRegistry:
         return [name for name in allowed if name in self._tools]
 
     def function_tool(self, name: str) -> BaseTool | None:
-        """Look up an app-executed (``kind == "function"``) tool by name."""
+        """Look up an app-executed (``kind == "function"`` or custom execute override) tool by name."""
         tool = self._tools.get(name)
-        return tool if tool is not None and tool.kind == "function" else None
+        if tool is None:
+            return None
+        if tool.kind == "function":
+            return tool
+        if type(tool).execute is not BaseTool.execute and tool.name != "code_execution":
+            return tool
+        return None
 
     def to_provider_configs(self, allowed: list[str] | None) -> list[dict[str, Any]]:
         """Convert enabled tools into provider-agnostic tool definitions.

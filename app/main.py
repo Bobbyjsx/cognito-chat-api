@@ -117,6 +117,7 @@ async def _init_ai_stack(app: FastAPI):
     composite_analyzer = CompositeRequestAnalyzer(
         primary_analyzer=flash_analyzer,
         fallback_analyzer=heuristic_analyzer,
+        prefer_heuristic=True,
     )
     app.state.smart_router = SmartModelRouter(analyzer=composite_analyzer)
 

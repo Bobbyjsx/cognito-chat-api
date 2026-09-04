@@ -52,8 +52,17 @@ class SmartModelRouter:
             # Default composite analyzer with Flash-Lite primary and heuristic fallback
             flash_lite = GeminiFlashLiteAnalyzer()
             heuristic = HeuristicFallbackAnalyzer()
-            analyzer = CompositeRequestAnalyzer(primary_analyzer=flash_lite, fallback_analyzer=heuristic)
+            analyzer = CompositeRequestAnalyzer(
+                primary_analyzer=flash_lite,
+                fallback_analyzer=heuristic,
+                prefer_heuristic=True,
+            )
         self.analyzer = analyzer
+        self.heuristic_analyzer = (
+            getattr(analyzer, "fallback_analyzer", None)
+            if isinstance(analyzer, CompositeRequestAnalyzer)
+            else (analyzer if isinstance(analyzer, HeuristicFallbackAnalyzer) else HeuristicFallbackAnalyzer())
+        )
 
         self.filter = candidate_filter or CandidateFilter()
         self.scorer = scorer or ScoringEngine()

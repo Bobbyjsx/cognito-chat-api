@@ -96,9 +96,69 @@ async def test_composite_analyzer_fallback():
     mock_primary = MagicMock()
     mock_primary.analyze = AsyncMock(side_effect=RuntimeError("Timeout"))
 
-    composite = CompositeRequestAnalyzer(primary_analyzer=mock_primary)
+    composite = CompositeRequestAnalyzer(primary_analyzer=mock_primary, prefer_heuristic=False)
     res = await composite.analyze("write a python script to parse logs")
     # Must seamlessly fallback to heuristic analyzer without throwing
     assert res.task_type == TaskType.CODING
-
     assert res.coding_required > 0.0
+    mock_primary.analyze.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_heuristic_analyzer_date_queries():
+    analyzer = HeuristicFallbackAnalyzer()
+    date_queries = [
+        "What's the date?",
+        "what is today's date",
+        "what day is it",
+        "what day is today",
+        "tell me the date",
+        "what time is it",
+        "what is the current date",
+    ]
+    for q in date_queries:
+        res = await analyzer.analyze(q)
+        assert res.web_required is False, f"Query '{q}' should NOT require web search"
+        assert res.tool_calling_required is False, f"Query '{q}' should NOT require tool calling"
+        assert res.task_type == TaskType.CONVERSATION
+        assert res.complexity <= 0.2
+
+
+@pytest.mark.asyncio
+async def test_heuristic_analyzer_live_search_queries():
+    analyzer = HeuristicFallbackAnalyzer()
+    search_queries = [
+        "What is the stock price of Apple right now?",
+        "What's the weather in Tokyo?",
+        "Who won the 2026 Super Bowl?",
+        "Search google for quantum computing breakthroughs",
+    ]
+    for q in search_queries:
+        res = await analyzer.analyze(q)
+        assert res.web_required is True, f"Query '{q}' should require web search"
+        assert res.tool_calling_required is True
+
+
+@pytest.mark.asyncio
+async def test_heuristic_analyzer_temporal_without_search():
+    analyzer = HeuristicFallbackAnalyzer()
+    # Mentioning 'today' or 'tomorrow' in creative/coding/general text should NOT trigger web search
+    res1 = await analyzer.analyze("Today I want to write a story about an adventurous kitten")
+    assert res1.web_required is False
+
+    res2 = await analyzer.analyze("Can you write a python script for my project today?")
+    assert res2.web_required is False
+    assert res2.task_type == TaskType.CODING
+
+
+@pytest.mark.asyncio
+async def test_composite_analyzer_prefers_heuristic():
+    mock_primary = MagicMock()
+    mock_primary.analyze = AsyncMock()
+
+    composite = CompositeRequestAnalyzer(primary_analyzer=mock_primary, prefer_heuristic=True)
+    res = await composite.analyze("What's the date?")
+    # Must NOT call primary analyzer for confident heuristic queries
+    mock_primary.analyze.assert_not_called()
+    assert res.web_required is False
+    assert res.task_type == TaskType.CONVERSATION

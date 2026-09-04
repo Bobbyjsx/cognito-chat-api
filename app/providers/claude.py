@@ -19,7 +19,7 @@ import logging
 import os
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, ClassVar
 
 from anthropic import (
     APIConnectionError,
@@ -70,7 +70,7 @@ class ClaudeProvider(BaseProvider):
     name = "anthropic"
 
     # Friendly model IDs mapped to AWS Bedrock inference profile identifiers
-    MODEL_MAP: dict[str, str] = {
+    MODEL_MAP: ClassVar[dict[str, str]] = {
         "claude-sonnet-4-5": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
         "claude-sonnet-4.5": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
         "claude-sonnet-4-5@20250929": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
@@ -385,8 +385,26 @@ class ClaudeProvider(BaseProvider):
                         "input_schema": cfg.get("schema") or {"type": "object", "properties": {}},
                     }
                 )
-            # Server-specific tools (code_execution / google_search) are Gemini-specific
-            # Claude gracefully ignores them or maps function definitions
+            elif kind == "google_search":
+                tools.append(
+                    {
+                        "name": "google_search",
+                        "description": (
+                            "Searches Google and live web sources for up-to-date information, facts, news, "
+                            "current dates, scores, and real-time verifiable data."
+                        ),
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "The search query to look up on Google.",
+                                }
+                            },
+                            "required": ["query"],
+                        },
+                    }
+                )
         return tools
 
     # ── non-streaming generation ─────────────────────────────────────────────

@@ -15,14 +15,30 @@ from app.ai.router.schemas import RequestAnalysis, RequestContext, TaskType
 
 logger = logging.getLogger(__name__)
 
-ANALYZER_SYSTEM_INSTRUCTION = (
-    "You are a high-speed, compact request analysis engine for an AI model router. "
-    "Your ONLY job is to analyze the user's input and return a strict JSON object characterizing "
-    "the task type, complexity, reasoning depth, coding requirements, creative requirements, "
-    "and required capabilities.\n"
-    "DO NOT answer the user's prompt. DO NOT solve the task. DO NOT generate conversational text.\n"
-    "Respond ONLY with a valid JSON object adhering strictly to the schema."
-)
+from datetime import datetime, timezone
+
+
+def get_analyzer_system_instruction() -> str:
+    """Build the analyzer system instruction with the current UTC date for temporal grounding."""
+    now_utc = datetime.now(timezone.utc)
+    current_date_str = now_utc.strftime("%A, %B %d, %Y")
+    return (
+        "You are a high-speed, compact request analysis engine for an AI model router. "
+        f"Today's date is {current_date_str}. "
+        "Your ONLY job is to analyze the user's input and return a strict JSON object characterizing "
+        "the task type, complexity, reasoning depth, coding requirements, creative requirements, "
+        "and required capabilities.\n"
+        "Set 'web_required' to true if the query asks about current events, real-time facts, recent news, "
+        "live weather, stock prices, sports scores, or anything requiring live web search / grounding. "
+        "Note that today's date is already known and grounded in system instructions, so simple inquiries asking "
+        "for the current date, day, or time DO NOT require web search.\n"
+        "DO NOT answer the user's prompt. DO NOT solve the task. DO NOT generate conversational text.\n"
+        "Respond ONLY with a valid JSON object adhering strictly to the schema."
+    )
+
+
+ANALYZER_SYSTEM_INSTRUCTION = get_analyzer_system_instruction()
+
 
 ANALYSIS_JSON_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -168,29 +184,65 @@ class HeuristicFallbackAnalyzer(BaseRequestAnalyzer):
         "plot",
     }
 
-    # Web keywords
+    # Date / Time query pattern (grounded via system instructions, never requires web search or tool calling)
+    _DATE_PATTERN: ClassVar[Pattern[str]] = re.compile(
+        r"\b("
+        r"what('s| is| are)? (the |today('?s)? )?(date|day|time|day of the week|current date|current time)"
+        r"|what day is (it|today)"
+        r"|what('?s| is) today('?s)? date"
+        r"|tell me the (date|day|time)"
+        r"|current (date|time|day)"
+        r"|what date is it"
+        r"|what time is it"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    # Web keywords (real-time facts, live metrics, breaking events, search commands)
     _WEB_KEYWORDS: ClassVar[set[str]] = {
-        "latest",
-        "current",
-        "news",
-        "today's",
-        "current weather",
-        "who is the current",
-        "who is ",
-        "stock price",
-        "recent news",
+        # Explicit search commands
         "search the web",
         "google search",
         "search google",
-        "search for",
         "web search",
-        "look up",
-        "find online",
+        "search online",
         "browse the web",
-        "date",
-        "today",
-        "tomorrow",
-        "yesterday",
+        "find online",
+        "look up online",
+        "look up on google",
+        # Live weather
+        "weather",
+        "weather forecast",
+        "current weather",
+        "temperature in",
+        # Live financial markets
+        "stock price",
+        "stock prices",
+        "share price",
+        "crypto price",
+        "bitcoin price",
+        "market cap",
+        "nasdaq",
+        "s&p 500",
+        # Live sports & tournaments
+        "super bowl",
+        "world cup",
+        "olympics",
+        "sports score",
+        "sports scores",
+        "game score",
+        "live score",
+        "match score",
+        "standings",
+        # News & politics
+        "latest news",
+        "breaking news",
+        "recent news",
+        "today's news",
+        "election results",
+        "who is currently the president",
+        "who is currently the prime minister",
+        "who won the",
     }
 
     # Summarization keywords
@@ -220,13 +272,35 @@ class HeuristicFallbackAnalyzer(BaseRequestAnalyzer):
         # 1. Vision requirement
         vision_required = has_attachments and any(t in ("image", "pdf") for t in attachment_types)
 
-        # 2. Coding detection
+        # 2. Context requirement
+        context_score = min(1.0, max(0.1, approx_tokens / 100_000))
+        if has_attachments:
+            context_score = max(context_score, 0.6)
+
+        # 3. Check date/time query first (system instruction already injects current date)
+        is_date_query = bool(self._DATE_PATTERN.search(text))
+        if is_date_query:
+            return RequestAnalysis(
+                task_type=TaskType.CONVERSATION,
+                complexity=0.10,
+                reasoning_required=0.0,
+                context_required=round(context_score, 2),
+                coding_required=0.0,
+                creative_required=0.0,
+                vision_required=vision_required,
+                web_required=False,
+                tool_calling_required=False,
+                structured_output_required=False,
+                confidence=0.95,
+            )
+
+        # 4. Coding detection
         is_coding = bool(self._CODE_PATTERN.search(text)) or any(kw in lower_text for kw in self._CODING_KEYWORDS)
         coding_score = 0.0
         if is_coding:
             coding_score = 0.9 if "```" in text or "def " in text or "function " in text else 0.7
 
-        # 3. Math & Reasoning detection
+        # 5. Math & Reasoning detection
         is_math = bool(self._MATH_PATTERN.search(text))
         reasoning_score = 0.2
         if is_math:
@@ -236,22 +310,25 @@ class HeuristicFallbackAnalyzer(BaseRequestAnalyzer):
         elif is_coding:
             reasoning_score = 0.65
 
-        # 4. Creative detection
+        # 6. Creative detection
         is_creative = any(kw in lower_text for kw in self._CREATIVE_KEYWORDS)
         creative_score = 0.85 if is_creative else 0.05
 
-        # 5. Summarization detection
+        # 7. Summarization detection
         is_summary = any(kw in lower_text for kw in self._SUMMARIZATION_KEYWORDS)
 
-        # 6. Web requirement
-        web_required = any(kw in lower_text for kw in self._WEB_KEYWORDS)
+        # 8. Web requirement
+        has_web_kw = any(kw in lower_text for kw in self._WEB_KEYWORDS)
+        has_temporal_year = bool(re.search(r"\b(202[5-9]|203\d)\b", lower_text))
+        has_temporal_event = bool(
+            re.search(
+                r"\b(winner|champion|championship|score|scores|news|results|released|update|announcement|stock|weather)\b",
+                lower_text,
+            )
+        )
+        web_required = not is_date_query and (has_web_kw or (has_temporal_year and has_temporal_event))
 
-        # 7. Context requirement
-        context_score = min(1.0, max(0.1, approx_tokens / 100_000))
-        if has_attachments:
-            context_score = max(context_score, 0.6)
-
-        # 8. Complexity calculation
+        # 9. Complexity calculation
         base_complexity = 0.25  # default simple prompt
         if word_count > 200:
             base_complexity += 0.2
@@ -271,7 +348,7 @@ class HeuristicFallbackAnalyzer(BaseRequestAnalyzer):
 
         complexity = min(1.0, max(0.1, base_complexity))
 
-        # 9. Task type assignment
+        # 10. Task type assignment
         is_greeting = word_count < 15 and (
             any(w.strip(".,!?") in ("hello", "hi", "hey", "sup", "howdy") for w in lower_text.split())
             or any(p in lower_text for p in ("how are you", "good morning", "good evening", "what's up"))
@@ -416,7 +493,7 @@ class GeminiFlashLiteAnalyzer(BaseRequestAnalyzer):
 
         try:
             config = types.GenerateContentConfig(
-                system_instruction=ANALYZER_SYSTEM_INSTRUCTION,
+                system_instruction=get_analyzer_system_instruction(),
                 response_mime_type="application/json",
                 response_schema=ANALYSIS_JSON_SCHEMA,
                 temperature=0.0,
@@ -480,43 +557,45 @@ class GeminiFlashLiteAnalyzer(BaseRequestAnalyzer):
 
 
 class CompositeRequestAnalyzer(BaseRequestAnalyzer):
-    """Resilient analyzer: runs fast heuristics on simple prompts, and Flash-Lite on complex requests."""
+    """Resilient analyzer: prioritizes fast, zero-cost heuristics by default,
+
+    falling back to Gemini Flash-Lite only when heuristics are low-confidence or when configured.
+    """
 
     def __init__(
         self,
         primary_analyzer: BaseRequestAnalyzer | None = None,
         fallback_analyzer: BaseRequestAnalyzer | None = None,
+        prefer_heuristic: bool = True,
     ):
         self.primary_analyzer = primary_analyzer
         self.fallback_analyzer = fallback_analyzer or HeuristicFallbackAnalyzer()
+        self.prefer_heuristic = prefer_heuristic
 
     async def analyze(
         self,
         message: str,
         context: RequestContext | None = None,
     ) -> RequestAnalysis:
-        words = message.strip().split()
-        is_short_prompt = len(words) <= 12
-        has_complex_cues = any(
-            kw in message.lower() for kw in ("def ", "class ", "import ", "select ", "```", "{", "}")
-        )
-        has_attachments = context.has_attachments if context else False
-        is_multi_turn = (context.conversation_message_count > 3) if context else False
-
-        # Fast-path for short single-sentence definitions, queries, and conversational messages
-        if is_short_prompt and not has_complex_cues and not has_attachments and not is_multi_turn:
+        # 1. If prefer_heuristic is enabled (default), run heuristic analyzer first
+        if self.prefer_heuristic:
             start = time.perf_counter()
-            fast_res = await self.fallback_analyzer.analyze(message, context)
+            heuristic_res = await self.fallback_analyzer.analyze(message, context)
             latency_ms = (time.perf_counter() - start) * 1000.0
-            logger.info(
-                "[SmartRouter][Analyzer] Fast-path heuristic analysis completed in %.2f ms | task_type=%s, complexity=%.2f, reasoning=%.2f",
-                latency_ms,
-                fast_res.task_type.value,
-                fast_res.complexity,
-                fast_res.reasoning_required,
-            )
-            return fast_res
 
+            # If heuristic analysis is confident, return immediately (0 cost, <1ms latency)
+            if heuristic_res.confidence >= 0.70 or self.primary_analyzer is None:
+                logger.info(
+                    "[SmartRouter][Analyzer] Heuristic analysis completed in %.2f ms | task_type=%s, complexity=%.2f, web=%s, tools=%s",
+                    latency_ms,
+                    heuristic_res.task_type.value,
+                    heuristic_res.complexity,
+                    heuristic_res.web_required,
+                    heuristic_res.tool_calling_required,
+                )
+                return heuristic_res
+
+        # 2. If prefer_heuristic is False, or heuristic confidence was low, invoke primary LLM analyzer
         if self.primary_analyzer:
             try:
                 result = await self.primary_analyzer.analyze(message, context)
@@ -525,11 +604,12 @@ class CompositeRequestAnalyzer(BaseRequestAnalyzer):
                 err_type = type(exc).__name__
                 err_msg = getattr(exc, "message", None) or str(exc) or repr(exc)
                 logger.warning(
-                    "[SmartRouter][Analyzer] Primary analyzer failed (%s: %s). Falling back to deterministic heuristic analyzer.",
+                    "[SmartRouter][Analyzer] Primary analyzer failed (%s: %s). Falling back to heuristic analyzer.",
                     err_type,
                     err_msg,
                 )
 
+        # 3. Fallback to heuristic analyzer
         start = time.perf_counter()
         fallback_res = await self.fallback_analyzer.analyze(message, context)
         latency_ms = (time.perf_counter() - start) * 1000.0

@@ -271,9 +271,22 @@ class GeminiProvider(BaseProvider):
 
         tool_calls: list[ToolCall] = []
         if response.candidates:
-            content = getattr(response.candidates[0], "content", None)
+            cand = response.candidates[0]
+            content = getattr(cand, "content", None)
             if content is not None:
                 tool_calls = self._extract_function_calls(content)
+            grounding = getattr(cand, "grounding_metadata", None)
+            if grounding:
+                queries = getattr(grounding, "web_search_queries", None) or []
+                query_text = queries[0] if queries else "Web search"
+                tool_calls.append(
+                    ToolCall(
+                        id=f"call_{uuid.uuid4().hex[:8]}",
+                        name="google_search",
+                        args={"query": query_text},
+                        kind=TOOL_KIND_SERVER,
+                    )
+                )
 
         return GenerationResult(text=text, total_tokens=total_tokens, tool_calls=tool_calls)
 
@@ -293,9 +306,10 @@ class GeminiProvider(BaseProvider):
             raise self._wrap_error(exc) from exc
 
         search_announced = False
+        search_call_id = f"call_{uuid.uuid4().hex[:8]}"
         try:
             async for chunk in stream:
-                for event in self._extract_stream_events(chunk, search_announced):
+                for event in self._extract_stream_events(chunk, search_announced, search_call_id):
                     if event.type == "tool_call" and event.tool_call and event.tool_call.name == "google_search":
                         search_announced = True
                     yield event
@@ -306,6 +320,7 @@ class GeminiProvider(BaseProvider):
         self,
         chunk: Any,
         search_announced: bool,
+        search_call_id: str | None = None,
     ) -> list[GenerationEvent]:
         events: list[GenerationEvent] = []
         code_tool_ids: deque[str] = deque()
@@ -384,12 +399,24 @@ class GeminiProvider(BaseProvider):
             total_tokens = getattr(chunk.usage_metadata, "total_token_count", 0) or 0
             events.append(GenerationEvent(type="usage", total_tokens=total_tokens))
 
-        events.extend(self._extract_grounding_events(chunk, search_announced))
+        events.extend(self._extract_grounding_events(chunk, search_announced, search_call_id))
         return events
 
-    def _extract_grounding_events(self, chunk: Any, search_announced: bool) -> list[GenerationEvent]:
+    def _extract_grounding_events(
+        self,
+        chunk: Any,
+        search_announced: bool,
+        search_call_id: str | None = None,
+    ) -> list[GenerationEvent]:
         """Surface Google Search grounding as tool_call/tool_result events."""
         grounding = getattr(chunk, "grounding_metadata", None)
+        if grounding is None:
+            for cand in getattr(chunk, "candidates", None) or []:
+                cand_grounding = getattr(cand, "grounding_metadata", None)
+                if cand_grounding is not None:
+                    grounding = cand_grounding
+                    break
+
         if grounding is None:
             return []
 
@@ -399,12 +426,16 @@ class GeminiProvider(BaseProvider):
             if web is not None:
                 sources.append(
                     {
-                        "title": getattr(web, "title", None),
-                        "uri": getattr(web, "uri", None),
+                        "title": getattr(web, "title", None) or "Web Source",
+                        "uri": getattr(web, "uri", None) or "",
                     }
                 )
         if not sources:
             return []
+
+        queries = getattr(grounding, "web_search_queries", None) or []
+        query_text = queries[0] if queries else "Web search"
+        call_id = search_call_id or f"call_{uuid.uuid4().hex[:8]}"
 
         events: list[GenerationEvent] = []
         if not search_announced:
@@ -412,9 +443,9 @@ class GeminiProvider(BaseProvider):
                 GenerationEvent(
                     type="tool_call",
                     tool_call=ToolCall(
-                        id=f"call_{uuid.uuid4().hex[:8]}",
+                        id=call_id,
                         name="google_search",
-                        args={"query": "Web search"},
+                        args={"query": query_text},
                         kind=TOOL_KIND_SERVER,
                     ),
                 )
@@ -423,9 +454,9 @@ class GeminiProvider(BaseProvider):
             GenerationEvent(
                 type="tool_result",
                 tool_result=ToolResult(
-                    id=f"call_{uuid.uuid4().hex[:8]}",
+                    id=call_id,
                     name="google_search",
-                    output={"sources": sources},
+                    output={"sources": sources, "queries": queries},
                     kind=TOOL_KIND_SERVER,
                 ),
             )
