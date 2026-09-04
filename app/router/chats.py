@@ -3,11 +3,12 @@ import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from google.cloud.firestore_v1.async_client import AsyncClient
 
 from app.api.dependencies import (
     get_current_user,
+    get_optional_current_user,
     get_provider,
     get_provider_registry,
     get_smart_router,
@@ -17,7 +18,16 @@ from app.api.dependencies import (
 )
 from app.database import get_db
 from app.integrations.cloud_tasks import CloudTasksDispatcher
-from app.models.chats import ChatRequest, ChatResponse, ChatSessionListSchema, ReadStatus
+from app.models.chats import (
+    ChatRequest,
+    ChatResponse,
+    ChatSessionListSchema,
+    ContinueChatResponse,
+    CreateSharedChatRequest,
+    CreateSharedChatResponse,
+    ReadStatus,
+    SharedChatResponse,
+)
 from app.models.pagination import PaginatedResponse
 from app.models.users import UserDB
 from app.providers.base import BaseProvider
@@ -316,3 +326,150 @@ async def get_generation(
     if str(generation.user_id) != str(current_user.id):
         raise HTTPException(status_code=403, detail="Not authorized")
     return generation.model_dump(mode="json")
+
+
+@router.post("/sessions/{session_id}/share", response_model=CreateSharedChatResponse, status_code=200)
+async def share_session(
+    session_id: uuid.UUID,
+    body: CreateSharedChatRequest | None = None,
+    current_user: UserDB = Depends(get_current_user),
+    db: AsyncClient = Depends(get_db),
+):
+    from app.repositories.shared_chats import SharedChatRepository
+
+    repo = SharedChatRepository(db)
+    title = body.title if body else None
+    show_name = body.show_name if body is not None else True
+    author_name = (
+        getattr(current_user, "name", None)
+        or getattr(current_user, "full_name", None)
+        or (current_user.email.split("@")[0].capitalize() if current_user.email else None)
+    )
+
+    shared_chat = await repo.create_or_update_share(
+        session_id=session_id,
+        user_id=current_user.id,
+        title=title,
+        show_name=show_name,
+        author_name=author_name,
+    )
+    if not shared_chat:
+        raise HTTPException(status_code=404, detail="Session not found or not owned by user")
+    return CreateSharedChatResponse(
+        share_id=shared_chat.id,
+        session_id=shared_chat.session_id,
+        title=shared_chat.title,
+        author_name=shared_chat.author_name,
+        created_at=shared_chat.created_at,
+        message_count=shared_chat.message_count,
+    )
+
+
+@router.get("/sessions/{session_id}/share", response_model=CreateSharedChatResponse, status_code=200)
+async def get_session_share(
+    session_id: uuid.UUID,
+    current_user: UserDB = Depends(get_current_user),
+    db: AsyncClient = Depends(get_db),
+):
+    from app.repositories.shared_chats import SharedChatRepository
+
+    repo = SharedChatRepository(db)
+    shared_chat = await repo.get_share_by_session(session_id, current_user.id)
+    if not shared_chat:
+        raise HTTPException(status_code=404, detail="No active share found for this session")
+    return CreateSharedChatResponse(
+        share_id=shared_chat.id,
+        session_id=shared_chat.session_id,
+        title=shared_chat.title,
+        author_name=shared_chat.author_name,
+        created_at=shared_chat.created_at,
+        message_count=shared_chat.message_count,
+    )
+
+
+@router.get("/shared/{share_id}", response_model=SharedChatResponse, status_code=200)
+async def get_shared_chat(
+    share_id: str,
+    current_user: UserDB | None = Depends(get_optional_current_user),
+    db: AsyncClient = Depends(get_db),
+):
+    from app.repositories.shared_chats import SharedChatRepository
+
+    repo = SharedChatRepository(db)
+    shared_chat = await repo.get_shared_chat(share_id)
+    if not shared_chat or shared_chat.revoked_at is not None:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": "Conversation has been deleted", "code": "SHARE_REVOKED"},
+        )
+    is_owner = bool(current_user and str(current_user.id) == str(shared_chat.user_id))
+    return SharedChatResponse(
+        id=shared_chat.id,
+        session_id=shared_chat.session_id,
+        title=shared_chat.title,
+        author_name=shared_chat.author_name,
+        is_owner=is_owner,
+        created_at=shared_chat.created_at,
+        updated_at=shared_chat.updated_at,
+        message_count=shared_chat.message_count,
+        messages=shared_chat.messages,
+    )
+
+
+@router.delete("/shared/{share_id}", status_code=200)
+async def revoke_shared_chat(
+    share_id: str,
+    current_user: UserDB = Depends(get_current_user),
+    db: AsyncClient = Depends(get_db),
+):
+    from app.repositories.shared_chats import SharedChatRepository
+
+    repo = SharedChatRepository(db)
+    success = await repo.revoke_shared_chat(share_id, current_user.id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Shared chat not found or not owned by user")
+    return {"message": "Shared chat revoked successfully", "share_id": share_id}
+
+
+@router.delete("/sessions/{session_id}/share", status_code=200)
+async def revoke_session_share(
+    session_id: uuid.UUID,
+    current_user: UserDB = Depends(get_current_user),
+    db: AsyncClient = Depends(get_db),
+):
+    from app.repositories.shared_chats import SharedChatRepository
+
+    repo = SharedChatRepository(db)
+    success = await repo.revoke_session_share(session_id, current_user.id)
+    if not success:
+        raise HTTPException(status_code=404, detail="No active share found for session or not owned by user")
+    return {"message": "Shared chat revoked successfully"}
+
+
+@router.post("/shared/{share_id}/continue", response_model=ContinueChatResponse, status_code=201)
+async def continue_shared_chat(
+    share_id: str,
+    current_user: UserDB = Depends(get_current_user),
+    db: AsyncClient = Depends(get_db),
+):
+    from app.repositories.shared_chats import SharedChatRepository
+
+    repo = SharedChatRepository(db)
+    shared_chat = await repo.get_shared_chat(share_id)
+    if not shared_chat or shared_chat.revoked_at is not None:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": "Conversation has been deleted", "code": "SHARE_REVOKED"},
+        )
+
+    new_session = await repo.continue_shared_chat(share_id, current_user.id)
+    if not new_session:
+        return JSONResponse(
+            status_code=404,
+            content={"detail": "Conversation has been deleted", "code": "SHARE_REVOKED"},
+        )
+    return ContinueChatResponse(
+        session_id=new_session.id,
+        title=new_session.title,
+        exclude_from_memory=True,
+    )
