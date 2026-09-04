@@ -296,15 +296,20 @@ class BaseProvider(ABC):
     def is_retryable_error(exc: Exception) -> bool:
         """Determine whether a generation failure is safe to retry on a fallback model."""
         if isinstance(
-            exc, (ProviderRateLimitError, ProviderOverloadedError, ProviderTimeoutError, ProviderConnectionError)
+            exc,
+            (
+                ProviderRateLimitError,
+                ProviderOverloadedError,
+                ProviderTimeoutError,
+                ProviderConnectionError,
+                ProviderModelNotFoundError,
+            ),
         ):
             return True
-        if isinstance(
-            exc, (ProviderAuthError, ProviderInvalidRequestError, ProviderUnsupportedError, ProviderModelNotFoundError)
-        ):
+        if isinstance(exc, (ProviderAuthError, ProviderInvalidRequestError, ProviderUnsupportedError)):
             return False
         if isinstance(exc, ProviderGenerationError):
-            return exc.status_code in (429, 500, 502, 503, 504)
+            return exc.status_code in (404, 429, 500, 502, 503, 504)
         return False
 
     async def delete_file(self, file_uri: str) -> None:

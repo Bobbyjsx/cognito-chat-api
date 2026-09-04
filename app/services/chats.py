@@ -175,7 +175,7 @@ class AgentService:
                     status_code=400,
                     detail=f"Model '{model}' is not in the allowed text models list: {cfg.allowed_text_models}",
                 )
-            fallbacks = [m for m in cfg.allowed_text_models if m != model]
+            fallbacks = [m for m in cfg.allowed_text_models if m != model and m.lower() != "auto"]
         elif cfg.enable_smart_routing and self.router and message_text:
             model, fallbacks, decision = await self.router.route_or_default(
                 message=message_text,
@@ -184,9 +184,14 @@ class AgentService:
                 policy=effective_routing_mode,
                 config=cfg,
             )
+            fallbacks = [m for m in fallbacks if m != model and m.lower() != "auto"]
         else:
             model = cfg.default_text_model
-            fallbacks = [m for m in cfg.allowed_text_models if m != model]
+            fallbacks = [m for m in cfg.allowed_text_models if m != model and m.lower() != "auto"]
+
+        # Ensure model is never virtual 'auto'
+        if model.lower() == "auto":
+            model = cfg.default_text_model if cfg.default_text_model.lower() != "auto" else "gemini-3.5-flash"
 
         allowed_for_model = cfg.get_reasoning_modes_for_model(model)
         allowed_vals = [m.value if isinstance(m, Enum) else str(m) for m in allowed_for_model]
@@ -519,7 +524,7 @@ class AgentService:
         )
 
         # Attempt primary model with fallback candidates if available
-        models_to_attempt = [model] + [m for m in fallbacks if m != model]
+        models_to_attempt = [m for m in [model] + [m for m in fallbacks if m != model] if m and m.lower() != "auto"]
         result = None
         used_model = model
         last_exc = None
@@ -765,7 +770,7 @@ class AgentService:
                 tool_configs=tool_configs,
             )
 
-            models_to_attempt = [model] + [m for m in fallbacks if m != model]
+            models_to_attempt = [m for m in [model] + [m for m in fallbacks if m != model] if m and m.lower() != "auto"]
             used_model = model
             last_exc = None
             has_yielded_chunks = False

@@ -1,9 +1,14 @@
-"""Anthropic Claude provider.
+"""Anthropic Claude provider via AWS Bedrock.
 
-Directly communicates with Anthropic's Messages API via the official
-``anthropic`` SDK. All Anthropic-specific formatting, streaming event
-structures, and exceptions are normalized into Cognito's provider-agnostic
-abstractions.
+Directly communicates with AWS Bedrock via the official ``anthropic`` SDK's
+``AsyncAnthropicBedrock`` client. Normalizes Anthropic-specific formatting,
+streaming events, tool invocations, and error structures into Cognito's
+provider-agnostic abstractions.
+
+Note:
+Audio transcription models are selected by the backend configuration
+(`stt_model` in AppConfigDB, e.g. `gemini-3.1-flash-lite`). Claude models
+do not serve audio transcription.
 """
 
 from __future__ import annotations
@@ -11,6 +16,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
@@ -19,8 +25,6 @@ from anthropic import (
     APIConnectionError,
     APIError,
     APITimeoutError,
-    AsyncAnthropic,
-    AsyncAnthropicVertex,
     AuthenticationError,
     BadRequestError,
     InternalServerError,
@@ -28,6 +32,7 @@ from anthropic import (
     PermissionDeniedError,
     RateLimitError,
 )
+from anthropic.lib.bedrock import AsyncAnthropicBedrock
 
 from app.models.attachments import AttachmentMetadata
 from app.providers.base import (
@@ -60,161 +65,98 @@ _ANTHROPIC_ERROR_HANDLED = (APIError, APIConnectionError, APITimeoutError)
 
 
 class ClaudeProvider(BaseProvider):
-    """Concrete provider for Anthropic Claude models.
-
-    Supports dual-execution backends:
-    1. Google Cloud Vertex AI infrastructure (AsyncAnthropicVertex)
-    2. Direct Anthropic API (AsyncAnthropic)
-    """
+    """Concrete provider for Anthropic Claude models via AWS Bedrock."""
 
     name = "anthropic"
 
-    # Friendly model IDs mapped to Vertex AI Model Garden endpoints
-    VERTEX_MODEL_MAP: dict[str, str] = {
-        "claude-sonnet-4-5": "claude-sonnet-4-5@20250929",
-        "claude-sonnet-4.5": "claude-sonnet-4-5@20250929",
-        "claude-sonnet-4-5@20250929": "claude-sonnet-4-5@20250929",
-        "claude-3-7-sonnet": "claude-3-7-sonnet@20250219",
-        "claude-3.7-sonnet": "claude-3-7-sonnet@20250219",
-        "claude-3-7-sonnet-20250219": "claude-3-7-sonnet@20250219",
-        "claude-3-5-sonnet": "claude-3-5-sonnet-v2@20241022",
-        "claude-3.5-sonnet": "claude-3-5-sonnet-v2@20241022",
-        "claude-3-5-sonnet-20241022": "claude-3-5-sonnet-v2@20241022",
-        "claude-3-5-sonnet-latest": "claude-3-5-sonnet-v2@20241022",
-        "claude-3-5-haiku": "claude-3-5-haiku@20241022",
-        "claude-3.5-haiku": "claude-3-5-haiku@20241022",
-        "claude-3-5-haiku-20241022": "claude-3-5-haiku@20241022",
-        "claude-3-5-haiku-latest": "claude-3-5-haiku@20241022",
-        "claude-3-opus": "claude-3-opus@20240229",
-        "claude-3-opus-20240229": "claude-3-opus@20240229",
-        "claude-3-haiku": "claude-3-haiku@20240307",
-        "claude-3-haiku-20240307": "claude-3-haiku@20240307",
-    }
-
-    # Friendly model IDs mapped to direct Anthropic API models
-    DIRECT_MODEL_MAP: dict[str, str] = {
-        "claude-sonnet-4-5": "claude-3-5-sonnet-20241022",
-        "claude-sonnet-4.5": "claude-3-5-sonnet-20241022",
-        "claude-3-7-sonnet": "claude-3-7-sonnet-20250219",
-        "claude-3.7-sonnet": "claude-3-7-sonnet-20250219",
-        "claude-3-5-sonnet": "claude-3-5-sonnet-20241022",
-        "claude-3.5-sonnet": "claude-3-5-sonnet-20241022",
-        "claude-3-5-haiku": "claude-3-5-haiku-20241022",
-        "claude-3.5-haiku": "claude-3-5-haiku-20241022",
-        "claude-3-opus": "claude-3-opus-20240229",
-        "claude-3-haiku": "claude-3-haiku-20240307",
+    # Friendly model IDs mapped to AWS Bedrock inference profile identifiers
+    MODEL_MAP: dict[str, str] = {
+        "claude-sonnet-4-5": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "claude-sonnet-4.5": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "claude-sonnet-4-5@20250929": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "claude-haiku-4-5": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "claude-haiku-4.5": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "claude-3-5-haiku": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "claude-3.5-haiku": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "claude-3-5-haiku-20241022": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "claude-3-5-sonnet": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "claude-3.5-sonnet": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "claude-3-7-sonnet": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "claude-3.7-sonnet": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "claude-3-opus": "eu.anthropic.claude-opus-4-5-20251101-v1:0",
+        "claude-3-haiku": "eu.anthropic.claude-3-haiku-20240307-v1:0",
     }
 
     def __init__(
         self,
         api_key: str | None = None,
-        client: AsyncAnthropic | AsyncAnthropicVertex | None = None,
-        backend: str = "auto",
-        project_id: str | None = None,
-        region: str | None = None,
-        credentials_path: str | None = None,
-        credentials: Any | None = None,
+        aws_region: str | None = None,
+        aws_access_key_id: str | None = None,
+        aws_secret_access_key: str | None = None,
+        aws_session_token: str | None = None,
+        client: AsyncAnthropicBedrock | None = None,
         default_max_tokens: int = 8192,
+        **kwargs: Any,
     ):
-        self._api_key = api_key
         self._client = client
-        self._lazy_client: AsyncAnthropic | AsyncAnthropicVertex | None = None
-        self.backend = (backend or "auto").lower()
-        self.project_id = project_id
-        self.region = region or "us-east5"
-        self.credentials_path = credentials_path
-        self.credentials = credentials
+        self._lazy_client: AsyncAnthropicBedrock | None = None
+        self.aws_region = aws_region or kwargs.get("region") or os.getenv("AWS_REGION") or "eu-west-1"
+        self.api_key = (
+            api_key
+            or kwargs.get("aws_bedrock_api_key")
+            or os.getenv("AWS_BEARER_TOKEN_BEDROCK")
+            or os.getenv("AWS_BEDROCK_API_KEY")
+            or os.getenv("AWS_API_KEY")
+        )
+        self.aws_access_key_id = aws_access_key_id or kwargs.get("aws_access_key_id") or os.getenv("AWS_ACCESS_KEY_ID")
+        self.aws_secret_access_key = (
+            aws_secret_access_key or kwargs.get("aws_secret_access_key") or os.getenv("AWS_SECRET_ACCESS_KEY")
+        )
+        self.aws_session_token = aws_session_token or kwargs.get("aws_session_token") or os.getenv("AWS_SESSION_TOKEN")
         self.default_max_tokens = default_max_tokens
-
-    @property
-    def is_vertex(self) -> bool:
-        """Whether the provider routes requests via Google Cloud Vertex AI."""
-        if self.backend == "vertex":
-            return True
-        if self.backend == "anthropic":
-            return False
-        if isinstance(self._client, AsyncAnthropicVertex):
-            return True
-        if self._client is not None:
-            return False
-        # In auto mode, prefer Vertex if project or credentials are provided, or if no Anthropic API key
-        return bool(self.project_id or self.credentials_path or self.credentials or not self._api_key)
 
     # ── client lifecycle ─────────────────────────────────────────────────────
 
     @property
-    def client(self) -> AsyncAnthropic | AsyncAnthropicVertex:
+    def client(self) -> AsyncAnthropicBedrock:
         if self._client is not None:
             return self._client
         if self._lazy_client is None:
             self._lazy_client = self._init_client()
         return self._lazy_client
 
-    def _init_client(self) -> AsyncAnthropic | AsyncAnthropicVertex:
-        if self.is_vertex:
-            return self._init_vertex_client()
-        return AsyncAnthropic(api_key=self._api_key) if self._api_key else AsyncAnthropic()
+    def _init_client(self) -> AsyncAnthropicBedrock:
+        region = self.aws_region or "eu-west-1"
+        token = self.api_key
 
-    def _init_vertex_client(self) -> AsyncAnthropicVertex:
-        import os
-
-        creds = self.credentials
-        project = self.project_id
-
-        # 1. If credentials_path is given, load service account credentials
-        if creds is None and self.credentials_path and os.path.exists(self.credentials_path):
-            try:
-                from google.oauth2 import service_account
-
-                creds = service_account.Credentials.from_service_account_file(
-                    self.credentials_path,
-                    scopes=["https://www.googleapis.com/auth/cloud-platform"],
-                )
-                if not project:
-                    import json
-
-                    with open(self.credentials_path, "r") as f:
-                        project = json.load(f).get("project_id")
-            except Exception as exc:
-                logger.warning("Could not load Vertex credentials from %s: %s", self.credentials_path, exc)
-
-        # 2. If project still not known, try environment variables and Google ADC
-        if not project:
-            project = os.getenv("ANTHROPIC_VERTEX_PROJECT_ID") or os.getenv("GOOGLE_CLOUD_PROJECT")
-            if not project:
-                try:
-                    import google.auth
-
-                    _, project = google.auth.default()
-                except Exception as exc:
-                    logger.debug("Google ADC project discovery encountered: %s", exc)
+        if token and not os.getenv("AWS_BEARER_TOKEN_BEDROCK"):
+            os.environ["AWS_BEARER_TOKEN_BEDROCK"] = token
 
         kwargs: dict[str, Any] = {
-            "region": self.region or os.getenv("ANTHROPIC_VERTEX_REGION", "us-east5"),
+            "aws_region": region,
         }
-        if project:
-            kwargs["project_id"] = project
-        if creds:
-            kwargs["credentials"] = creds
+        if token:
+            kwargs["api_key"] = token
+        if self.aws_access_key_id:
+            kwargs["aws_access_key"] = self.aws_access_key_id
+        if self.aws_secret_access_key:
+            kwargs["aws_secret_key"] = self.aws_secret_access_key
+        if self.aws_session_token:
+            kwargs["aws_session_token"] = self.aws_session_token
 
-        logger.info(
-            "Initialized ClaudeProvider with Google Cloud Vertex AI backend (project=%s, region=%s)",
-            project or "ADC",
-            kwargs["region"],
-        )
-        return AsyncAnthropicVertex(**kwargs)
+        logger.info("Initialized ClaudeProvider with AWS Bedrock client (region=%s)", region)
+        return AsyncAnthropicBedrock(**kwargs)
 
     def resolve_model_id(self, model: str) -> str:
-        """Resolve friendly model identifier into provider/backend-native model ID."""
+        """Resolve friendly model identifier into Bedrock inference profile ID."""
         cleaned = model.strip()
-        if self.is_vertex:
-            if "@" in cleaned:
-                return cleaned
-            return self.VERTEX_MODEL_MAP.get(cleaned.lower(), cleaned)
-        else:
-            if "@" in cleaned:
-                return cleaned.replace("@", "-")
-            return self.DIRECT_MODEL_MAP.get(cleaned.lower(), cleaned)
+        if cleaned.startswith(("eu.anthropic", "us.anthropic", "global.anthropic", "anthropic.")):
+            return cleaned
+        mapped = self.MODEL_MAP.get(cleaned.lower(), cleaned)
+        reg = (self.aws_region or "").lower()
+        if reg.startswith("us-") and mapped.startswith("eu.anthropic"):
+            mapped = mapped.replace("eu.anthropic", "us.anthropic", 1)
+        return mapped
 
     # ── conversion helpers ───────────────────────────────────────────────────
 
@@ -376,43 +318,35 @@ class ClaudeProvider(BaseProvider):
             params["thinking"] = {"type": "enabled", "budget_tokens": budget}
             # max_tokens must be greater than budget_tokens
             params["max_tokens"] = max(budget + 4096, self.default_max_tokens)
-        elif not self.is_vertex:
-            params["temperature"] = 0.7
-
         return params
 
     # ── error handling ───────────────────────────────────────────────────────
 
     def normalize_error(self, exc: Exception) -> Exception:
-        """Map Anthropic / Vertex SDK exceptions into Cognito normalized ProviderError subclasses."""
+        """Map Anthropic Bedrock SDK exceptions into Cognito normalized ProviderError subclasses."""
         if isinstance(exc, ProviderError):
             return exc
 
-        msg = str(exc) or "Claude model generation failed."
+        msg = str(exc) or "Claude Bedrock model generation failed."
         if isinstance(exc, NotFoundError):
-            backend_label = "Google Cloud Vertex AI" if self.is_vertex else "Anthropic"
-            return ProviderModelNotFoundError(msg or f"Model not found on {backend_label}.")
+            return ProviderModelNotFoundError(msg or "Model not found on AWS Bedrock.")
         if isinstance(exc, RateLimitError):
-            return ProviderRateLimitError(msg or "Rate limit exceeded.", status_code=429)
+            return ProviderRateLimitError(msg or "AWS Bedrock rate limit exceeded.", status_code=429)
         if isinstance(exc, (AuthenticationError, PermissionDeniedError)):
-            msg_lower = msg.lower()
-            if self.is_vertex or "vertex" in msg_lower or "cloud" in msg_lower or "serviceusage" in msg_lower:
-                return ProviderAuthError(
-                    f"Google Cloud Vertex AI permission denied: {msg}. Please ensure the Vertex AI API (aiplatform.googleapis.com) is enabled and the service account or caller has the 'Vertex AI User' (roles/aiplatform.user) role.",
-                    status_code=403 if isinstance(exc, PermissionDeniedError) else 401,
-                )
-            return ProviderAuthError(msg or "Anthropic authentication failed.", status_code=401)
+            return ProviderAuthError(
+                f"AWS Bedrock authentication failed: {msg}. Please verify AWS_BEARER_TOKEN_BEDROCK or IAM credentials.",
+                status_code=403 if isinstance(exc, PermissionDeniedError) else 401,
+            )
         if isinstance(exc, BadRequestError):
-            # Check for context window overflow
             if "context_length_exceeded" in msg.lower() or "prompt is too long" in msg.lower():
                 return ProviderInvalidRequestError(msg, status_code=400)
             return ProviderInvalidRequestError(msg, status_code=400)
         if isinstance(exc, InternalServerError):
-            return ProviderOverloadedError(msg or "Provider servers overloaded.", status_code=503)
+            return ProviderOverloadedError(msg or "AWS Bedrock service overloaded.", status_code=503)
         if isinstance(exc, APITimeoutError):
-            return ProviderTimeoutError(msg or "Request timed out.", status_code=504)
+            return ProviderTimeoutError(msg or "AWS Bedrock request timed out.", status_code=504)
         if isinstance(exc, APIConnectionError):
-            return ProviderConnectionError(msg or "Failed to connect to provider endpoint.", status_code=502)
+            return ProviderConnectionError(msg or "Failed to connect to AWS Bedrock endpoint.", status_code=502)
         if isinstance(exc, APIError):
             status = getattr(exc, "status_code", 500) or 500
             return ProviderGenerationError(msg, status_code=int(status))
@@ -422,18 +356,19 @@ class ClaudeProvider(BaseProvider):
     # ── capabilities ─────────────────────────────────────────────────────────
 
     def supports(self, capability: str) -> bool:
+        """Check capability support.
+
+        Note: Audio transcription models are selected by backend configuration
+        (`stt_model` in AppConfigDB, default: `gemini-3.1-flash-lite`). Claude
+        models on Bedrock do not handle audio transcription.
+        """
         if capability in ("vision", "tools", "reasoning", "structured_output"):
             return True
         return capability not in ("audio", "audio_transcription", "google_search", "code_execution")
 
     def supports_model(self, model: str) -> bool:
         lower = model.lower()
-        return (
-            lower.startswith("claude")
-            or "anthropic" in lower
-            or lower in self.VERTEX_MODEL_MAP
-            or lower in self.DIRECT_MODEL_MAP
-        )
+        return lower.startswith("claude") or "anthropic" in lower or lower in self.MODEL_MAP
 
     # ── tool construction ────────────────────────────────────────────────────
 
@@ -523,13 +458,8 @@ class ClaudeProvider(BaseProvider):
                 async for event in stream:
                     event_type = getattr(event, "type", "")
 
-                    # 1. Text delta
-                    if event_type == "text":
-                        text_token = getattr(event, "text", "")
-                        if text_token:
-                            yield GenerationEvent(type="text", token=text_token)
-
-                    elif event_type == "content_block_delta":
+                    # 1. Delta events (text, thinking, tool json)
+                    if event_type == "content_block_delta":
                         delta = getattr(event, "delta", None)
                         if delta is not None:
                             delta_type = getattr(delta, "type", "")

@@ -170,7 +170,7 @@ def test_http_chat_with_explicit_claude_uses_reasoning_as_effort(client: TestCli
     headers = _get_auth_headers(client, "user_claude_effort@example.com")
     payload = {
         "message": "Solve complex architecture task",
-        "model": "claude-sonnet-4-5",
+        "model": "claude-3-7-sonnet",
         "reasoning": "extended",
         # Note: no routing_mode needed!
     }
@@ -182,5 +182,5 @@ def test_http_chat_with_explicit_claude_uses_reasoning_as_effort(client: TestCli
         response = client.post("/agent/chat", json=payload, headers=headers)
     assert response.status_code == 200
     data = response.json()
-    assert data["model"] == "claude-sonnet-4-5"
+    assert data["model"] == "claude-3-7-sonnet"
     assert data["reasoning"] == "extended"

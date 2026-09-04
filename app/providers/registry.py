@@ -124,31 +124,34 @@ def create_default_provider_registry(settings: Settings | None = None) -> Provid
     registry.register("google", gemini_provider)
     registry.register(ModelProvider.GOOGLE, gemini_provider)
 
-    # Register Claude provider (Google Cloud Vertex AI or direct Anthropic based on settings)
+    # Register Claude provider via AWS Bedrock
     import os
 
-    vertex_project_id = (
-        getattr(settings, "anthropic_vertex_project_id", "")
-        or getattr(settings, "cloud_tasks_project", "")
-        or os.getenv("ANTHROPIC_VERTEX_PROJECT_ID", "")
-        or os.getenv("GOOGLE_CLOUD_PROJECT", "")
+    bedrock_key = (
+        getattr(settings, "aws_bedrock_api_key", "")
+        or getattr(settings, "aws_bearer_token_bedrock", "")
+        or os.getenv("AWS_BEARER_TOKEN_BEDROCK", "")
+        or os.getenv("AWS_BEDROCK_API_KEY", "")
+        or os.getenv("AWS_API_KEY", "")
+        or getattr(settings, "anthropic_api_key", "")
     )
-    vertex_region = getattr(settings, "anthropic_vertex_region", "us-east5")
-    vertex_creds = getattr(settings, "anthropic_vertex_credentials_path", "") or getattr(
-        settings, "firebase_credentials_path", ""
-    )
+    bedrock_region = getattr(settings, "aws_region", "eu-west-1") or os.getenv("AWS_REGION", "eu-west-1")
+    bedrock_access_key = getattr(settings, "aws_access_key_id", "") or os.getenv("AWS_ACCESS_KEY_ID", "")
+    bedrock_secret_key = getattr(settings, "aws_secret_access_key", "") or os.getenv("AWS_SECRET_ACCESS_KEY", "")
+    bedrock_session_token = getattr(settings, "aws_session_token", "") or os.getenv("AWS_SESSION_TOKEN", "")
 
     claude_provider = ClaudeProvider(
-        api_key=settings.anthropic_api_key,
-        backend=getattr(settings, "claude_backend", "vertex"),
-        project_id=vertex_project_id,
-        region=vertex_region,
-        credentials_path=vertex_creds,
+        api_key=bedrock_key,
+        aws_region=bedrock_region,
+        aws_access_key_id=bedrock_access_key,
+        aws_secret_access_key=bedrock_secret_key,
+        aws_session_token=bedrock_session_token,
     )
     registry.register("anthropic", claude_provider)
     registry.register("claude", claude_provider)
-    registry.register("vertex_claude", claude_provider)
-    registry.register("google_claude", claude_provider)
+    registry.register("bedrock", claude_provider)
+    registry.register("bedrock_claude", claude_provider)
+    registry.register("aws_bedrock", claude_provider)
     registry.register(ModelProvider.ANTHROPIC, claude_provider)
 
     return registry

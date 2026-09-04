@@ -16,5 +16,6 @@ freezegun
 httpx
 redis
 anthropic
+botocore
 pre-commit
 google-cloud-tasks

@@ -206,7 +206,7 @@ class GenerationWorkerService:
                 tool_configs=tool_configs,
             )
 
-            models_to_attempt = [model] + [m for m in fallbacks if m != model]
+            models_to_attempt = [m for m in [model] + [m for m in fallbacks if m != model] if m and m.lower() != "auto"]
             full_response = ""
             full_thoughts = ""
             total_tokens = 0

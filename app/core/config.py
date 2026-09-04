@@ -16,11 +16,13 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     openai_api_key: str = ""
 
-    # Claude / Anthropic Backend ("vertex" for Google Cloud Vertex AI, "anthropic" for direct API, "auto")
-    claude_backend: str = "vertex"
-    anthropic_vertex_project_id: str = ""
-    anthropic_vertex_region: str = "us-east5"
-    anthropic_vertex_credentials_path: str = ""
+    # Claude on AWS Bedrock
+    aws_bedrock_api_key: str = ""
+    aws_bearer_token_bedrock: str = ""
+    aws_region: str = "eu-west-1"
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+    aws_session_token: str = ""
 
     # Database Configuration (Firebase)
     firebase_credentials_path: str = ""

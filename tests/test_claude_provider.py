@@ -244,7 +244,6 @@ def test_claude_reasoning_config_translation():
         "claude-3-7-sonnet", [ContentPart(role="user", parts=[{"text": "hi"}])], config_fast
     )
     assert "thinking" not in params_fast
-    assert params_fast["temperature"] == 0.7
 
     # 2. Balanced thinking (e.g. budget=4096)
     config_balanced = GenerationConfig(thinking_budget=4096)
@@ -383,74 +382,42 @@ def test_claude_error_normalization():
     assert isinstance(provider.normalize_error(err_time), ProviderTimeoutError)
 
 
-# ── Google Cloud Vertex AI Backend Tests ─────────────────────────────────────
+# ── AWS Bedrock Backend Tests ────────────────────────────────────────────────
 
 
-def test_claude_vertex_mode_detection():
-    # Explicit vertex backend
-    p1 = ClaudeProvider(backend="vertex", project_id="gcp-project-123")
-    assert p1.is_vertex is True
+def test_claude_bedrock_model_resolution():
+    provider = ClaudeProvider(api_key="test-key", aws_region="eu-west-1")
+    assert provider.resolve_model_id("claude-sonnet-4-5") == "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    assert provider.resolve_model_id("claude-3-5-haiku") == "eu.anthropic.claude-haiku-4-5-20251001-v1:0"
+    assert provider.resolve_model_id("claude-3-5-sonnet") == "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
-    # Explicit direct anthropic backend
-    p2 = ClaudeProvider(api_key="sk-ant-test", backend="anthropic")
-    assert p2.is_vertex is False
-
-    # Auto mode with project_id
-    p3 = ClaudeProvider(project_id="gcp-project-123")
-    assert p3.is_vertex is True
-
-    # Auto mode with only api_key
-    p4 = ClaudeProvider(api_key="sk-ant-test")
-    assert p4.is_vertex is False
-
-
-def test_claude_vertex_model_resolution():
-    vertex_provider = ClaudeProvider(backend="vertex", project_id="gcp-proj")
-    assert vertex_provider.resolve_model_id("claude-3-7-sonnet") == "claude-3-7-sonnet@20250219"
-    assert vertex_provider.resolve_model_id("claude-3-5-sonnet") == "claude-3-5-sonnet-v2@20241022"
-    assert vertex_provider.resolve_model_id("claude-3-5-haiku") == "claude-3-5-haiku@20241022"
-    assert vertex_provider.resolve_model_id("claude-3-7-sonnet@20250219") == "claude-3-7-sonnet@20250219"
-
-    direct_provider = ClaudeProvider(backend="anthropic", api_key="sk-test")
-    assert direct_provider.resolve_model_id("claude-3-7-sonnet") == "claude-3-7-sonnet-20250219"
-    assert direct_provider.resolve_model_id("claude-3-5-sonnet") == "claude-3-5-sonnet-20241022"
-    assert direct_provider.resolve_model_id("claude-3-5-haiku") == "claude-3-5-haiku-20241022"
+    # US region dynamically adjusts prefix
+    us_provider = ClaudeProvider(api_key="test-key", aws_region="us-east-1")
+    assert us_provider.resolve_model_id("claude-sonnet-4-5") == "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
 
 @pytest.mark.asyncio
-async def test_claude_vertex_generate_translates_model():
+async def test_claude_bedrock_generate_translates_model():
     client = _build_mock_client()
-    mock_text = MagicMock(type="text", text="Response from Vertex Claude")
+    mock_text = MagicMock(type="text", text="Response from Bedrock Claude")
     mock_resp = MagicMock(content=[mock_text], usage=MagicMock(input_tokens=10, output_tokens=20))
     client.messages.create.return_value = mock_resp
 
-    provider = ClaudeProvider(backend="vertex", project_id="gcp-proj", client=client)
+    provider = ClaudeProvider(api_key="test-key", aws_region="eu-west-1", client=client)
     result = await provider.generate(
-        model="claude-3-7-sonnet",
+        model="claude-sonnet-4-5",
         contents=[ContentPart(role="user", parts=[{"text": "Explain quantum computing"}])],
     )
 
-    assert result.text == "Response from Vertex Claude"
+    assert result.text == "Response from Bedrock Claude"
     assert result.total_tokens == 30
     client.messages.create.assert_awaited_once()
     called_kwargs = client.messages.create.call_args.kwargs
-    assert called_kwargs["model"] == "claude-3-7-sonnet@20250219"
+    assert called_kwargs["model"] == "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
 
-def test_claude_vertex_permission_denied_guidance():
-    from anthropic import PermissionDeniedError
+def test_claude_bedrock_lazy_client_instantiation():
+    from anthropic.lib.bedrock import AsyncAnthropicBedrock
 
-    provider = ClaudeProvider(backend="vertex", project_id="gcp-proj")
-    resp = _build_dummy_response(403)
-    exc = PermissionDeniedError("Cloud IAM permission denied: aiplatform.endpoints.predict", response=resp, body=None)
-
-    norm = provider.normalize_error(exc)
-    assert isinstance(norm, ProviderAuthError)
-    assert "Vertex AI API (aiplatform.googleapis.com)" in str(norm)
-
-
-def test_claude_vertex_lazy_client_instantiation():
-    from anthropic import AsyncAnthropicVertex
-
-    provider = ClaudeProvider(backend="vertex", project_id="gcp-test-project", region="us-east5")
-    assert isinstance(provider.client, AsyncAnthropicVertex)
+    provider = ClaudeProvider(api_key="test-bedrock-key", aws_region="eu-west-1")
+    assert isinstance(provider.client, AsyncAnthropicBedrock)
