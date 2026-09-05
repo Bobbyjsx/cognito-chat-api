@@ -21,6 +21,12 @@ MIGRATION_STEPS = [
         "Trim session.last_message_content to the list preview length",
         "scripts.migrations.chat_sessions.001_trim_last_message_content",
     ),
+    (
+        "002_backfill_session_titles_and_config",
+        "2026-09-05",
+        "Backfill missing session titles and populate AI title generation settings in app_config",
+        "scripts.migrations.chat_sessions.002_backfill_session_titles_and_config",
+    ),
 ]
 
 
