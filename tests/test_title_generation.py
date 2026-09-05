@@ -48,10 +48,22 @@ def test_evaluate_title_strategy_local_patterns():
     assert title.startswith("Debugging")
     assert needs_worker is False
 
-    # Greeting
+    # Greeting: returns Conversation as immediate title and triggers AI worker
     title, needs_worker = AgentService._evaluate_title_strategy("Hello there")
-    assert title == "New Chat"
-    assert needs_worker is False
+    assert title == "Conversation"
+    assert needs_worker is True
+
+
+def test_is_generic_title():
+    """Verify generic titles are detected so sessions can be upgraded on substantive messages."""
+    assert AgentService._is_generic_title(None) is True
+    assert AgentService._is_generic_title("") is True
+    assert AgentService._is_generic_title("New Chat") is True
+    assert AgentService._is_generic_title("Conversation") is True
+    assert AgentService._is_generic_title("Greeting") is True
+    assert AgentService._is_generic_title("General greeting and assistance") is True
+    assert AgentService._is_generic_title("Assistance with geography assignment") is False
+    assert AgentService._is_generic_title("Python Web Scraper") is False
 
 
 def test_evaluate_title_strategy_ai_fallback():

@@ -436,14 +436,14 @@ class AgentService:
                 truncated = " ".join(words[:5])
                 return (truncated[0].upper() + truncated[1:]), False
 
-        # Greeting check: simple greetings resolve locally as "New Chat" without invoking AI
+        # Greeting check: simple greetings use "Conversation" as immediate title and offload to AI worker
         greeting_match = re.match(
             r"^(hi|hello|hey|greetings|good morning|good afternoon|good evening|yo)\b",
             text,
             flags=re.IGNORECASE,
         )
         if greeting_match and len(text.split()) <= 3:
-            return "New Chat", False
+            return "Conversation", True
 
         # Generic clean extraction for fast immediate title while AI worker processes
         clean = re.sub(
@@ -461,8 +461,31 @@ class AgentService:
         ).strip()
         words = clean.split() or first_message.strip().split()
         summary = " ".join(words[:5]).strip()
-        initial_title = (summary[0].upper() + summary[1:]) if summary else "New Chat"
+        initial_title = (summary[0].upper() + summary[1:]) if summary else "Conversation"
         return initial_title, True
+
+    @staticmethod
+    def _is_generic_title(title: str | None) -> bool:
+        """Determines if a session title is a generic greeting or placeholder that should be upgraded on substantive messages."""
+        if not title:
+            return True
+        t = title.strip().lower()
+        generic_exact = {
+            "new chat",
+            "conversation",
+            "greeting",
+            "greetings",
+            "hello",
+            "hey",
+            "casual conversation",
+            "general conversation",
+            "general conversation initiation",
+            "casual greeting and conversation",
+            "general greeting and assistance",
+        }
+        return t in generic_exact or any(
+            t.startswith(prefix) for prefix in ("casual greeting", "general conversation", "general greeting")
+        )
 
     @staticmethod
     def _rule_based_title_summary(first_message: str) -> str:
@@ -590,7 +613,7 @@ class AgentService:
             session, _ = await self.chat_repo.get_session(session_id, user_id=user.id)
             if not session:
                 raise HTTPException(status_code=404, detail=f"Session {session_id} not found.")
-            if not session.title or session.title == "New Chat":
+            if not session.title or self._is_generic_title(session.title):
                 await self.chat_repo.update_session_title(session_id, initial_title, user_id=user.id)
                 session.title = initial_title
             else:
