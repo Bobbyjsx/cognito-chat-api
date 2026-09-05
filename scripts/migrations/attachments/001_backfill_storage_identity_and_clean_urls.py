@@ -114,8 +114,7 @@ async def migrate():
         pending = 0
 
     print(
-        f"  [001_backfill_storage_identity_and_clean_urls] ✓ Updated {att_updated} attachments "
-        f"({att_scanned} scanned)."
+        f"  [001_backfill_storage_identity_and_clean_urls] ✓ Updated {att_updated} attachments ({att_scanned} scanned)."
     )
 
     # ── 2. Migrate message parts in sessions ───────────────────────────────────

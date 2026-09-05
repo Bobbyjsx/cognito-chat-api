@@ -297,7 +297,9 @@ def test_tampered_storage_token_rejected():
     from app.core.security import create_storage_token, verify_storage_token
 
     # Token with wrong purpose
-    wrong_purpose = jwt.encode({"purpose": "wrong", "exp": 9999999999}, settings.secret_key, algorithm=settings.algorithm)
+    wrong_purpose = jwt.encode(
+        {"purpose": "wrong", "exp": 9999999999}, settings.secret_key, algorithm=settings.algorithm
+    )
     assert verify_storage_token(wrong_purpose) is None
 
     # Tampered token
@@ -447,9 +449,7 @@ async def test_make_permanent_updates_storage_location():
     repo_mock.update_temporary_flag = AsyncMock()
 
     storage_mock = MagicMock()
-    storage_mock.move = AsyncMock(
-        return_value=f"gs://chat_attachment/attachments/{user_id}/image/diagram.svg"
-    )
+    storage_mock.move = AsyncMock(return_value=f"gs://chat_attachment/attachments/{user_id}/image/diagram.svg")
 
     service = AttachmentService(repo=repo_mock, storage=storage_mock, provider=MagicMock())
     service._invalidate_cache = AsyncMock()
@@ -519,6 +519,7 @@ async def test_generate_attachment_url_stale_object_name_recovery(url_service):
     assert url is not None
     # Verify the generated URL points to the permanent location, not the stale temp
     from app.core.security import verify_storage_token
+
     token = url.split("token=")[-1]
     payload = verify_storage_token(token)
     assert payload is not None

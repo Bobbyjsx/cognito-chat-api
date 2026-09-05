@@ -37,6 +37,7 @@ def _make_user(**kwargs) -> UserDB:
 
 def _auth_headers(client, email="quota@example.com", password="password123"):
     from app.core.security import create_access_token
+
     user_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, email))
     token = create_access_token(data={"sub": user_id, "email": email})
     return {"Authorization": f"Bearer {token}"}
@@ -235,8 +236,14 @@ class TestTokenQuotaEndpoints:
 
         with (
             patch("app.api.dependencies.UserRepository") as MockRepo,
-            patch("app.repositories.config.ConfigRepository.get_config", new=AsyncMock(return_value=AppConfigDB(default_token_limit_6h=60_000))),
-            patch("app.repositories.chats.ChatRepository.create_session", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4(), messages=[]))),
+            patch(
+                "app.repositories.config.ConfigRepository.get_config",
+                new=AsyncMock(return_value=AppConfigDB(default_token_limit_6h=60_000)),
+            ),
+            patch(
+                "app.repositories.chats.ChatRepository.create_session",
+                new=AsyncMock(return_value=MagicMock(id=uuid.uuid4(), messages=[])),
+            ),
         ):
             MockRepo.return_value.get_by_id = AsyncMock(return_value=exhausted_user)
             resp = client.post("/agent/chat", headers=headers, json={"message": "hi"})
@@ -259,8 +266,14 @@ class TestTokenQuotaEndpoints:
 
         with (
             patch("app.api.dependencies.UserRepository") as MockRepo,
-            patch("app.repositories.config.ConfigRepository.get_config", new=AsyncMock(return_value=AppConfigDB(default_token_limit_weekly=300_000))),
-            patch("app.repositories.chats.ChatRepository.create_session", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4(), messages=[]))),
+            patch(
+                "app.repositories.config.ConfigRepository.get_config",
+                new=AsyncMock(return_value=AppConfigDB(default_token_limit_weekly=300_000)),
+            ),
+            patch(
+                "app.repositories.chats.ChatRepository.create_session",
+                new=AsyncMock(return_value=MagicMock(id=uuid.uuid4(), messages=[])),
+            ),
         ):
             MockRepo.return_value.get_by_id = AsyncMock(return_value=exhausted_user)
             resp = client.post("/agent/chat", headers=headers, json={"message": "hi"})
@@ -286,8 +299,14 @@ class TestTokenQuotaEndpoints:
             patch("app.api.dependencies.UserRepository") as MockAuthRepo,
             patch("app.router.chats.UserRepository") as MockChatUserRepo,
             patch("app.repositories.config.ConfigRepository.get_config", new=AsyncMock(return_value=AppConfigDB())),
-            patch("app.repositories.chats.ChatRepository.create_session", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4(), messages=[]))),
-            patch("app.repositories.chats.ChatRepository.add_message", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4()))),
+            patch(
+                "app.repositories.chats.ChatRepository.create_session",
+                new=AsyncMock(return_value=MagicMock(id=uuid.uuid4(), messages=[])),
+            ),
+            patch(
+                "app.repositories.chats.ChatRepository.add_message",
+                new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
+            ),
         ):
             MockAuthRepo.return_value.get_by_id = AsyncMock(return_value=user_past_reset)
             # AgentService uses a separate UserRepository instance for quota increment

@@ -481,9 +481,13 @@ class AgentService:
 
         try:
             cfg = await self.get_active_config()
-            target_model = model or getattr(cfg, "title_generation_model", "gemini-3.1-flash-lite") or "gemini-3.1-flash-lite"
+            target_model = (
+                model or getattr(cfg, "title_generation_model", "gemini-3.1-flash-lite") or "gemini-3.1-flash-lite"
+            )
             if target_model.lower() == "auto":
-                target_model = getattr(cfg, "title_generation_model", "gemini-3.1-flash-lite") or "gemini-3.1-flash-lite"
+                target_model = (
+                    getattr(cfg, "title_generation_model", "gemini-3.1-flash-lite") or "gemini-3.1-flash-lite"
+                )
 
             config = GenerationConfig(
                 system_instruction=(
@@ -544,7 +548,9 @@ class AgentService:
                 await self.tasks_dispatcher.enqueue_title_task(payload)
                 enqueued = True
             except Exception as e:
-                logger.warning("[AgentService] Cloud Tasks title enqueue failed (%s). Falling back to background worker.", e)
+                logger.warning(
+                    "[AgentService] Cloud Tasks title enqueue failed (%s). Falling back to background worker.", e
+                )
 
         if not enqueued:
             try:

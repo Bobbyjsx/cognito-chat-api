@@ -246,10 +246,7 @@ class AttachmentService:
         to a provider File API and persist the resulting URI back onto
         ``metadata``.
         """
-        is_svg = (
-            metadata.mime_type == "image/svg+xml"
-            or metadata.filename.lower().endswith(".svg")
-        )
+        is_svg = metadata.mime_type == "image/svg+xml" or metadata.filename.lower().endswith(".svg")
         if is_textual(metadata.type) or is_svg:
             data = await self.read_bytes(metadata)
             return [{"text": self._extract_text(metadata, data)}]
