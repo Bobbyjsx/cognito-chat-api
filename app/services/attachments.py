@@ -15,17 +15,18 @@ import re
 import zipfile
 from collections.abc import Sequence
 from datetime import datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 from xml.etree import ElementTree
 
 from fastapi import HTTPException
 
 from app.core.redis import redis_cache
-from app.models.attachments import AttachmentMetadata, AttachmentSchema
+from app.models.attachments import AttachmentMetadata, AttachmentSchema, PresignedUploadResponse
 from app.models.config import AppConfigDB
 from app.models.users import UserDB
 from app.providers.base import BaseProvider
 from app.repositories.attachments import AttachmentRepository
+from app.services.attachment_url import AttachmentUrlService
 from app.storage.base import StorageBackend
 from app.utils.mime import classify_attachment, detect_mime, is_textual
 
@@ -45,6 +46,80 @@ class AttachmentService:
         self.repo = repo
         self.storage = storage
         self.provider = provider
+        self.url_service = AttachmentUrlService(self.storage)
+
+    # ── upload tickets (presigned direct upload) ──────────────────────────────
+
+    async def create_upload_ticket(
+        self,
+        user: UserDB,
+        filename: str,
+        content_type: str | None,
+        size: int,
+        config: AppConfigDB,
+        session_id: UUID | None = None,
+        is_temporary: bool = True,
+    ) -> PresignedUploadResponse:
+        if not config.enable_attachments:
+            raise HTTPException(status_code=403, detail="Attachments are currently disabled by admin.")
+
+        if not filename or not filename.strip():
+            raise HTTPException(status_code=400, detail="Attachment filename is required.")
+
+        if size > config.attachment_max_size:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File is too large. Maximum size is {config.attachment_max_size} bytes.",
+            )
+
+        mime = detect_mime(filename, content_type)
+        attachment_type = classify_attachment(filename, mime)
+        if attachment_type.value not in config.attachment_allowed_types:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Attachment type '{attachment_type.value}' is not allowed. "
+                    f"Allowed types: {config.attachment_allowed_types}"
+                ),
+            )
+
+        att_id = uuid4()
+        key_prefix = "attachments/temp" if is_temporary else "attachments"
+        key = f"{key_prefix}/{user.id}/{attachment_type.value}/{att_id}_{filename}"
+
+        upload_url, headers = await self.storage.generate_upload_url(key, mime)
+
+        bucket_name = getattr(self.storage, "bucket_name", None)
+        storage_uri = f"gs://{bucket_name}/{key}" if bucket_name else f"local://{key}"
+
+        metadata = AttachmentMetadata(
+            id=att_id,
+            user_id=user.id,
+            session_id=session_id,
+            filename=filename,
+            mime_type=mime,
+            size=size,
+            storage_uri=storage_uri,
+            type=attachment_type,
+            is_temporary=is_temporary,
+        )
+        await self.repo.create(metadata)
+        logger.info(
+            "Attachment upload ticket created user=%s id=%s type=%s size=%d",
+            user.id,
+            metadata.id,
+            attachment_type.value,
+            size,
+        )
+        await self._invalidate_cache(user.id)
+        schema = await self.url_service.enrich_attachment(metadata)
+        return PresignedUploadResponse(
+            attachment_id=metadata.id,
+            upload_url=upload_url,
+            method="PUT",
+            headers=headers,
+            attachment=schema,
+        )
 
     # ── ingest ────────────────────────────────────────────────────────────────
 
@@ -105,7 +180,7 @@ class AttachmentService:
             size,
         )
         await self._invalidate_cache(user.id)
-        return AttachmentSchema.model_validate(metadata, from_attributes=True)
+        return await self.url_service.enrich_attachment(metadata)
 
     # ── reads ─────────────────────────────────────────────────────────────────
 
@@ -128,12 +203,20 @@ class AttachmentService:
         attachments = await self.resolve_many(user_id, ids)
         for metadata in attachments:
             if metadata.is_temporary:
-                if metadata.storage_uri and "temp/" in metadata.storage_uri:
+                old_uri = metadata.storage_uri
+                if not old_uri and metadata.bucket and metadata.object_name:
+                    old_uri = (
+                        f"local://{metadata.object_name}"
+                        if metadata.bucket == "local"
+                        else f"gs://{metadata.bucket}/{metadata.object_name}"
+                    )
+                if old_uri and "temp/" in old_uri:
                     try:
                         new_key = f"attachments/{user_id}/{metadata.type.value}/{metadata.filename}"
-                        new_uri = await self.storage.move(metadata.storage_uri, new_key)
+                        new_uri = await self.storage.move(old_uri, new_key)
                         metadata.storage_uri = new_uri
-                        await self.repo.update_storage_uri(metadata.id, new_uri)
+                        metadata.object_name = new_key
+                        await self.repo.update_storage_location(metadata.id, new_uri, new_key)
                     except Exception:
                         logger.exception("Failed to move attachment %s out of temp", metadata.id)
                 metadata.is_temporary = False
@@ -145,17 +228,29 @@ class AttachmentService:
             raise HTTPException(status_code=404, detail="Attachment has no stored content.")
         return await self.storage.read_bytes(metadata.storage_uri)
 
+    async def get_download_url(self, metadata: AttachmentMetadata, expires_in: int = 3600) -> str:
+        if not metadata.storage_uri and not (metadata.bucket and metadata.object_name):
+            raise HTTPException(status_code=404, detail="Attachment has no stored content.")
+        url, _ = await self.url_service.generate_attachment_url(metadata, expires_in=expires_in)
+        if not url:
+            raise HTTPException(status_code=500, detail="Failed to generate download URL.")
+        return url
+
     # ── part preparation ──────────────────────────────────────────────────────
 
     async def prepare_parts(self, metadata: AttachmentMetadata) -> list[dict]:
         """Return provider-agnostic parts for an attachment.
 
-        Textual attachments are converted to text parts here; media
+        Textual attachments (and SVGs) are converted to text parts here; media
         (image/pdf/audio/video) is delegated to the provider, which may upload
         to a provider File API and persist the resulting URI back onto
         ``metadata``.
         """
-        if is_textual(metadata.type):
+        is_svg = (
+            metadata.mime_type == "image/svg+xml"
+            or metadata.filename.lower().endswith(".svg")
+        )
+        if is_textual(metadata.type) or is_svg:
             data = await self.read_bytes(metadata)
             return [{"text": self._extract_text(metadata, data)}]
 
@@ -172,12 +267,7 @@ class AttachmentService:
         metadata = await self.repo.get(attachment_id, user_id)
         if metadata is None:
             return False
-        if metadata.storage_uri:
-            try:
-                await self.storage.delete(metadata.storage_uri)
-            except Exception:
-                logger.exception("Failed to delete object %s", metadata.storage_uri)
-        await self.repo.delete(attachment_id)
+        await self.repo.soft_delete(attachment_id)
         await self._invalidate_cache(user_id)
         return True
 

@@ -88,27 +88,32 @@ def clear_database():
         import urllib.request
 
         emulator_host = os.environ.get("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080")
-        # Emulator REST API for wiping the database
-        req = urllib.request.Request(
-            f"http://{emulator_host}/emulator/v1/projects/test-project/databases/(default)/documents",
-            method="DELETE",
-        )
-        urllib.request.urlopen(req, timeout=2.0)
-    except Exception:
-        emulator_host = os.environ.get("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080")
-        print(f"Warning: Could not connect to Firestore emulator at {emulator_host}. Is it running?")
+        emulator_running = False
+        try:
+            req = urllib.request.Request(
+                f"http://{emulator_host}/emulator/v1/projects/test-project/databases/(default)/documents",
+                method="DELETE",
+            )
+            urllib.request.urlopen(req, timeout=0.5)
+            emulator_running = True
+        except Exception:
+            emulator_host = os.environ.get("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080")
+            print(f"Warning: Could not connect to Firestore emulator at {emulator_host}. Is it running?")
 
-    # Chat/config paths require configs/app_config; seed defaults after wipe.
-    try:
-        from google.cloud import firestore
+        # Chat/config paths require configs/app_config; seed defaults after wipe if emulator is running.
+        if emulator_running:
+            try:
+                from google.cloud import firestore
 
-        from app.models.config import AppConfigDB
+                from app.models.config import AppConfigDB
 
-        db = firestore.Client(project="test-project")
-        data = AppConfigDB().model_dump(mode="json")
-        db.collection("configs").document("app_config").set(data)
+                db = firestore.Client(project="test-project")
+                data = AppConfigDB().model_dump(mode="json")
+                db.collection("configs").document("app_config").set(data)
+            except Exception as exc:
+                print(f"Warning: Could not seed app_config: {exc}")
     except Exception as exc:
-        print(f"Warning: Could not seed app_config: {exc}")
+        print(f"Warning in clear_database: {exc}")
     yield
 
 

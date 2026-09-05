@@ -87,6 +87,20 @@ class SharedChatRepository:
 
         raw_msgs.sort(key=_parse_created_at)
 
+        # Pre-fetch attachment metadata for any attached files
+        all_att_ids = set()
+        for msg_data in raw_msgs:
+            for aid in msg_data.get("attachment_ids", []) or []:
+                all_att_ids.add(str(aid))
+
+        att_map = {}
+        if all_att_ids:
+            from app.repositories.attachments import AttachmentRepository
+
+            att_repo = AttachmentRepository(self.db)
+            att_metas = await att_repo.get_many(user_id, list(all_att_ids))
+            att_map = {str(m.id): m for m in att_metas}
+
         snapshot_messages: list[SharedChatMessageDB] = []
         for msg_data in raw_msgs:
             raw_role = msg_data.get("role")
@@ -115,11 +129,34 @@ class SharedChatRepository:
                 part_text = str(part.get("text", ""))
                 if "You are Cognito" in part_text and "Security & Confidentiality Guardrails" in part_text:
                     continue
+                if isinstance(part, dict) and part.get("type") == "file":
+                    part = {k: v for k, v in part.items() if k not in ("url", "url_expires_at", "urlExpiresAt")}
                 clean_parts.append(part)
 
             content = msg_data.get("content", "")
             if "You are Cognito" in content and "Security & Confidentiality Guardrails" in content:
                 continue
+
+            # Ensure file parts are present in clean_parts if message references attachment_ids
+            has_file = any(p.get("type") == "file" for p in clean_parts if isinstance(p, dict))
+            if not has_file and msg_data.get("attachment_ids"):
+                for aid in msg_data["attachment_ids"]:
+                    s_aid = str(aid)
+                    if s_aid in att_map:
+                        meta = att_map[s_aid]
+                        clean_parts.append(
+                            {
+                                "type": "file",
+                                "attachment_id": str(meta.id),
+                                "filename": meta.filename,
+                                "contentType": meta.mime_type,
+                                "mediaType": meta.mime_type,
+                                "size": meta.size,
+                                "bucket": meta.bucket,
+                                "object_name": meta.object_name,
+                                "storage_uri": meta.storage_uri,
+                            }
+                        )
 
             snapshot_messages.append(
                 SharedChatMessageDB(

@@ -51,3 +51,20 @@ def create_refresh_token(data: dict, expires_delta: timedelta | None = None) -> 
     to_encode.update({"exp": expire, "type": "refresh"})
     encoded_jwt = jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
     return encoded_jwt
+
+
+def create_storage_token(data: dict, expires_in: int = 1800) -> str:
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+    to_encode.update({"exp": expire, "purpose": "storage"})
+    return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
+
+
+def verify_storage_token(token: str) -> dict | None:
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+        if payload.get("purpose") != "storage":
+            return None
+        return payload
+    except Exception:
+        return None

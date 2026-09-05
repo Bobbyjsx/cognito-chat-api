@@ -58,3 +58,32 @@ class LocalStorageBackend(StorageBackend):
         old_path.rename(new_path)
         logger.info("Moved local object %s to %s", old_uri, new_key)
         return f"{LOCAL_URI_PREFIX}{new_key}"
+
+    async def generate_upload_url(
+        self, key: str, content_type: str, expires_in: int = 1800
+    ) -> tuple[str, dict[str, str]]:
+        from app.core.security import create_storage_token
+
+        token = create_storage_token({"action": "upload", "key": key, "content_type": content_type}, expires_in)
+        return f"/agent/attachments/direct-upload?token={token}", {"Content-Type": content_type}
+
+    async def generate_download_url(
+        self,
+        uri: str,
+        expires_in: int = 7200,
+        filename: str | None = None,
+        disposition: str = "inline",
+    ) -> str:
+        from app.core.security import create_storage_token
+
+        rel = uri.removeprefix(LOCAL_URI_PREFIX)
+        token_payload = {
+            "action": "download",
+            "uri": uri,
+            "key": rel,
+            "disposition": disposition,
+        }
+        if filename:
+            token_payload["filename"] = filename
+        token = create_storage_token(token_payload, expires_in)
+        return f"/agent/attachments/direct-content?token={token}"

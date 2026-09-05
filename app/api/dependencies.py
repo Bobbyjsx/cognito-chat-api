@@ -67,6 +67,15 @@ def build_storage_backend_instance() -> StorageBackend:
     return _storage_backend
 
 
+def get_attachment_url_service(
+    storage: StorageBackend = Depends(get_storage_backend),
+):
+    """Return an AttachmentUrlService configured with the current storage backend."""
+    from app.services.attachment_url import AttachmentUrlService
+
+    return AttachmentUrlService(storage)
+
+
 async def decode_jwt_payload(token: str) -> dict:
     header = jwt.get_unverified_header(token)
     alg = header.get("alg") or ""
@@ -191,7 +200,7 @@ async def get_current_user(
 
     # Cache user auth for 120 seconds
     try:
-        await redis_cache.set(CacheKeys.user_auth(user_id), user, expire=1800)
+        await redis_cache.set(CacheKeys.user_auth(user_id), user, expire=120)
     except Exception as exc:
         logger.debug("Failed to cache user in Redis: %s", exc)
 

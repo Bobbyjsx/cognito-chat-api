@@ -24,3 +24,19 @@ class StorageBackend(ABC):
     @abstractmethod
     async def move(self, old_uri: str, new_key: str) -> str:
         """Move the object at ``old_uri`` to ``new_key`` and return the new URI."""
+
+    @abstractmethod
+    async def generate_upload_url(
+        self, key: str, content_type: str, expires_in: int = 1800
+    ) -> tuple[str, dict[str, str]]:
+        """Generate a presigned upload URL and headers for direct upload."""
+
+    @abstractmethod
+    async def generate_download_url(
+        self,
+        uri: str,
+        expires_in: int = 7200,
+        filename: str | None = None,
+        disposition: str = "inline",
+    ) -> str:
+        """Generate a presigned download URL for reading or downloading the object."""

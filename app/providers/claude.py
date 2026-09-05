@@ -549,6 +549,9 @@ class ClaudeProvider(BaseProvider):
         mime_type = attachment.mime_type
         b64_str = base64.standard_b64encode(data).decode("utf-8")
 
+        if mime_type == "image/svg+xml" or attachment.filename.lower().endswith(".svg"):
+            return [{"text": data.decode("utf-8", errors="replace")}]
+
         if attachment.type == "image" and mime_type in SUPPORTED_IMAGE_MIMES:
             return [{"inline_data": {"mime_type": mime_type, "data": b64_str}}]
 

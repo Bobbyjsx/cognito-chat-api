@@ -27,6 +27,7 @@ import sys
 # Ensure project root is on sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from scripts.migrations.attachments import runner as attachments_runner
 from scripts.migrations.chat_sessions import runner as chat_sessions_runner
 from scripts.migrations.core_config import runner as core_config_runner
 from scripts.migrations.smart_model_routing import runner as smart_model_routing_runner
@@ -59,6 +60,11 @@ FEATURES = {
         "aliases": ["chat_sessions", "sessions", "session-list", "session-preview"],
         "runner": chat_sessions_runner,
         "description": "Session list documents and denormalized last_message_content previews",
+    },
+    "attachments": {
+        "aliases": ["attachment", "files", "gcs", "storage", "upload"],
+        "runner": attachments_runner,
+        "description": "Canonical storage identity backfill and Firestore signed URL isolation",
     },
 }
 

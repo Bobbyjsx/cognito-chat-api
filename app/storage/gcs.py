@@ -92,3 +92,46 @@ class GCSStorageBackend(StorageBackend):
         await asyncio.to_thread(_move)
         logger.info("Moved object gs://%s/%s to %s", self.bucket_name, old_key, new_key)
         return f"{GCS_URI_PREFIX}{self.bucket_name}/{new_key}"
+
+    async def generate_upload_url(
+        self, key: str, content_type: str, expires_in: int = 1800
+    ) -> tuple[str, dict[str, str]]:
+        from datetime import timedelta
+
+        def _sign():
+            blob = self._bucket.blob(key)
+            url = blob.generate_signed_url(
+                version="v4",
+                expiration=timedelta(seconds=expires_in),
+                method="PUT",
+                content_type=content_type,
+            )
+            return url, {"Content-Type": content_type}
+
+        return await asyncio.to_thread(_sign)
+
+    async def generate_download_url(
+        self,
+        uri: str,
+        expires_in: int = 7200,
+        filename: str | None = None,
+        disposition: str = "inline",
+    ) -> str:
+        from datetime import timedelta
+
+        key = self._key_from_uri(uri)
+
+        def _sign():
+            blob = self._bucket.blob(key)
+            kwargs = {
+                "version": "v4",
+                "expiration": timedelta(seconds=expires_in),
+                "method": "GET",
+            }
+            if disposition == "attachment":
+                kwargs["response_disposition"] = (
+                    f'attachment; filename="{filename}"' if filename else "attachment"
+                )
+            return blob.generate_signed_url(**kwargs)
+
+        return await asyncio.to_thread(_sign)
