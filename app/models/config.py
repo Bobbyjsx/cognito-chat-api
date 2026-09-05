@@ -125,6 +125,10 @@ class AppConfigDB(BaseModel):
     # Cheaper flash-lite tiers (e.g. gemini-2.0-flash-lite) do NOT support audio.
     stt_model: str = "gemini-3.1-flash-lite"
 
+    # AI Title Generation (offloaded to worker when dynamic heuristic chooses AI)
+    enable_ai_title_generation: bool = True
+    title_generation_model: str = "gemini-3.1-flash-lite"
+
     # ── Smart Model Router Config ─────────────────────────────────────────────
     enable_smart_routing: bool = True
     router_model: str = "gemini-3.1-flash-lite"

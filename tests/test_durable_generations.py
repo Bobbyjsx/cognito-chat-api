@@ -49,8 +49,8 @@ def test_abandoned_stream_creates_durable_record(client: TestClient, test_user_a
         session_id=session_id,
         status=GenerationStatus.QUEUED,
         prompt="Hello background worker",
-        requested_model="gemini-2.5-flash",
-        resolved_model="gemini-2.5-flash",
+        requested_model="gemini-3.6-flash",
+        resolved_model="gemini-3.6-flash",
     )
     db.collection("generations").document(gen_id).set(generation.model_dump(mode="json"))
 
@@ -105,8 +105,8 @@ def test_background_worker_claims_and_executes(client: TestClient, test_user_and
         user_id=user_id,
         session_id=session_id,
         status=GenerationStatus.RUNNING_LIVE,
-        requested_model="gemini-2.5-flash",
-        resolved_model="gemini-2.5-flash",
+        requested_model="gemini-3.6-flash",
+        resolved_model="gemini-3.6-flash",
         prompt="Hello background worker",
         created_at=stale_time,
         updated_at=stale_time,

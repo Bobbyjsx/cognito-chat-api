@@ -349,10 +349,30 @@ class AgentService:
     # ── session handling ──────────────────────────────────────────────────────
 
     @staticmethod
-    def _rule_based_title_summary(first_message: str) -> str:
-        """Derives a semantic summary title using pattern templates when LLM is unavailable."""
+    def sanitize_title_prompt(text: str) -> str:
+        """Extract clean text for title generation, removing code blocks, urls, and limiting chars to reduce token cost."""
+        if not text or not text.strip():
+            return ""
+        cleaned = re.sub(r"```[\s\S]*?```", "", text)
+        cleaned = re.sub(r"`[^`]*`", "", cleaned)
+        cleaned = re.sub(r"https?://\S+", "", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        # Strictly limit characters to minimize cost (no attachments, short prompt)
+        return cleaned[:160].strip()
+
+    @classmethod
+    def _evaluate_title_strategy(cls, first_message: str) -> tuple[str, bool]:
+        """
+        Dynamically chooses between local and AI title generation based on prompt structure.
+        Returns: (initial_title, needs_ai_worker)
+
+        If the prompt matches a high-confidence template pattern, returns (summary, False)
+        so it resolves locally at 0 cost and 0 latency.
+        If no high-confidence rule matches, returns (fast_fallback_title, True) so that
+        the session has an immediate title and AI title generation is offloaded to the worker.
+        """
         if not first_message or not first_message.strip():
-            return "New Chat"
+            return "New Chat", False
 
         text = re.sub(r"```[\s\S]*?```", "", first_message)
         text = re.sub(r"`[^`]*`", "", text)
@@ -370,11 +390,11 @@ class AgentService:
                 r"Help with \1",
             ),
             (
-                r"^(?:(?:can|could|would)\s+(?:you\s+)?(?:please\s+)?)?(?:write|create|build|code|implement)\s+(?:a|an)?\s*(.+?)\s*(?:script|tool|program|bot|app|api|service)",
+                r"^(?:(?:can|could|would)\s+(?:you\s+)?(?:please\s+)?|please\s+)?(?:write|create|build|code|implement)\s+(?:a|an)?\s*(.+?)\s*(?:script|tool|program|bot|app|api|service)",
                 r"\1 script",
             ),
             (
-                r"^(?:(?:can|could|would)\s+(?:you\s+)?(?:please\s+)?)?(?:explain|tell\s+me\s+about|teach\s+me)\s+(?:the\s+)?(.+)",
+                r"^(?:(?:can|could|would)\s+(?:you\s+)?(?:please\s+)?|please\s+)?(?:explain|tell\s+me\s+about|teach\s+me)\s+(?:the\s+)?(.+)",
                 r"Overview of \1",
             ),
             (
@@ -412,11 +432,20 @@ class AgentService:
                 ).strip()
                 words = summary.split()
                 if len(words) <= 6:
-                    return summary[0].upper() + summary[1:]
+                    return (summary[0].upper() + summary[1:]), False
                 truncated = " ".join(words[:5])
-                return truncated[0].upper() + truncated[1:]
+                return (truncated[0].upper() + truncated[1:]), False
 
-        # Generic clean extraction
+        # Greeting check: simple greetings resolve locally as "New Chat" without invoking AI
+        greeting_match = re.match(
+            r"^(hi|hello|hey|greetings|good morning|good afternoon|good evening|yo)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if greeting_match and len(text.split()) <= 3:
+            return "New Chat", False
+
+        # Generic clean extraction for fast immediate title while AI worker processes
         clean = re.sub(
             r"^(can|could|would) you (please\s+)?(tell me |explain |help me with |show me |write |create |summarize )?",
             "",
@@ -432,19 +461,30 @@ class AgentService:
         ).strip()
         words = clean.split() or first_message.strip().split()
         summary = " ".join(words[:5]).strip()
-        return (summary[0].upper() + summary[1:]) if summary else "New Chat"
+        initial_title = (summary[0].upper() + summary[1:]) if summary else "New Chat"
+        return initial_title, True
 
-    async def _generate_title(self, first_message: str, model: str | None = None) -> str:
-        """Generates a concise 3-5 word semantic summary title for the session (e.g. 'Assistance with geography assignment') using LLM, with pattern template fallback."""
-        if not first_message or not first_message.strip():
-            return "New Chat"
+    @staticmethod
+    def _rule_based_title_summary(first_message: str) -> str:
+        """Derives a semantic summary title using pattern templates when LLM is unavailable."""
+        title, _ = AgentService._evaluate_title_strategy(first_message)
+        return title
+
+    async def generate_ai_title(self, prompt: str, model: str | None = None) -> str | None:
+        """
+        Invokes LLM with minimal prompt snippet (no attachments, max 160 chars) to produce a 3-5 word summary title.
+        Runs strictly in background worker to never block chat streaming TTFT.
+        """
+        clean_snippet = self.sanitize_title_prompt(prompt)
+        if not clean_snippet:
+            return None
 
         try:
-            target_model = model or "gemini-2.5-flash"
+            cfg = await self.get_active_config()
+            target_model = model or getattr(cfg, "title_generation_model", "gemini-3.1-flash-lite") or "gemini-3.1-flash-lite"
             if target_model.lower() == "auto":
-                target_model = "gemini-2.5-flash"
+                target_model = getattr(cfg, "title_generation_model", "gemini-3.1-flash-lite") or "gemini-3.1-flash-lite"
 
-            prompt_snippet = first_message.strip()[:600]
             config = GenerationConfig(
                 system_instruction=(
                     "You generate short, descriptive chat session titles. "
@@ -459,25 +499,69 @@ class AgentService:
                 ),
                 thinking_budget=0,
                 include_thoughts=False,
+                tool_configs=[],
             )
             content = [
                 ContentPart(
                     role="user",
-                    parts=[{"text": f"User: {prompt_snippet}"}],
+                    parts=[{"text": f"User: {clean_snippet}"}],
                 )
             ]
-            res = await asyncio.wait_for(
-                self.executor.generate(target_model, content, config),
-                timeout=2.0,
-            )
+            res = await self.executor.generate(target_model, content, config)
             raw_title = (res.text or "").strip().strip("\"'*`").rstrip(".")
             raw_title = re.sub(r"^(title|summary):\s*", "", raw_title, flags=re.IGNORECASE).strip()
             if raw_title and 3 <= len(raw_title) <= 55 and "\n" not in raw_title:
                 return raw_title[0].upper() + raw_title[1:]
         except Exception as exc:
-            logger.debug("[AgentService] LLM title summary skipped or timed out (%s), using rule-based summary.", exc)
+            logger.debug("[AgentService] generate_ai_title failed: %s", exc)
 
-        return self._rule_based_title_summary(first_message)
+        return None
+
+    async def enqueue_title_generation(
+        self,
+        session_id: uuid.UUID | str,
+        user_id: uuid.UUID | str,
+        prompt_snippet: str,
+        model: str | None = None,
+    ) -> None:
+        """Offloads AI title generation to Cloud Tasks worker or local background worker."""
+        clean_snippet = self.sanitize_title_prompt(prompt_snippet)
+        if not clean_snippet:
+            return
+
+        from app.schemas.task import TitleTaskPayload
+
+        payload = TitleTaskPayload(
+            session_id=str(session_id),
+            user_id=str(user_id),
+            prompt=clean_snippet,
+            model=model,
+        )
+
+        enqueued = False
+        if self.tasks_dispatcher is not None:
+            try:
+                await self.tasks_dispatcher.enqueue_title_task(payload)
+                enqueued = True
+            except Exception as e:
+                logger.warning("[AgentService] Cloud Tasks title enqueue failed (%s). Falling back to background worker.", e)
+
+        if not enqueued:
+            try:
+                from app.services.generation_worker import GenerationWorkerService
+
+                worker = GenerationWorkerService(
+                    generation_repo=self.generation_repo,
+                    chat_repo=self.chat_repo,
+                    user_repo=self.user_repo,
+                    config_repo=self.config_repo,
+                    agent_service=self,
+                )
+                task = asyncio.create_task(worker.execute_title_task(payload))
+                _fire_and_forget_tasks.add(task)
+                task.add_done_callback(_fire_and_forget_tasks.discard)
+            except Exception as e:
+                logger.error("[AgentService] Failed to dispatch local title worker task: %s", e)
 
     async def _resolve_session(
         self,
@@ -485,22 +569,29 @@ class AgentService:
         session_id: uuid.UUID | None,
         message_text: str,
         model: str | None = None,
-    ) -> tuple[ChatSessionDB, uuid.UUID, str | None]:
-        title = None
+    ) -> tuple[ChatSessionDB, uuid.UUID, str, bool]:
+        """
+        Resolves or creates the session, assigning an initial title to ensure it is stored
+        in the DB, and deciding whether AI title generation should be offloaded to the worker.
+        Returns: (session, session_id, initial_title, needs_ai_worker)
+        """
+        initial_title, needs_ai_worker = self._evaluate_title_strategy(message_text)
+
         if session_id is None:
-            title = await self._generate_title(message_text, model=model)
-            session = await self.chat_repo.create_session(user_id=user.id, title=title)
+            session = await self.chat_repo.create_session(user_id=user.id, title=initial_title)
             session_id = session.id
         else:
             session, _ = await self.chat_repo.get_session(session_id, user_id=user.id)
             if not session:
                 raise HTTPException(status_code=404, detail=f"Session {session_id} not found.")
-            if not session.title:
-                title = await self._generate_title(message_text, model=model)
-                await self.chat_repo.update_session_title(session_id, title)
+            if not session.title or session.title == "New Chat":
+                await self.chat_repo.update_session_title(session_id, initial_title, user_id=user.id)
+                session.title = initial_title
             else:
-                title = session.title
-        return session, session_id, title
+                initial_title = session.title
+                needs_ai_worker = False
+
+        return session, session_id, initial_title, needs_ai_worker
 
     # ── attachments ───────────────────────────────────────────────────────────
 
@@ -636,7 +727,20 @@ class AgentService:
         active_config = await self.get_active_config()
         await self._quota_precheck(user, active_config)
 
-        session, session_id, title = await self._resolve_session(user, session_id, message_text, model=requested_model)
+        _session_res = await self._resolve_session(user, session_id, message_text, model=requested_model)
+        if len(_session_res) == 4:
+            session, session_id, title, needs_ai_worker = _session_res
+        else:
+            session, session_id, title = _session_res[:3]
+            needs_ai_worker = False
+
+        if needs_ai_worker and getattr(active_config, "enable_ai_title_generation", True):
+            _enqueue_task = asyncio.create_task(
+                self.enqueue_title_generation(session_id, user.id, message_text, model=requested_model)
+            )
+            _fire_and_forget_tasks.add(_enqueue_task)
+            _enqueue_task.add_done_callback(_fire_and_forget_tasks.discard)
+
         attachments = await self._prepare_attachments(user, active_config, attachment_ids, session_id)
 
         from app.ai.router.schemas import RequestContext
@@ -835,10 +939,22 @@ class AgentService:
             from app.models.chats import MessageRole
 
             async def _shielded_prep():
-                _active_config, (_session, _session_id, _title) = await asyncio.gather(
+                _active_config, _session_res = await asyncio.gather(
                     self.get_active_config(),
                     self._resolve_session(user, session_id, message_text, model=requested_model),
                 )
+                if len(_session_res) == 4:
+                    _session, _session_id, _title, _needs_ai_worker = _session_res
+                else:
+                    _session, _session_id, _title = _session_res[:3]
+                    _needs_ai_worker = False
+
+                if _needs_ai_worker and getattr(_active_config, "enable_ai_title_generation", True):
+                    _enqueue_task = asyncio.create_task(
+                        self.enqueue_title_generation(_session_id, user.id, message_text, model=requested_model)
+                    )
+                    _fire_and_forget_tasks.add(_enqueue_task)
+                    _enqueue_task.add_done_callback(_fire_and_forget_tasks.discard)
 
                 if state is not None:
                     state["session_id"] = str(_session_id)
@@ -1255,7 +1371,7 @@ async def handle_stream_abandonment(state: dict, agent_service: AgentService) ->
         user = await agent_service.user_repo.get_by_id(user_id_str)
         if not user:
             return
-        _, session_id, _ = await agent_service._resolve_session(user, None, state.get("message_text", ""))
+        _, session_id, _, _ = await agent_service._resolve_session(user, None, state.get("message_text", ""))
         session_id_str = str(session_id)
         state["session_id"] = session_id_str
     else:

@@ -8,7 +8,12 @@ from app.repositories.config import ConfigRepository
 from app.repositories.generations import GenerationRepository
 from app.repositories.users import UserRepository
 from app.router.chats import get_agent_service
-from app.schemas.task import GenerationTaskPayload, TaskExecutionResponse
+from app.schemas.task import (
+    GenerationTaskPayload,
+    TaskExecutionResponse,
+    TitleTaskExecutionResponse,
+    TitleTaskPayload,
+)
 from app.services.generation_worker import GenerationWorkerService
 
 router = APIRouter(prefix="/tasks", tags=["Tasks Worker"])
@@ -49,3 +54,24 @@ async def execute_generation_task(
     attempt_number = int(request.headers.get("X-CloudTasks-TaskRetryCount", "0")) + 1
     payload = GenerationTaskPayload(generation_id=generation_id, attempt_number=attempt_number)
     return await worker.execute_task(payload)
+
+
+@router.post(
+    "/titles/{session_id}",
+    response_model=TitleTaskExecutionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Cloud Tasks asynchronous title worker",
+)
+async def execute_title_task(
+    session_id: str,
+    payload: TitleTaskPayload,
+    request: Request,
+    is_authorized: bool = Depends(verify_cloud_tasks_caller),
+    worker: GenerationWorkerService = Depends(get_generation_worker_service),
+) -> TitleTaskExecutionResponse:
+    """
+    Asynchronously generates a concise AI session title scheduled by Cloud Tasks.
+    """
+    attempt_number = int(request.headers.get("X-CloudTasks-TaskRetryCount", "0")) + 1
+    payload.attempt_number = attempt_number
+    return await worker.execute_title_task(payload)

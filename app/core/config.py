@@ -12,7 +12,7 @@ class Settings(BaseSettings):
 
     # Explicitly define this so Pydantic expects it from the .env file
     gemini_api_key: str = ""
-    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
     anthropic_api_key: str = ""
     openai_api_key: str = ""
 
