@@ -146,8 +146,6 @@ class AttachmentRepository:
         doc_ref = self.collection.document(str(attachment_id))
         await doc_ref.update({"storage_uri": storage_uri})
 
-    async def update_storage_location(
-        self, attachment_id: UUID | str, storage_uri: str, object_name: str
-    ) -> None:
+    async def update_storage_location(self, attachment_id: UUID | str, storage_uri: str, object_name: str) -> None:
         doc_ref = self.collection.document(str(attachment_id))
         await doc_ref.update({"storage_uri": storage_uri, "object_name": object_name})

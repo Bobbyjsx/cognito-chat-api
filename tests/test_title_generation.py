@@ -17,7 +17,9 @@ from app.services.generation_worker import GenerationWorkerService
 
 def test_sanitize_title_prompt():
     """Verify that sanitize_title_prompt strips markdown, urls, and caps chars strictly at 160."""
-    long_code = "Can you fix this code?\n```python\n" + ("x = 1\n" * 50) + "```\nCheck this url: https://example.com/api"
+    long_code = (
+        "Can you fix this code?\n```python\n" + ("x = 1\n" * 50) + "```\nCheck this url: https://example.com/api"
+    )
     sanitized = AgentService.sanitize_title_prompt(long_code)
     assert "x = 1" not in sanitized
     assert "https://" not in sanitized
@@ -42,9 +44,7 @@ def test_evaluate_title_strategy_local_patterns():
     assert needs_worker is False
 
     # Debugging
-    title, needs_worker = AgentService._evaluate_title_strategy(
-        "Debug this KeyError in my FastAPI endpoint"
-    )
+    title, needs_worker = AgentService._evaluate_title_strategy("Debug this KeyError in my FastAPI endpoint")
     assert title.startswith("Debugging")
     assert needs_worker is False
 
@@ -114,16 +114,20 @@ async def test_worker_executes_title_task_and_updates_db():
     session_id = str(uuid.uuid4())
 
     # Pre-create session in DB with initial placeholder title
-    await db.collection("sessions").document(session_id).set(
-        {
-            "id": session_id,
-            "user_id": user_id,
-            "title": "Temporary Title",
-            "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "is_deleted": False,
-            "read_status": "read",
-        }
+    await (
+        db.collection("sessions")
+        .document(session_id)
+        .set(
+            {
+                "id": session_id,
+                "user_id": user_id,
+                "title": "Temporary Title",
+                "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "is_deleted": False,
+                "read_status": "read",
+            }
+        )
     )
 
     mock_agent = MagicMock()

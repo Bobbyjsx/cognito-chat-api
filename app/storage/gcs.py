@@ -129,9 +129,7 @@ class GCSStorageBackend(StorageBackend):
                 "method": "GET",
             }
             if disposition == "attachment":
-                kwargs["response_disposition"] = (
-                    f'attachment; filename="{filename}"' if filename else "attachment"
-                )
+                kwargs["response_disposition"] = f'attachment; filename="{filename}"' if filename else "attachment"
             return blob.generate_signed_url(**kwargs)
 
         return await asyncio.to_thread(_sign)

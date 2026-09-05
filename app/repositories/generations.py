@@ -145,6 +145,7 @@ class GenerationRepository:
             with contextlib.suppress(Exception):
                 from app.core.cache_keys import CacheKeys
                 from app.core.redis import redis_cache
+
                 await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))
         return count
 

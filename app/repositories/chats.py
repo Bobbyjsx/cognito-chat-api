@@ -28,14 +28,14 @@ class ChatRepository:
         await doc_ref.set(data)
         return session_db
 
-    async def update_session_title(
-        self, session_id: UUID | str, title: str, user_id: UUID | str | None = None
-    ) -> None:
+    async def update_session_title(self, session_id: UUID | str, title: str, user_id: UUID | str | None = None) -> None:
         doc_ref = self.collection.document(str(session_id))
-        await doc_ref.update({
-            "title": title,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        })
+        await doc_ref.update(
+            {
+                "title": title,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
         if user_id:
             from app.core.cache_keys import CacheKeys
             from app.core.redis import redis_cache

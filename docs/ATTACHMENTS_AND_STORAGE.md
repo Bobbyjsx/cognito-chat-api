@@ -132,9 +132,7 @@ class AttachmentUrlService:
         self, attachment: AttachmentMetadata | str, expires_in: int = 3600
     ) -> tuple[str | None, datetime | None]: ...
 
-    async def enrich_attachment(
-        self, metadata: AttachmentMetadata, expires_in: int = 3600
-    ) -> AttachmentSchema: ...
+    async def enrich_attachment(self, metadata: AttachmentMetadata, expires_in: int = 3600) -> AttachmentSchema: ...
 
     async def enrich_attachments(
         self, metadatas: Sequence[AttachmentMetadata], expires_in: int = 3600

@@ -62,12 +62,7 @@ class AttachmentUrlService:
             bucket = attachment.get("bucket")
             object_name = attachment.get("object_name") or attachment.get("objectName")
             storage_uri = attachment.get("storage_uri") or attachment.get("storageUri")
-            if (
-                storage_uri
-                and "temp/" not in storage_uri
-                and object_name
-                and "temp/" in object_name
-            ):
+            if storage_uri and "temp/" not in storage_uri and object_name and "temp/" in object_name:
                 target = storage_uri
             elif bucket and object_name:
                 target = f"local://{object_name}" if bucket == "local" else f"gs://{bucket}/{object_name}"
@@ -102,12 +97,8 @@ class AttachmentUrlService:
     ) -> AttachmentSchema:
         """Convert AttachmentMetadata to wire schema and attach fresh signed URLs."""
         schema = AttachmentSchema.model_validate(metadata, from_attributes=True)
-        url, expires_at = await self.generate_attachment_url(
-            metadata, expires_in=expires_in, disposition="inline"
-        )
-        download_url, _ = await self.generate_attachment_url(
-            metadata, expires_in=expires_in, disposition="attachment"
-        )
+        url, expires_at = await self.generate_attachment_url(metadata, expires_in=expires_in, disposition="inline")
+        download_url, _ = await self.generate_attachment_url(metadata, expires_in=expires_in, disposition="attachment")
         schema.url = url
         schema.download_url = download_url
         schema.url_expires_at = expires_at
