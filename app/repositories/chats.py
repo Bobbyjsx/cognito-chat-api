@@ -197,6 +197,14 @@ class ChatRepository:
         if isinstance(generation_id, str):
             generation_id = UUID(generation_id)
 
+        clean_parts = []
+        for p in parts or []:
+            if isinstance(p, dict) and p.get("type") == "file":
+                cleaned = {k: v for k, v in p.items() if k not in ("url", "url_expires_at", "urlExpiresAt")}
+                clean_parts.append(cleaned)
+            else:
+                clean_parts.append(p)
+
         msg_kwargs = {
             "session_id": session_id,
             "role": role,
@@ -204,7 +212,7 @@ class ChatRepository:
             "error": error,
             "attachment_ids": attachment_ids or [],
             "generation_id": generation_id,
-            "parts": parts or [],
+            "parts": clean_parts,
         }
         if created_at is not None:
             msg_kwargs["created_at"] = created_at

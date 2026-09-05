@@ -141,6 +141,11 @@ class GenerationRepository:
                 error=reason,
             )
             count += 1
+        if count > 0:
+            with contextlib.suppress(Exception):
+                from app.core.cache_keys import CacheKeys
+                from app.core.redis import redis_cache
+                await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))
         return count
 
     async def create(self, generation: GenerationDB) -> GenerationDB:

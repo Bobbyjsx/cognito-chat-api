@@ -86,27 +86,20 @@ Token lifecycle management is completely transparent to the client. The client d
 
 ---
 
-## Attachments (`app/attachments` pipeline)
+## Attachments & Cloud Storage ([Detailed Architecture](./ATTACHMENTS_AND_STORAGE.md))
 
-Storage layout:
+Storage layout and principles:
 
-- **Firestore** stores only `AttachmentMetadata` (id, user_id, session_id, filename, mime_type, size, type, storage_uri, gemini_file_uri, uploaded_at) in the `attachments` collection. Bytes never live in Firestore.
-- **Object storage** is behind `StorageBackend` (`upload_bytes` / `read_bytes` / `delete`). Two implementations:
+- **Firestore** stores only stable canonical identity in `AttachmentMetadata` (`id`, `user_id`, `session_id`, `filename`, `mime_type`, `size`, `bucket`, `object_name`, `storage_uri`, `type`, `uploaded_at`). **Signed URLs are never stored in Firestore.**
+- **Object storage** is behind `StorageBackend` (`upload_bytes` / `read_bytes` / `delete` / `generate_upload_url` / `generate_download_url`):
   - `LocalStorageBackend` (`local://` URIs, files under `LOCAL_STORAGE_DIR`) for development/tests.
-  - `GCSStorageBackend` (`gs://` URIs) for production; the import of `google.cloud.storage` is deferred so the library is only required when GCS is actually configured.
+  - `GCSStorageBackend` (`gs://` URIs) for production using Google Cloud Storage v4 signed URLs.
   - Selection: `STORAGE_BACKEND` env var, or automatic — GCS when `STORAGE_BUCKET` is set, otherwise local.
+- **Direct Presigned Uploads**: Clients request an upload ticket via `POST /agent/attachments/upload-url` and upload bytes directly to GCS via HTTP `PUT`, bypassing FastAPI application instances.
+- **Attachment URL Service (`app/services/attachment_url.py`)**: When conversations (`GET /agent/sessions/{id}`) or attachments (`GET /agent/attachments`) are fetched, the backend resolves attachments in a single batch query (no N+1) and enriches them in memory with fresh 60-minute signed download URLs (`url` and `urlExpiresAt`).
+- **Direct Delivery (No File Proxying)**: The browser downloads or renders files directly from GCS via the signed URL.
 
-Upload flow (`POST /agent/attachments`):
-
-1. Validate against runtime config: `enable_attachments` (403), per-file size ≤ `attachment_max_size` (413), MIME type in `attachment_allowed_types` (400).
-2. MIME type is detected from magic bytes (`app/utils/mime.py`) and the file classified (`image`, `pdf`, `document`, `audio`, `video`, `spreadsheet`, `json`, `text`).
-3. Bytes are uploaded to the storage backend; metadata is persisted in Firestore; the wire schema (no `gemini_file_uri`) is returned with 201.
-
-Chat flow (`POST /agent/chat` with `attachments: [uuid, ...]`):
-
-1. Attachment IDs are validated, ownership is checked, and unbound attachments are bound to the message's session (first use wins).
-2. For each attachment, `AttachmentService.prepare_parts` either extracts text (txt/markdown/CSV/JSON/plain text/DOCX/XLSX) into a text part, or delegates to `provider.parts_for_attachment` for image/PDF/audio/video.
-3. The message is persisted with its `attachment_ids`, and history built from those messages re-resolves historical attachments by ID, so past attachments survive a session restart. Broken historical attachments are tolerated (skipped with a log) rather than failing the request.
+For complete sequence diagrams, security rules, and schemas, see [ATTACHMENTS_AND_STORAGE.md](./ATTACHMENTS_AND_STORAGE.md).
 
 ---
 
@@ -156,11 +149,14 @@ scripts/
 │   ├── speech_to_text/             # Feature: speech-to-text / stt
 │   │   ├── runner.py
 │   │   └── 001_migrate_stt_config.py
-│   └── smart_model_routing/        # Feature: smart-model-routing
+│   ├── smart_model_routing/        # Feature: smart-model-routing
+│   │   ├── runner.py
+│   │   ├── 001_migrate_models_list_structure.py
+│   │   ├── 002_migrate_model_descriptions.py
+│   │   └── 003_migrate_unified_effort_modes.py
+│   └── attachments/                # Feature: attachments / files / storage
 │       ├── runner.py
-│       ├── 001_migrate_models_list_structure.py
-│       ├── 002_migrate_model_descriptions.py
-│       └── 003_migrate_unified_effort_modes.py
+│       └── 001_backfill_storage_identity_and_clean_urls.py
 ```
 
 ### Key Principles
@@ -174,6 +170,7 @@ scripts/
 
 ```bash
 # Run migrations for a specific feature (in chronological order)
+make migrate attachments
 make migrate smart-model-routing
 make migrate user-auth
 make migrate speech-to-text

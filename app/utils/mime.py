@@ -19,12 +19,14 @@ EXTENSION_MIME: dict[str, str] = {
     "png": "image/png",
     "webp": "image/webp",
     "gif": "image/gif",
+    "svg": "image/svg+xml",
     # documents / text
     "txt": "text/plain",
     "md": "text/markdown",
     "markdown": "text/markdown",
     "csv": "text/csv",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "doc": "application/msword",
     "pdf": "application/pdf",
     # spreadsheets
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -120,11 +122,12 @@ def sniff_mime(data: bytes) -> str | None:
     return None
 
 
-def detect_mime(filename: str, declared: str | None, data: bytes) -> str:
+def detect_mime(filename: str, declared: str | None = None, data: bytes = b"") -> str:
     """Best-effort MIME detection: magic bytes, then filename, then header."""
-    sniffed = sniff_mime(data)
-    if sniffed:
-        return sniffed
+    if data:
+        sniffed = sniff_mime(data)
+        if sniffed:
+            return sniffed
     from_ext = mime_from_filename(filename)
     if from_ext:
         return from_ext
@@ -138,7 +141,7 @@ def classify_attachment(filename: str, mime: str) -> AttachmentType:
     mime = (mime or "").split(";")[0].strip().lower()
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
-    if mime.startswith("image/") or ext in {"jpg", "jpeg", "png", "webp", "gif"}:
+    if mime.startswith("image/") or ext in {"jpg", "jpeg", "png", "webp", "gif", "svg"}:
         return AttachmentType.image
     if mime == "application/pdf" or ext == "pdf":
         return AttachmentType.pdf

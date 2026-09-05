@@ -10,17 +10,23 @@ from __future__ import annotations
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from google.cloud.firestore_v1.async_client import AsyncClient
 
-from app.api.dependencies import get_current_user, get_provider, get_storage_backend
+from app.api.dependencies import (
+    get_attachment_url_service,
+    get_current_user,
+    get_provider,
+    get_storage_backend,
+)
 from app.database import get_db
-from app.models.attachments import AttachmentSchema
+from app.models.attachments import AttachmentSchema, PresignedUploadRequest, PresignedUploadResponse
 from app.models.pagination import PaginatedResponse
 from app.models.users import UserDB
 from app.providers.base import BaseProvider
 from app.repositories.attachments import AttachmentRepository
 from app.repositories.config import ConfigRepository
+from app.services.attachment_url import AttachmentUrlService
 from app.services.attachments import AttachmentService
 from app.storage.base import StorageBackend
 
@@ -35,6 +41,82 @@ def get_attachment_service(
     storage: StorageBackend = Depends(get_storage_backend),
 ) -> AttachmentService:
     return AttachmentService(AttachmentRepository(db), storage, provider)
+
+
+@router.post("/attachments/upload-url", response_model=PresignedUploadResponse, status_code=200)
+async def request_upload_url(
+    body: PresignedUploadRequest,
+    current_user: UserDB = Depends(get_current_user),
+    db: AsyncClient = Depends(get_db),
+    service: AttachmentService = Depends(get_attachment_service),
+):
+    """Generate a presigned upload URL for direct client-to-storage upload."""
+    if body.session_id:
+        from app.repositories.chats import ChatRepository
+
+        if not await ChatRepository(db).session_exists(body.session_id, current_user.id):
+            raise HTTPException(status_code=404, detail="Session not found.")
+
+    config = await ConfigRepository(db).get_config()
+    try:
+        return await service.create_upload_ticket(
+            user=current_user,
+            filename=body.filename,
+            content_type=body.mime_type,
+            size=body.size,
+            config=config,
+            session_id=body.session_id,
+            is_temporary=body.is_temporary,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Unexpected error generating upload ticket")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred.") from None
+
+
+@router.put("/attachments/direct-upload", status_code=200)
+async def direct_upload(
+    token: str,
+    request: Request,
+    storage: StorageBackend = Depends(get_storage_backend),
+):
+    """Direct upload endpoint for local storage in dev/test."""
+    from app.core.security import verify_storage_token
+
+    payload = verify_storage_token(token)
+    if not payload or payload.get("action") != "upload":
+        raise HTTPException(status_code=403, detail="Invalid or expired storage token")
+
+    key = payload["key"]
+    content_type = payload.get("content_type", "application/octet-stream")
+    data = await request.body()
+    await storage.upload_bytes(key, data, content_type)
+    return {"message": "Direct upload successful", "size": len(data)}
+
+
+@router.get("/attachments/direct-content")
+async def direct_content(
+    token: str,
+    storage: StorageBackend = Depends(get_storage_backend),
+):
+    """Direct download endpoint for local storage in dev/test."""
+    from app.core.security import verify_storage_token
+
+    payload = verify_storage_token(token)
+    if not payload or payload.get("action") != "download":
+        raise HTTPException(status_code=403, detail="Invalid or expired storage token")
+
+    uri = payload.get("uri") or f"local://{payload['key']}"
+    try:
+        content = await storage.read_bytes(uri)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Attachment file not found")
+    headers = {}
+    if payload.get("disposition") == "attachment":
+        filename = payload.get("filename", "download")
+        headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return Response(content=content, headers=headers)
 
 
 @router.post("/attachments", response_model=AttachmentSchema, status_code=201)
@@ -97,6 +179,7 @@ async def list_attachments(
     offset: int = 0,
     current_user: UserDB = Depends(get_current_user),
     db: AsyncClient = Depends(get_db),
+    url_service: AttachmentUrlService = Depends(get_attachment_url_service),
 ):
     from app.core.cache_keys import CacheKeys
     from app.core.redis import redis_cache
@@ -110,7 +193,7 @@ async def list_attachments(
     metadata, has_more, total = await repo.list_by_user(
         user_id=current_user.id, session_id=session_id, type=type, query_string=query, limit=limit, offset=offset
     )
-    items = [AttachmentSchema.model_validate(m, from_attributes=True) for m in metadata]
+    items = await url_service.enrich_attachments(metadata)
     response = PaginatedResponse(items=items, total=total, limit=limit, offset=offset, has_more=has_more)
 
     await redis_cache.set(cache_key, response.model_dump(mode="json"), expire=300)
@@ -122,12 +205,13 @@ async def get_attachment(
     attachment_id: uuid.UUID,
     current_user: UserDB = Depends(get_current_user),
     db: AsyncClient = Depends(get_db),
+    url_service: AttachmentUrlService = Depends(get_attachment_url_service),
 ):
     repo = AttachmentRepository(db)
     metadata = await repo.get(attachment_id, current_user.id)
     if metadata is None:
         raise HTTPException(status_code=404, detail="Attachment not found")
-    return AttachmentSchema.model_validate(metadata, from_attributes=True)
+    return await url_service.enrich_attachment(metadata)
 
 
 @router.get("/attachments/{attachment_id}/content")
@@ -143,7 +227,8 @@ async def get_attachment_content(
         raise HTTPException(status_code=404, detail="Attachment not found")
 
     content = await service.read_bytes(metadata)
-    return Response(content=content, media_type=metadata.mime_type)
+    headers = {"Content-Disposition": f'attachment; filename="{metadata.filename}"'}
+    return Response(content=content, media_type=metadata.mime_type, headers=headers)
 
 
 @router.delete("/attachments/{attachment_id}", status_code=200)

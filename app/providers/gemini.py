@@ -480,6 +480,8 @@ class GeminiProvider(BaseProvider):
         size = len(data)
 
         if attachment.type == "image" or attachment.type == "pdf":
+            if mime_type == "image/svg+xml" or attachment.filename.lower().endswith(".svg"):
+                return [{"text": data.decode("utf-8", errors="replace")}]
             if size <= INLINE_DATA_LIMIT:
                 return [self._inline_part(data, mime_type)]
             file_uri = await self._ensure_file_uri(attachment, data, mime_type)

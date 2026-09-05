@@ -23,7 +23,9 @@ class AttachmentRepository:
         await doc_ref.set(metadata.model_dump(mode="json"))
         return metadata
 
-    async def get(self, attachment_id: UUID | str, user_id: UUID | str) -> AttachmentMetadata | None:
+    async def get(
+        self, attachment_id: UUID | str, user_id: UUID | str, include_deleted: bool = False
+    ) -> AttachmentMetadata | None:
         doc_ref = self.collection.document(str(attachment_id))
         doc = await doc_ref.get()
         if not doc.exists:
@@ -31,9 +33,13 @@ class AttachmentRepository:
         data = doc.to_dict() or {}
         if not data or data.get("user_id") != str(user_id):
             return None
+        if not include_deleted and data.get("deleted_at") is not None:
+            return None
         return AttachmentMetadata(**data)
 
-    async def get_many(self, user_id: UUID | str, ids: Sequence[UUID | str]) -> list[AttachmentMetadata]:
+    async def get_many(
+        self, user_id: UUID | str, ids: Sequence[UUID | str], include_deleted: bool = False
+    ) -> list[AttachmentMetadata]:
         """Fetch owned attachments by id, chunking Firestore ``in`` queries."""
         if not ids:
             return []
@@ -45,6 +51,8 @@ class AttachmentRepository:
             async for doc in query:
                 data = doc.to_dict() or {}
                 if not data or data.get("user_id") != str(user_id):
+                    continue
+                if not include_deleted and data.get("deleted_at") is not None:
                     continue
                 meta = AttachmentMetadata(**data)
                 found[str(meta.id)] = meta
@@ -72,7 +80,7 @@ class AttachmentRepository:
         results: list[AttachmentMetadata] = []
         async for doc in query.stream():
             data = doc.to_dict() or {}
-            if data:
+            if data and data.get("deleted_at") is None:
                 meta = AttachmentMetadata(**data)
                 results.append(meta)
 
@@ -123,6 +131,13 @@ class AttachmentRepository:
         doc_ref = self.collection.document(str(attachment_id))
         await doc_ref.delete()
 
+    async def soft_delete(self, attachment_id: UUID | str) -> None:
+        from datetime import datetime, timezone
+
+        doc_ref = self.collection.document(str(attachment_id))
+        now = datetime.now(timezone.utc)
+        await doc_ref.update({"deleted_at": now.isoformat()})
+
     async def update_temporary_flag(self, attachment_id: UUID | str, is_temporary: bool) -> None:
         doc_ref = self.collection.document(str(attachment_id))
         await doc_ref.update({"is_temporary": is_temporary})
@@ -130,3 +145,9 @@ class AttachmentRepository:
     async def update_storage_uri(self, attachment_id: UUID | str, storage_uri: str) -> None:
         doc_ref = self.collection.document(str(attachment_id))
         await doc_ref.update({"storage_uri": storage_uri})
+
+    async def update_storage_location(
+        self, attachment_id: UUID | str, storage_uri: str, object_name: str
+    ) -> None:
+        doc_ref = self.collection.document(str(attachment_id))
+        await doc_ref.update({"storage_uri": storage_uri, "object_name": object_name})

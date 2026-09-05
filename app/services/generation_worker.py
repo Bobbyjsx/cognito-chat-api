@@ -387,6 +387,16 @@ class GenerationWorkerService:
         except Exception as exc:
             logger.error("Worker failed generation %s: %s", generation_id, exc)
             await self.generation_repo.update_status(generation_id, GenerationStatus.FAILED, error=str(exc))
+            try:
+                from app.core.cache_keys import CacheKeys
+                from app.core.redis import redis_cache
+
+                if generation and generation.user_id:
+                    await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(generation.user_id))
+                if generation and generation.session_id:
+                    await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(generation.session_id))
+            except Exception as cache_exc:
+                logger.warning("Failed to invalidate cache after worker failure: %s", cache_exc)
             return TaskExecutionResponse(
                 status="failed_permanent",
                 generation_id=generation_id,

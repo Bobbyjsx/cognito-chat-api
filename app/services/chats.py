@@ -335,12 +335,14 @@ class AgentService:
             default_limit_6h=config.default_token_limit_6h,
             default_limit_weekly=config.default_token_limit_weekly,
         )
-        if success:
-            from app.core.cache_keys import CacheKeys
-            from app.core.redis import redis_cache
+        from app.core.cache_keys import CacheKeys
+        from app.core.redis import redis_cache
 
+        try:
             await redis_cache.delete(CacheKeys.user_profile(user.id))
             await redis_cache.delete(CacheKeys.user_auth(user.id))
+        except Exception as exc:
+            logger.debug("Redis cache invalidation skipped for user %s: %s", user.id, exc)
         return success
 
     # ── session handling ──────────────────────────────────────────────────────
@@ -484,7 +486,7 @@ class AgentService:
 
     @staticmethod
     def _error_event(detail: str, code: str | None = None) -> str:
-        payload = {"detail": detail}
+        payload = {"detail": detail, "error": detail}
         if code:
             payload["code"] = code
         return f"event: error\ndata: {json.dumps(payload)}\n\n"
@@ -529,11 +531,26 @@ class AgentService:
             context=routing_context,
         )
 
+        user_parts = [{"type": "text", "text": message_text}] if message_text else []
+        for a in attachments:
+            user_parts.append({
+                "type": "file",
+                "attachment_id": str(a.id),
+                "filename": a.filename,
+                "contentType": a.mime_type,
+                "mediaType": a.mime_type,
+                "size": a.size,
+                "bucket": a.bucket,
+                "object_name": a.object_name,
+                "storage_uri": a.storage_uri,
+            })
+
         await self.chat_repo.add_message(
             session_id,
             role=MessageRole.USER,
             content=message_text,
             attachment_ids=[str(a.id) for a in attachments],
+            parts=user_parts,
         )
 
         current_parts = await self._prepare_current_parts(message_text, attachments)
@@ -731,11 +748,26 @@ class AgentService:
                     state["resolved_model"] = _model
                     state["resolved_reasoning"] = _reasoning
 
+                _user_parts = [{"type": "text", "text": message_text}] if message_text else []
+                for a in _attachments:
+                    _user_parts.append({
+                        "type": "file",
+                        "attachment_id": str(a.id),
+                        "filename": a.filename,
+                        "contentType": a.mime_type,
+                        "mediaType": a.mime_type,
+                        "size": a.size,
+                        "bucket": a.bucket,
+                        "object_name": a.object_name,
+                        "storage_uri": a.storage_uri,
+                    })
+
                 _user_msg = await self.chat_repo.add_message(
                     _session_id,
                     role=MessageRole.USER,
                     content=message_text,
                     attachment_ids=[str(a.id) for a in _attachments],
+                    parts=_user_parts,
                 )
                 if state is not None:
                     state["user_message_id"] = str(_user_msg.id)
@@ -793,8 +825,14 @@ class AgentService:
         except Exception as prep_exc:
             if state is not None:
                 state["handled"] = True
-            detail = prep_exc.detail if isinstance(prep_exc, HTTPException) else str(prep_exc)
-            yield f"event: error\ndata: {json.dumps({'error': detail})}\n\n"
+                state["failed"] = True
+            if isinstance(prep_exc, HTTPException):
+                detail = prep_exc.detail if isinstance(prep_exc.detail, str) else json.dumps(prep_exc.detail)
+                code = "QUOTA_EXCEEDED" if prep_exc.status_code == 429 else "PREP_ERROR"
+            else:
+                detail = str(prep_exc)
+                code = "PREP_ERROR"
+            yield self._error_event(detail, code=code)
             return
 
         try:
@@ -1006,7 +1044,10 @@ class AgentService:
 
             within_limit = persist_results[0] if isinstance(persist_results[0], bool) else True
             if not within_limit:
-                yield self._error_event("Token limit exceeded after generation. Please upgrade your plan.")
+                yield self._error_event(
+                    "Token limit reached after generation. Further messages are paused until quota resets.",
+                    code="QUOTA_EXCEEDED",
+                )
                 return
 
             total_duration_ms = (time.perf_counter() - stream_start_time) * 1000.0
@@ -1043,17 +1084,24 @@ class AgentService:
                 _abandon_task.add_done_callback(_fire_and_forget_tasks.discard)
             raise
         except HTTPException as exc:
-            yield self._error_event(str(exc.detail))
+            if state is not None:
+                state["handled"] = True
+                state["failed"] = True
+            code = "QUOTA_EXCEEDED" if exc.status_code == 429 else "STREAM_ERROR"
+            yield self._error_event(str(exc.detail), code=code)
             return
         except Exception as exc:
+            if state is not None:
+                state["handled"] = True
+                state["failed"] = True
             logger.exception("[AgentService] Stream failed for session_id=%s", session_id)
-            yield self._error_event(f"Internal error during stream: {exc}")
+            yield self._error_event(f"Internal error during stream: {exc}", code="STREAM_ERROR")
             return
 
 
 async def handle_stream_abandonment(state: dict, agent_service: AgentService) -> None:
     """Handle premature stream disconnect by creating a GenerationDB and enqueuing a background task."""
-    if not state or state.get("completed") or state.get("handled"):
+    if not state or state.get("completed") or state.get("handled") or state.get("failed"):
         return
     state["handled"] = True
 
@@ -1146,6 +1194,8 @@ async def handle_stream_abandonment(state: dict, agent_service: AgentService) ->
                 config_repo=ConfigRepository(agent_service.db),
                 agent_service=agent_service,
             )
-            asyncio.create_task(worker.execute_task(payload))
+            _worker_task = asyncio.create_task(worker.execute_task(payload))
+            _fire_and_forget_tasks.add(_worker_task)
+            _worker_task.add_done_callback(_fire_and_forget_tasks.discard)
         except Exception as e:
             logger.error("Failed to execute local fallback worker for abandoned generation %s: %s", gen.id, e)

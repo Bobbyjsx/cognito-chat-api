@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from google.cloud.firestore_v1.async_client import AsyncClient
 
 from app.api.dependencies import (
+    get_attachment_url_service,
     get_current_user,
     get_optional_current_user,
     get_provider,
@@ -37,6 +38,7 @@ from app.repositories.chats import ChatRepository
 from app.repositories.config import ConfigRepository
 from app.repositories.generations import GenerationRepository
 from app.repositories.users import UserRepository
+from app.services.attachment_url import AttachmentUrlService
 from app.services.attachments import AttachmentService
 from app.services.chats import AgentService
 from app.storage.base import StorageBackend
@@ -214,6 +216,7 @@ async def get_session(
     offset: int = 0,
     current_user: UserDB = Depends(get_current_user),
     db: AsyncClient = Depends(get_db),
+    url_service: AttachmentUrlService = Depends(get_attachment_url_service),
 ):
     from app.core.cache_keys import CacheKeys
     from app.core.redis import redis_cache
@@ -240,6 +243,14 @@ async def get_session(
 
     messages = session.messages or []
     session.messages = []
+
+    # Enrich message attachments with fresh signed URLs (single batch query, authorized)
+    if messages:
+        await url_service.enrich_message_attachments(
+            messages,
+            user_id=current_user.id,
+            att_repo=AttachmentRepository(db),
+        )
 
     result = {
         "session": session.model_dump(mode="json"),
@@ -396,6 +407,7 @@ async def get_shared_chat(
     share_id: str,
     current_user: UserDB | None = Depends(get_optional_current_user),
     db: AsyncClient = Depends(get_db),
+    url_service: AttachmentUrlService = Depends(get_attachment_url_service),
 ):
     from app.repositories.shared_chats import SharedChatRepository
 
@@ -407,6 +419,17 @@ async def get_shared_chat(
             content={"detail": "Conversation has been deleted", "code": "SHARE_REVOKED"},
         )
     is_owner = bool(current_user and str(current_user.id) == str(shared_chat.user_id))
+
+    # Dynamically inject fresh presigned download URLs for all file parts in shared messages
+    if shared_chat.messages:
+        from app.repositories.attachments import AttachmentRepository
+
+        await url_service.enrich_message_attachments(
+            shared_chat.messages,
+            user_id=shared_chat.user_id,
+            att_repo=AttachmentRepository(db),
+        )
+
     return SharedChatResponse(
         id=shared_chat.id,
         session_id=shared_chat.session_id,

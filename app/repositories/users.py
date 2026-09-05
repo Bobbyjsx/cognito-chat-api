@@ -150,6 +150,16 @@ class UserRepository:
             return is_within_limit
 
         res = await _txn(self.db.transaction())
+
+        from app.core.cache_keys import CacheKeys
+        from app.core.redis import redis_cache
+
+        try:
+            await redis_cache.delete(CacheKeys.user_profile(user_id))
+            await redis_cache.delete(CacheKeys.user_auth(user_id))
+        except Exception as exc:
+            logger.debug("Redis cache invalidation skipped for user %s: %s", user_id, exc)
+
         return bool(res)
 
     async def update_password(self, user_id: UUID | str, hashed_password: str) -> None:

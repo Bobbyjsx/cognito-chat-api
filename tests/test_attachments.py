@@ -84,6 +84,35 @@ def test_upload_image_attachment(client, auth_headers, attachment_storage):
     assert fetched.json()["filename"] == "photo.png"
 
 
+def test_presigned_upload_ticket_and_direct_upload(client, auth_headers, attachment_storage):
+    resp = client.post(
+        "/agent/attachments/upload-url",
+        headers=auth_headers,
+        json={"filename": "photo.png", "mime_type": "image/png", "size": len(PNG_BYTES)},
+    )
+    assert resp.status_code == 200, resp.text
+    ticket = resp.json()
+    assert "upload_url" in ticket
+    assert ticket["method"] == "PUT"
+    assert ticket["attachment_id"] is not None
+
+    # Direct PUT to the upload_url
+    upload_url = ticket["upload_url"]
+    put_resp = client.put(upload_url, content=PNG_BYTES, headers=ticket["headers"])
+    assert put_resp.status_code == 200
+
+    fetched = client.get(f"/agent/attachments/{ticket['attachment_id']}", headers=auth_headers)
+    assert fetched.status_code == 200
+    data = fetched.json()
+    assert data["filename"] == "photo.png"
+    assert data["url"] is not None
+
+    # Verify downloading directly via the presigned url works
+    dl_resp = client.get(data["url"])
+    assert dl_resp.status_code == 200
+    assert dl_resp.content == PNG_BYTES
+
+
 def test_upload_rejects_oversize(client, auth_headers, attachment_storage):
     with patch(
         "app.repositories.config.ConfigRepository.get_config",
