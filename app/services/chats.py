@@ -17,6 +17,7 @@ _fire_and_forget_tasks = set()
 
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -348,20 +349,146 @@ class AgentService:
     # ── session handling ──────────────────────────────────────────────────────
 
     @staticmethod
-    async def _generate_title(first_message: str) -> str:
-        """Instantly derives a concise title from the user prompt without network latency."""
-        words = first_message.strip().split()
-        return " ".join(words[:5]) if words else "New Chat"
+    def _rule_based_title_summary(first_message: str) -> str:
+        """Derives a semantic summary title using pattern templates when LLM is unavailable."""
+        if not first_message or not first_message.strip():
+            return "New Chat"
+
+        text = re.sub(r"```[\s\S]*?```", "", first_message)
+        text = re.sub(r"`[^`]*`", "", text)
+        text = re.sub(r"https?://\S+", "", text)
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        text = lines[0] if lines else first_message.strip()
+
+        patterns = [
+            (
+                r"^(?:(?:i\s+(?:need|want)\s+)?help\s+(?:me\s+)?(?:with|do|finish|on)\s+(?:my\s+)?|can\s+you\s+(?:please\s+)?help\s+(?:me\s+)?(?:with|do|finish)\s+(?:my\s+)?)([a-zA-Z0-9\s]+?)\s+(?:assignment|homework|project|essay|paper|coursework|exam|test)",
+                r"Assistance with \1 assignment",
+            ),
+            (
+                r"^(?:(?:i\s+(?:need|want)\s+)?help\s+(?:me\s+)?(?:with|on)\s+|can\s+you\s+(?:please\s+)?help\s+(?:me\s+)?(?:with|on)\s+)(.+)",
+                r"Help with \1",
+            ),
+            (
+                r"^(?:(?:can|could|would)\s+(?:you\s+)?(?:please\s+)?)?(?:write|create|build|code|implement)\s+(?:a|an)?\s*(.+?)\s*(?:script|tool|program|bot|app|api|service)",
+                r"\1 script",
+            ),
+            (
+                r"^(?:(?:can|could|would)\s+(?:you\s+)?(?:please\s+)?)?(?:explain|tell\s+me\s+about|teach\s+me)\s+(?:the\s+)?(.+)",
+                r"Overview of \1",
+            ),
+            (
+                r"^(?:how\s+(?:do\s+i|to|can\s+we|can\s+i)\s+)(.+)",
+                r"Guide to \1",
+            ),
+            (
+                r"^(?:debug|fix|troubleshoot|solve)\s+(?:this\s+|my\s+)?(.+)",
+                r"Debugging \1",
+            ),
+            (
+                r"^(?:what\s+(?:is|are|was|were)\s+(?:the\s+)?)(.+)",
+                r"Guide to \1",
+            ),
+            (
+                r"^(?:why\s+(?:is|are|does|do)\s+)(.+)",
+                r"Analysis of \1",
+            ),
+            (
+                r"^(?:summarize|review)\s+(?:the\s+)?(.+)",
+                r"Summary of \1",
+            ),
+        ]
+
+        for pat, repl in patterns:
+            m = re.match(pat, text, flags=re.IGNORECASE)
+            if m:
+                summary = m.expand(repl).strip()
+                summary = re.sub(r"[\?\.!\:\;]+$", "", summary).strip()
+                summary = re.sub(
+                    r"\s+(in simple terms|for beginners|step by step|please)$",
+                    "",
+                    summary,
+                    flags=re.IGNORECASE,
+                ).strip()
+                words = summary.split()
+                if len(words) <= 6:
+                    return summary[0].upper() + summary[1:]
+                truncated = " ".join(words[:5])
+                return truncated[0].upper() + truncated[1:]
+
+        # Generic clean extraction
+        clean = re.sub(
+            r"^(can|could|would) you (please\s+)?(tell me |explain |help me with |show me |write |create |summarize )?",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip()
+        clean = re.sub(r"[\?\.!\:\;]+$", "", clean).strip()
+        clean = re.sub(
+            r"\s+(in simple terms|for beginners|step by step|please)$",
+            "",
+            clean,
+            flags=re.IGNORECASE,
+        ).strip()
+        words = clean.split() or first_message.strip().split()
+        summary = " ".join(words[:5]).strip()
+        return (summary[0].upper() + summary[1:]) if summary else "New Chat"
+
+    async def _generate_title(self, first_message: str, model: str | None = None) -> str:
+        """Generates a concise 3-5 word semantic summary title for the session (e.g. 'Assistance with geography assignment') using LLM, with pattern template fallback."""
+        if not first_message or not first_message.strip():
+            return "New Chat"
+
+        try:
+            target_model = model or "gemini-2.5-flash"
+            if target_model.lower() == "auto":
+                target_model = "gemini-2.5-flash"
+
+            prompt_snippet = first_message.strip()[:600]
+            config = GenerationConfig(
+                system_instruction=(
+                    "You generate short, descriptive chat session titles. "
+                    "Summarize the user's intent or topic into 3 to 5 words. "
+                    "Examples:\n"
+                    "- User: 'Can you help me do my geography assignment about tectonic plates?' -> Title: Assistance with geography assignment\n"
+                    "- User: 'Write a python script to scrape prices from amazon' -> Title: Amazon price scraper script\n"
+                    "- User: 'Why does my docker container exit with code 137?' -> Title: Debugging Docker exit 137\n"
+                    "- User: 'Teach me how to play chess' -> Title: Beginner chess tutorial\n"
+                    "Do NOT copy the user prompt verbatim. Summarize their goal/task. "
+                    "Do NOT use quotes, punctuation, or conversational filler. Return ONLY the title text."
+                ),
+                thinking_budget=0,
+                include_thoughts=False,
+            )
+            content = [
+                ContentPart(
+                    role="user",
+                    parts=[{"text": f"User: {prompt_snippet}"}],
+                )
+            ]
+            res = await asyncio.wait_for(
+                self.executor.generate(target_model, content, config),
+                timeout=2.0,
+            )
+            raw_title = (res.text or "").strip().strip("\"'*`").rstrip(".")
+            raw_title = re.sub(r"^(title|summary):\s*", "", raw_title, flags=re.IGNORECASE).strip()
+            if raw_title and 3 <= len(raw_title) <= 55 and "\n" not in raw_title:
+                return raw_title[0].upper() + raw_title[1:]
+        except Exception as exc:
+            logger.debug("[AgentService] LLM title summary skipped or timed out (%s), using rule-based summary.", exc)
+
+        return self._rule_based_title_summary(first_message)
 
     async def _resolve_session(
         self,
         user: UserDB,
         session_id: uuid.UUID | None,
         message_text: str,
+        model: str | None = None,
     ) -> tuple[ChatSessionDB, uuid.UUID, str | None]:
         title = None
         if session_id is None:
-            title = await self._generate_title(message_text)
+            title = await self._generate_title(message_text, model=model)
             session = await self.chat_repo.create_session(user_id=user.id, title=title)
             session_id = session.id
         else:
@@ -369,7 +496,7 @@ class AgentService:
             if not session:
                 raise HTTPException(status_code=404, detail=f"Session {session_id} not found.")
             if not session.title:
-                title = await self._generate_title(message_text)
+                title = await self._generate_title(message_text, model=model)
                 await self.chat_repo.update_session_title(session_id, title)
             else:
                 title = session.title
@@ -509,7 +636,7 @@ class AgentService:
         active_config = await self.get_active_config()
         await self._quota_precheck(user, active_config)
 
-        session, session_id, title = await self._resolve_session(user, session_id, message_text)
+        session, session_id, title = await self._resolve_session(user, session_id, message_text, model=requested_model)
         attachments = await self._prepare_attachments(user, active_config, attachment_ids, session_id)
 
         from app.ai.router.schemas import RequestContext
@@ -533,17 +660,19 @@ class AgentService:
 
         user_parts = [{"type": "text", "text": message_text}] if message_text else []
         for a in attachments:
-            user_parts.append({
-                "type": "file",
-                "attachment_id": str(a.id),
-                "filename": a.filename,
-                "contentType": a.mime_type,
-                "mediaType": a.mime_type,
-                "size": a.size,
-                "bucket": a.bucket,
-                "object_name": a.object_name,
-                "storage_uri": a.storage_uri,
-            })
+            user_parts.append(
+                {
+                    "type": "file",
+                    "attachment_id": str(a.id),
+                    "filename": a.filename,
+                    "contentType": a.mime_type,
+                    "mediaType": a.mime_type,
+                    "size": a.size,
+                    "bucket": a.bucket,
+                    "object_name": a.object_name,
+                    "storage_uri": a.storage_uri,
+                }
+            )
 
         await self.chat_repo.add_message(
             session_id,
@@ -708,7 +837,7 @@ class AgentService:
             async def _shielded_prep():
                 _active_config, (_session, _session_id, _title) = await asyncio.gather(
                     self.get_active_config(),
-                    self._resolve_session(user, session_id, message_text),
+                    self._resolve_session(user, session_id, message_text, model=requested_model),
                 )
 
                 if state is not None:
@@ -750,17 +879,19 @@ class AgentService:
 
                 _user_parts = [{"type": "text", "text": message_text}] if message_text else []
                 for a in _attachments:
-                    _user_parts.append({
-                        "type": "file",
-                        "attachment_id": str(a.id),
-                        "filename": a.filename,
-                        "contentType": a.mime_type,
-                        "mediaType": a.mime_type,
-                        "size": a.size,
-                        "bucket": a.bucket,
-                        "object_name": a.object_name,
-                        "storage_uri": a.storage_uri,
-                    })
+                    _user_parts.append(
+                        {
+                            "type": "file",
+                            "attachment_id": str(a.id),
+                            "filename": a.filename,
+                            "contentType": a.mime_type,
+                            "mediaType": a.mime_type,
+                            "size": a.size,
+                            "bucket": a.bucket,
+                            "object_name": a.object_name,
+                            "storage_uri": a.storage_uri,
+                        }
+                    )
 
                 _user_msg = await self.chat_repo.add_message(
                     _session_id,
@@ -837,6 +968,8 @@ class AgentService:
 
         try:
             yield f"event: session\ndata: {json.dumps({'session_id': str(session_id), 'title': title})}\n\n"
+            if title:
+                yield f"event: chunk\ndata: {json.dumps({'type': 'title', 'title': title, 'session_id': str(session_id)})}\n\n"
 
             current_parts = await self._prepare_current_parts(message_text, attachments)
             contents = await self._build_contents(user, session, active_config, current_parts)

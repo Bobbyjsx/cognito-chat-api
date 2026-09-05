@@ -40,4 +40,8 @@ def create_db_client() -> AsyncClient:
 
 def get_db(request: Request) -> AsyncClient:
     """Dependency that returns an Async Firestore client from app state."""
-    return request.app.state.db_client
+    db = getattr(request.app.state, "db_client", None)
+    if db is None:
+        db = create_db_client()
+        request.app.state.db_client = db
+    return db
