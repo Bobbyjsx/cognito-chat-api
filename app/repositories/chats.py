@@ -28,9 +28,23 @@ class ChatRepository:
         await doc_ref.set(data)
         return session_db
 
-    async def update_session_title(self, session_id: UUID | str, title: str) -> None:
+    async def update_session_title(
+        self, session_id: UUID | str, title: str, user_id: UUID | str | None = None
+    ) -> None:
         doc_ref = self.collection.document(str(session_id))
-        await doc_ref.update({"title": title})
+        await doc_ref.update({
+            "title": title,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        if user_id:
+            from app.core.cache_keys import CacheKeys
+            from app.core.redis import redis_cache
+
+            try:
+                await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(user_id))
+                await redis_cache.delete_by_prefix(CacheKeys.session_details_prefix(session_id))
+            except Exception as e:
+                logger.debug("Redis cache invalidation skipped for user %s on title update: %s", user_id, e)
 
     async def session_exists(self, session_id: UUID | str, user_id: UUID | str) -> bool:
         doc_ref = self.collection.document(str(session_id))

@@ -9,7 +9,12 @@ from app.repositories.chats import ChatRepository
 from app.repositories.config import ConfigRepository
 from app.repositories.generations import GenerationRepository
 from app.repositories.users import UserRepository
-from app.schemas.task import GenerationTaskPayload, TaskExecutionResponse
+from app.schemas.task import (
+    GenerationTaskPayload,
+    TaskExecutionResponse,
+    TitleTaskExecutionResponse,
+    TitleTaskPayload,
+)
 from app.services.chats import AgentService
 
 logger = logging.getLogger(__name__)
@@ -403,3 +408,47 @@ class GenerationWorkerService:
                 attempt_number=attempt_num,
                 duration_ms=(time.perf_counter() - start_time) * 1000,
             )
+
+    async def execute_title_task(self, task: TitleTaskPayload) -> TitleTaskExecutionResponse:
+        """Asynchronously generates a concise semantic title using AI and persists it to the database."""
+        start_time = time.perf_counter()
+        session_id = task.session_id
+        user_id = task.user_id
+
+        logger.info("[GenerationWorkerService] Starting title task for session %s", session_id)
+
+        session, _ = await self.chat_repo.get_session(session_id, user_id)
+        if not session:
+            logger.warning("[GenerationWorkerService] Session %s not found for title task", session_id)
+            return TitleTaskExecutionResponse(
+                status="session_not_found",
+                session_id=session_id,
+                duration_ms=(time.perf_counter() - start_time) * 1000,
+            )
+
+        try:
+            ai_title = await self.agent_service.generate_ai_title(
+                prompt=task.prompt,
+                model=task.model,
+            )
+            if ai_title:
+                await self.chat_repo.update_session_title(session_id, ai_title, user_id=user_id)
+                logger.info(
+                    "[GenerationWorkerService] Successfully stored AI title for session %s: '%s'",
+                    session_id,
+                    ai_title,
+                )
+                return TitleTaskExecutionResponse(
+                    status="completed",
+                    session_id=session_id,
+                    title=ai_title,
+                    duration_ms=(time.perf_counter() - start_time) * 1000,
+                )
+        except Exception as exc:
+            logger.warning("[GenerationWorkerService] Failed to generate AI title for session %s: %s", session_id, exc)
+
+        return TitleTaskExecutionResponse(
+            status="skipped_or_failed",
+            session_id=session_id,
+            duration_ms=(time.perf_counter() - start_time) * 1000,
+        )
