@@ -231,9 +231,6 @@ async def get_attachment(
     return await url_service.enrich_attachment(metadata)
 
 
-
-
-
 @router.delete("/attachments/{attachment_id}", status_code=200)
 async def delete_attachment(
     attachment_id: uuid.UUID,

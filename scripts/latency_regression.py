@@ -260,7 +260,6 @@ def run_live_benchmarks(base_url: str, iterations: int = 15) -> dict[str, Any]:
                 lambda: client.get(f"/agent/attachments/{attachment_id}", headers=headers),
             )
 
-
         # 11. Delete Session
         if session_id:
             collector.measure(
