@@ -568,3 +568,91 @@ async def test_docx_text_extraction():
     assert len(parts) == 1
     assert "text" in parts[0]
     assert "Project Specification DOCX" in parts[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_enrich_attachments_batch_returns_populated_urls_preventing_n_plus_1(url_service):
+    """Verify enrich_attachments populates all URLs in batch so frontend avoids N+1 queries."""
+    user_id = uuid4()
+    metadatas = [
+        AttachmentMetadata(
+            id=uuid4(),
+            user_id=user_id,
+            filename=f"image_{i}.png",
+            mime_type="image/png",
+            size=1024 * (i + 1),
+            storage_uri=f"local://attachments/image_{i}.png",
+            type=AttachmentType.image,
+        )
+        for i in range(5)
+    ]
+
+    schemas = await url_service.enrich_attachments(metadatas)
+    assert len(schemas) == 5
+    for schema in schemas:
+        assert schema.url is not None, "url must be populated so client avoids individual /attachments/{id} requests"
+        assert schema.download_url is not None
+        assert schema.url_expires_at is not None
+        assert "/agent/attachments/direct-content?token=" in schema.url
+
+
+@pytest.mark.asyncio
+async def test_gcs_storage_backend_signing_flow():
+    """Verify GCSStorageBackend invokes generate_signed_url with v4 and passed parameters."""
+    from app.storage.gcs import GCSStorageBackend
+
+    mock_client = MagicMock()
+    mock_bucket = MagicMock()
+    mock_blob = MagicMock()
+    mock_blob.generate_signed_url.return_value = (
+        "https://storage.googleapis.com/chat_attachment/test.png?X-Goog-Signature=abc"
+    )
+    mock_bucket.blob.return_value = mock_blob
+    mock_client.bucket.return_value = mock_bucket
+    mock_client._credentials = MagicMock()
+
+    gcs = GCSStorageBackend(bucket_name="chat_attachment", client=mock_client)
+    url = await gcs.generate_download_url("gs://chat_attachment/test.png", filename="test.png", disposition="inline")
+    assert url == "https://storage.googleapis.com/chat_attachment/test.png?X-Goog-Signature=abc"
+    mock_blob.generate_signed_url.assert_called_once()
+    call_kwargs = mock_blob.generate_signed_url.call_args.kwargs
+    assert call_kwargs["version"] == "v4"
+    assert call_kwargs["method"] == "GET"
+
+
+@pytest.mark.asyncio
+async def test_gcs_storage_backend_create_client_with_service_account(monkeypatch, tmp_path):
+    """Verify GCSStorageBackend._create_client loads from service account path if file exists."""
+    import json
+
+    from app.core.config import settings
+    from app.storage.gcs import GCSStorageBackend
+
+    cred_file = tmp_path / "sa.json"
+    cred_file.write_text(
+        json.dumps(
+            {
+                "type": "service_account",
+                "project_id": "test-proj",
+                "client_email": "test@test-proj.iam.gserviceaccount.com",
+            }
+        )
+    )
+
+    monkeypatch.setattr(settings, "firebase_credentials_path", str(cred_file))
+    from google.cloud.storage import Client
+
+    created_with = []
+
+    def mock_from_service_account(path):
+        created_with.append(path)
+        mock = MagicMock()
+        mock._credentials = MagicMock()
+        return mock
+
+    monkeypatch.setattr(Client, "from_service_account_json", mock_from_service_account)
+
+    client = GCSStorageBackend._create_client()
+    assert client is not None
+    assert len(created_with) == 1
+    assert created_with[0] == str(cred_file)

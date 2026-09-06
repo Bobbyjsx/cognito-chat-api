@@ -48,6 +48,10 @@ services:
           path: ./app
           target: /app/app
         - action: rebuild
+          path: pyproject.toml
+        - action: rebuild
+          path: uv.lock
+        - action: rebuild
           path: requirements.txt
         - action: rebuild
           path: Dockerfile
