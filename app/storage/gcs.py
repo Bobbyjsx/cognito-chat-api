@@ -93,19 +93,97 @@ class GCSStorageBackend(StorageBackend):
         logger.info("Moved object gs://%s/%s to %s", self.bucket_name, old_key, new_key)
         return f"{GCS_URI_PREFIX}{self.bucket_name}/{new_key}"
 
+    def _get_signing_credentials_and_email(self):
+        """Returns (credentials, service_account_email, access_token) for URL signing."""
+        creds = getattr(self._client, "_credentials", None)
+        if creds is None:
+            return None, None, None
+
+        try:
+            from google.auth.credentials import Signing
+
+            if isinstance(creds, Signing):
+                return creds, None, None
+        except Exception as e:
+            logger.debug("Credentials signing check skipped: %s", e)
+
+        # Environment without local private key (Cloud Run / GCE)
+        try:
+            from google.auth.transport.requests import Request
+
+            # Ensure scopes include cloud-platform for IAM signBlob
+            if hasattr(creds, "with_scopes"):
+                try:
+                    creds = creds.with_scopes(["https://www.googleapis.com/auth/cloud-platform"])
+                except Exception as e:
+                    logger.debug("Failed adding cloud-platform scope: %s", e)
+
+            if hasattr(creds, "valid") and not creds.valid and hasattr(creds, "refresh"):
+                creds.refresh(Request())
+        except Exception as e:
+            logger.debug("Failed refreshing credentials for signing: %s", e)
+
+        sa_email = getattr(creds, "service_account_email", None)
+        if not sa_email or sa_email == "default":
+            try:
+                from app.core.config import settings
+
+                sa_email = settings.gcs_service_account_email or None
+            except Exception:
+                sa_email = None
+
+        if not sa_email:
+            try:
+                import urllib.request
+
+                req = urllib.request.Request(
+                    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email",
+                    headers={"Metadata-Flavor": "Google"},
+                )
+                with urllib.request.urlopen(req, timeout=1.0) as resp:
+                    if resp.status == 200:
+                        email = resp.read().decode("utf-8").strip()
+                        if email:
+                            sa_email = email
+            except Exception as e:
+                logger.debug("Metadata server email lookup skipped: %s", e)
+
+        token = getattr(creds, "token", None)
+        return creds, sa_email, token
+
+    @staticmethod
+    def _build_response_disposition(filename: str | None) -> str:
+        if not filename:
+            return "attachment"
+        import urllib.parse
+
+        ascii_filename = filename.encode("ascii", "ignore").decode("ascii").replace('"', "")
+        encoded_filename = urllib.parse.quote(filename, safe="")
+        if ascii_filename:
+            return f"attachment; filename=\"{ascii_filename}\"; filename*=UTF-8''{encoded_filename}"
+        return f"attachment; filename*=UTF-8''{encoded_filename}"
+
     async def generate_upload_url(
         self, key: str, content_type: str, expires_in: int = 1800
     ) -> tuple[str, dict[str, str]]:
         from datetime import timedelta
 
+        creds, sa_email, access_token = self._get_signing_credentials_and_email()
+
         def _sign():
             blob = self._bucket.blob(key)
-            url = blob.generate_signed_url(
-                version="v4",
-                expiration=timedelta(seconds=expires_in),
-                method="PUT",
-                content_type=content_type,
-            )
+            kwargs = {
+                "version": "v4",
+                "expiration": timedelta(seconds=expires_in),
+                "method": "PUT",
+                "content_type": content_type,
+            }
+            if access_token and sa_email:
+                kwargs["service_account_email"] = sa_email
+                kwargs["access_token"] = access_token
+            elif creds:
+                kwargs["credentials"] = creds
+            url = blob.generate_signed_url(**kwargs)
             return url, {"Content-Type": content_type}
 
         return await asyncio.to_thread(_sign)
@@ -120,6 +198,7 @@ class GCSStorageBackend(StorageBackend):
         from datetime import timedelta
 
         key = self._key_from_uri(uri)
+        creds, sa_email, access_token = self._get_signing_credentials_and_email()
 
         def _sign():
             blob = self._bucket.blob(key)
@@ -129,9 +208,12 @@ class GCSStorageBackend(StorageBackend):
                 "method": "GET",
             }
             if disposition == "attachment":
-                kwargs["response_disposition"] = (
-                    f'attachment; filename="{filename}"' if filename else "attachment"
-                )
+                kwargs["response_disposition"] = self._build_response_disposition(filename)
+            if access_token and sa_email:
+                kwargs["service_account_email"] = sa_email
+                kwargs["access_token"] = access_token
+            elif creds:
+                kwargs["credentials"] = creds
             return blob.generate_signed_url(**kwargs)
 
         return await asyncio.to_thread(_sign)

@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     storage_backend: str = ""
     storage_bucket: str = ""
     local_storage_dir: str = "./storage_data"
+    gcs_service_account_email: str = ""
 
     # Auth Settings
     secret_key: str = "supersecretkey_please_change_in_production"
