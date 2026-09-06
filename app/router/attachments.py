@@ -98,6 +98,7 @@ async def direct_upload(
 @router.get("/attachments/direct-content")
 async def direct_content(
     token: str,
+    request: Request,
     storage: StorageBackend = Depends(get_storage_backend),
 ):
     """Direct download endpoint for local storage in dev/test."""
@@ -107,15 +108,31 @@ async def direct_content(
     if not payload or payload.get("action") != "download":
         raise HTTPException(status_code=403, detail="Invalid or expired storage token")
 
+    etag = f'"{payload.get("key", token)}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(
+            status_code=304,
+            headers={
+                "ETag": etag,
+                "Cache-Control": "private, max-age=86400, stale-while-revalidate=604800",
+            },
+        )
+
     uri = payload.get("uri") or f"local://{payload['key']}"
     try:
         content = await storage.read_bytes(uri)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Attachment file not found")
-    headers = {}
+    headers = {
+        "Cache-Control": "private, max-age=86400, stale-while-revalidate=604800",
+        "ETag": etag,
+    }
     if payload.get("disposition") == "attachment":
         filename = payload.get("filename", "download")
         headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+    else:
+        filename = payload.get("filename", "file")
+        headers["Content-Disposition"] = f'inline; filename="{filename}"'
     return Response(content=content, headers=headers)
 
 
@@ -215,23 +232,6 @@ async def get_attachment(
     if metadata is None:
         raise HTTPException(status_code=404, detail="Attachment not found")
     return await url_service.enrich_attachment(metadata)
-
-
-@router.get("/attachments/{attachment_id}/content")
-async def get_attachment_content(
-    attachment_id: uuid.UUID,
-    current_user: UserDB = Depends(get_current_user),
-    db: AsyncClient = Depends(get_db),
-    service: AttachmentService = Depends(get_attachment_service),
-):
-    repo = AttachmentRepository(db)
-    metadata = await repo.get(attachment_id, current_user.id)
-    if metadata is None:
-        raise HTTPException(status_code=404, detail="Attachment not found")
-
-    content = await service.read_bytes(metadata)
-    headers = {"Content-Disposition": f'attachment; filename="{metadata.filename}"'}
-    return Response(content=content, media_type=metadata.mime_type, headers=headers)
 
 
 @router.delete("/attachments/{attachment_id}", status_code=200)
