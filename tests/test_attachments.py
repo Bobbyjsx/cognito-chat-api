@@ -196,3 +196,27 @@ def test_delete_attachment(client, auth_headers, attachment_storage):
 
     fetched = client.get(f"/agent/attachments/{attachment_id}", headers=auth_headers)
     assert fetched.status_code == 404
+
+
+def test_get_attachment_content_caching_and_304(client, auth_headers, attachment_storage):
+    upload = client.post(
+        "/agent/attachments",
+        headers=auth_headers,
+        files={"file": ("photo.png", PNG_BYTES, "image/png")},
+    )
+    attachment_id = upload.json()["id"]
+
+    # 1. Fetch content
+    resp = client.get(f"/agent/attachments/{attachment_id}/content", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.content == PNG_BYTES
+    assert "private, max-age=86400" in resp.headers["cache-control"]
+    assert resp.headers["etag"] == f'"{attachment_id}"'
+    assert 'inline; filename="photo.png"' in resp.headers["content-disposition"]
+
+    # 2. Subsequent fetch with If-None-Match returns 304 Not Modified
+    cached_resp = client.get(
+        f"/agent/attachments/{attachment_id}/content",
+        headers={**auth_headers, "If-None-Match": f'"{attachment_id}"'},
+    )
+    assert cached_resp.status_code == 304
