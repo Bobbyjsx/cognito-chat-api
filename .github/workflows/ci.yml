@@ -21,16 +21,17 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.12"
-          cache: "pip"
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+        run: uv sync --frozen
 
       - name: Set up Environment
         run: |
@@ -38,11 +39,11 @@ jobs:
 
       - name: Run Ruff Linter
         run: |
-          ruff check .
+          uv run ruff check .
 
       - name: Check Code Formatting
         run: |
-          ruff format --check .
+          uv run ruff format --check .
 
   test:
     name: Unit & Integration Tests
@@ -52,16 +53,17 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
         with:
-          python-version: "3.12"
-          cache: "pip"
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+        run: uv sync --frozen
 
       - name: Set up Environment
         run: |
@@ -82,7 +84,7 @@ jobs:
           STORAGE_BACKEND: "local"
           PYTHONPATH: "."
         run: |
-          pytest -v tests/
+          uv run pytest -v tests/
 
       - name: Verify Migration Idempotency
         env:
@@ -90,8 +92,8 @@ jobs:
           GOOGLE_CLOUD_PROJECT: "test-project"
           PYTHONPATH: "."
         run: |
-          python scripts/migrate.py --list
-          python scripts/migrate.py all
+          uv run python scripts/migrate.py --list
+          uv run python scripts/migrate.py all
 
       - name: Teardown Services
         if: always()

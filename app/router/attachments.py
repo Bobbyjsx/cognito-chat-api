@@ -187,7 +187,10 @@ async def list_attachments(
     cache_key = CacheKeys.user_attachments(current_user.id, limit, offset, session_id, type, query)
     cached_data = await redis_cache.get(cache_key)
     if cached_data:
-        return cached_data
+        cached_items = cached_data.get("items", [])
+        # Only return cache if items are empty or contain populated URLs (guard against stale null URLs)
+        if not cached_items or any(bool(item.get("url")) for item in cached_items):
+            return cached_data
 
     repo = AttachmentRepository(db)
     metadata, has_more, total = await repo.list_by_user(

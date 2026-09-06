@@ -2,12 +2,17 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONHASHSEED=random
+# Install uv from official binary image
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONHASHSEED=random \
+    UV_COMPILE_BYTECODE=1 \
+    PATH="/app/.venv/bin:$PATH"
+
+# Install dependencies using uv sync
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
 
 # Copy source code
 COPY . .

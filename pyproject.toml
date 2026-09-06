@@ -1,3 +1,40 @@
+[project]
+name = "cognito-chat-api"
+version = "0.1.0"
+description = "Cognito Chat API"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "anthropic",
+    "botocore",
+    "fastapi",
+    "firebase-admin",
+    "google-cloud-firestore>=2.16.0,<2.20.0",
+    "google-cloud-storage",
+    "google-cloud-tasks",
+    "google-genai",
+    "httpx",
+    "passlib[bcrypt]",
+    "pydantic[email]",
+    "pydantic-settings",
+    "pyjwt[crypto]",
+    "python-multipart",
+    "redis",
+    "uvicorn[standard]",
+]
+
+[dependency-groups]
+dev = [
+    "freezegun",
+    "pre-commit",
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+]
+
+[tool.uv]
+package = false
+
 [tool.ruff]
 line-length = 120
 
@@ -8,6 +45,8 @@ ignore = [
     "BLE001",  # Do not catch blind exception (ok for our global error handler)
     "TRY201",  # Use raise without specifying exception name (ok for FastAPI handler)
     "E402",    # Module level import not at top of file (used for setup before imports)
+    "UP017",   # datetime.timezone.utc used across tests and codebase
+    "UP046",   # Generic class subclass syntax (Pydantic models)
 ]
 
 [tool.pytest.ini_options]
