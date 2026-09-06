@@ -25,66 +25,11 @@ class GCSStorageBackend(StorageBackend):
     def __init__(self, bucket_name: str, client=None):
         if not bucket_name:
             raise ValueError("GCSStorageBackend requires a bucket name (STORAGE_BUCKET).")
-        self.bucket_name = bucket_name
-        self._client = client or self._create_client()
-        self._bucket = self._client.bucket(self.bucket_name)
-
-    @staticmethod
-    def _create_client():
-        import os
-
         from google.cloud.storage import Client
 
-        from app.core.config import settings
-
-        # 1. Prefer explicit Firebase / GCP service account file from config
-        cred_path = getattr(settings, "firebase_credentials_path", None)
-        if cred_path and os.path.exists(cred_path):
-            try:
-                return Client.from_service_account_json(cred_path)
-            except Exception as e:
-                logger.warning("Failed to initialize GCS client from firebase_credentials_path: %s", e)
-
-        # 2. Check GOOGLE_APPLICATION_CREDENTIALS environment variable
-        google_app_creds = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-        if google_app_creds and os.path.exists(google_app_creds):
-            try:
-                return Client.from_service_account_json(google_app_creds)
-            except Exception as e:
-                logger.warning("Failed to initialize GCS client from GOOGLE_APPLICATION_CREDENTIALS: %s", e)
-
-        # 3. Fallback to default client
-        return Client()
-
-    def _get_signing_extra(self) -> dict[str, str]:
-        """Provide service_account_email and access_token when credentials lack local private keys."""
-        try:
-            from google.auth.credentials import Signing
-
-            creds = getattr(self._client, "_credentials", None) or getattr(self._client, "credentials", None)
-            if creds is None or isinstance(creds, Signing):
-                return {}
-
-            extra: dict[str, str] = {}
-            sa_email = getattr(creds, "service_account_email", None)
-            if not sa_email:
-                from app.core.config import settings
-
-                sa_email = getattr(settings, "cloud_tasks_service_account_email", None)
-            if sa_email:
-                extra["service_account_email"] = sa_email
-
-            if not getattr(creds, "valid", False):
-                from google.auth.transport.requests import Request as AuthRequest
-
-                creds.refresh(AuthRequest())
-            token = getattr(creds, "token", None)
-            if token:
-                extra["access_token"] = token
-            return extra
-        except Exception as e:
-            logger.debug("Could not resolve extra IAM signing parameters: %s", e)
-            return {}
+        self.bucket_name = bucket_name
+        self._client = client or Client()
+        self._bucket = self._client.bucket(self.bucket_name)
 
     @staticmethod
     def _key_from_uri(uri: str) -> str:
@@ -155,14 +100,12 @@ class GCSStorageBackend(StorageBackend):
 
         def _sign():
             blob = self._bucket.blob(key)
-            kwargs = {
-                "version": "v4",
-                "expiration": timedelta(seconds=expires_in),
-                "method": "PUT",
-                "content_type": content_type,
-            }
-            kwargs.update(self._get_signing_extra())
-            url = blob.generate_signed_url(**kwargs)
+            url = blob.generate_signed_url(
+                version="v4",
+                expiration=timedelta(seconds=expires_in),
+                method="PUT",
+                content_type=content_type,
+            )
             return url, {"Content-Type": content_type}
 
         return await asyncio.to_thread(_sign)
@@ -186,8 +129,9 @@ class GCSStorageBackend(StorageBackend):
                 "method": "GET",
             }
             if disposition == "attachment":
-                kwargs["response_disposition"] = f'attachment; filename="{filename}"' if filename else "attachment"
-            kwargs.update(self._get_signing_extra())
+                kwargs["response_disposition"] = (
+                    f'attachment; filename="{filename}"' if filename else "attachment"
+                )
             return blob.generate_signed_url(**kwargs)
 
         return await asyncio.to_thread(_sign)
