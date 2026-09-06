@@ -160,7 +160,7 @@ class GCSStorageBackend(StorageBackend):
         ascii_filename = filename.encode("ascii", "ignore").decode("ascii").replace('"', "")
         encoded_filename = urllib.parse.quote(filename, safe="")
         if ascii_filename:
-            return f'attachment; filename="{ascii_filename}"; filename*=UTF-8\'\'{encoded_filename}'
+            return f"attachment; filename=\"{ascii_filename}\"; filename*=UTF-8''{encoded_filename}"
         return f"attachment; filename*=UTF-8''{encoded_filename}"
 
     async def generate_upload_url(
