@@ -231,40 +231,6 @@ async def get_attachment(
     return await url_service.enrich_attachment(metadata)
 
 
-@router.get("/attachments/{attachment_id}/content")
-async def get_attachment_content(
-    attachment_id: uuid.UUID,
-    request: Request,
-    download: bool = False,
-    current_user: UserDB = Depends(get_current_user),
-    db: AsyncClient = Depends(get_db),
-    service: AttachmentService = Depends(get_attachment_service),
-):
-    repo = AttachmentRepository(db)
-    metadata = await repo.get(attachment_id, current_user.id)
-    if metadata is None:
-        raise HTTPException(status_code=404, detail="Attachment not found")
-
-    etag = f'"{metadata.id}"'
-    if request.headers.get("if-none-match") == etag:
-        return Response(
-            status_code=304,
-            headers={
-                "ETag": etag,
-                "Cache-Control": "private, max-age=86400, stale-while-revalidate=604800",
-            },
-        )
-
-    content = await service.read_bytes(metadata)
-    disposition = "attachment" if download else "inline"
-    headers = {
-        "Content-Disposition": f'{disposition}; filename="{metadata.filename}"',
-        "Cache-Control": "private, max-age=86400, stale-while-revalidate=604800",
-        "ETag": etag,
-    }
-    return Response(content=content, media_type=metadata.mime_type, headers=headers)
-
-
 @router.delete("/attachments/{attachment_id}", status_code=200)
 async def delete_attachment(
     attachment_id: uuid.UUID,
