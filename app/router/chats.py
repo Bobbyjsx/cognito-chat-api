@@ -239,8 +239,10 @@ async def get_session(
 
     if session.read_status != ReadStatus.READ:
         session.read_status = ReadStatus.READ
-        asyncio.create_task(repo.mark_session_read(session_id))
-        asyncio.create_task(redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(current_user.id)))
+        await asyncio.gather(
+            repo.mark_session_read(session_id),
+            redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(current_user.id)),
+        )
 
     messages = session.messages or []
     session.messages = []
