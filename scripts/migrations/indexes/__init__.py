@@ -1,0 +1,1 @@
+"""Indexes migration package."""

@@ -10,7 +10,8 @@ from app.models.attachments import AttachmentMetadata
 
 logger = logging.getLogger(__name__)
 
-_IN_QUERY_CHUNK = 30
+_GET_ALL_CHUNK = 100
+_LIST_DELETED_SLACK = 8
 
 
 class AttachmentRepository:
@@ -40,17 +41,20 @@ class AttachmentRepository:
     async def get_many(
         self, user_id: UUID | str, ids: Sequence[UUID | str], include_deleted: bool = False
     ) -> list[AttachmentMetadata]:
-        """Fetch owned attachments by id, chunking Firestore ``in`` queries."""
+        """Fetch owned attachments by document id via batched ``get_all``."""
         if not ids:
             return []
         found: dict[str, AttachmentMetadata] = {}
         unique_ids = list(dict.fromkeys(str(i) for i in ids))
-        for start in range(0, len(unique_ids), _IN_QUERY_CHUNK):
-            chunk = unique_ids[start : start + _IN_QUERY_CHUNK]
-            query = self.collection.where(filter=FieldFilter("id", "in", chunk)).stream()
-            async for doc in query:
+        owner = str(user_id)
+        for start in range(0, len(unique_ids), _GET_ALL_CHUNK):
+            chunk = unique_ids[start : start + _GET_ALL_CHUNK]
+            refs = [self.collection.document(doc_id) for doc_id in chunk]
+            async for doc in self.db.get_all(refs):
+                if not doc.exists:
+                    continue
                 data = doc.to_dict() or {}
-                if not data or data.get("user_id") != str(user_id):
+                if not data or data.get("user_id") != owner:
                     continue
                 if not include_deleted and data.get("deleted_at") is not None:
                     continue
@@ -69,43 +73,49 @@ class AttachmentRepository:
     ) -> tuple[list[AttachmentMetadata], bool, int]:
         from google.cloud import firestore
 
+        limit = max(1, limit)
+        offset = max(0, offset)
         query = self.collection.where(filter=FieldFilter("user_id", "==", str(user_id)))
         query = query.where(filter=FieldFilter("is_temporary", "==", False))
         if session_id is not None:
             query = query.where(filter=FieldFilter("session_id", "==", str(session_id)))
 
-        # Do not use offset/limit here if we are filtering in python to avoid losing matches
         query = query.order_by("uploaded_at", direction=firestore.Query.DESCENDING)
+        filename_q = query_string.lower() if query_string else None
+        python_type = type
+        if not python_type and not filename_q:
+            query = query.limit(offset + limit + 1 + _LIST_DELETED_SLACK)
 
         results: list[AttachmentMetadata] = []
+        skipped = 0
         async for doc in query.stream():
             data = doc.to_dict() or {}
-            if data and data.get("deleted_at") is None:
-                meta = AttachmentMetadata(**data)
-                results.append(meta)
+            if not data or data.get("deleted_at") is not None:
+                continue
+            meta = AttachmentMetadata(**data)
+            if python_type:
+                if python_type == "image" and not meta.mime_type.startswith("image/"):
+                    continue
+                if python_type == "document" and not (
+                    meta.mime_type.startswith("application/pdf") or meta.mime_type.startswith("text/")
+                ):
+                    continue
+                if python_type not in ("image", "document") and meta.type != python_type:
+                    continue
+            if filename_q and filename_q not in meta.filename.lower():
+                continue
+            if skipped < offset:
+                skipped += 1
+                continue
+            results.append(meta)
+            if len(results) > limit:
+                break
 
-        # Python-side filtering
-        if type:
-            if type == "image":
-                results = [r for r in results if r.mime_type.startswith("image/")]
-            elif type == "document":
-                results = [
-                    r for r in results if r.mime_type.startswith("application/pdf") or r.mime_type.startswith("text/")
-                ]
-            else:
-                results = [r for r in results if r.type == type]
-
-        if query_string:
-            q = query_string.lower()
-            results = [r for r in results if q in r.filename.lower()]
-
-        total = len(results)
-
-        # Paginate results
-        paginated_results = results[offset : offset + limit]
-        has_more = offset + limit < total
-
-        return paginated_results, has_more, total
+        has_more = len(results) > limit
+        if has_more:
+            results = results[:limit]
+        total = offset + len(results) + (1 if has_more else 0)
+        return results, has_more, total
 
     async def list_abandoned_temporary(self, before: datetime) -> list[AttachmentMetadata]:
         query = self.collection.where(filter=FieldFilter("is_temporary", "==", True))

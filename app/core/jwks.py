@@ -18,6 +18,7 @@ JWKS_TTL_SECONDS = 3600
 IDENTITY_ALGORITHMS = ("EdDSA", "RS256", "ES256")
 
 _memory_jwks: dict | None = None
+_memory_keyset: PyJWKSet | None = None
 _memory_loaded_at = 0.0
 _lock = asyncio.Lock()
 
@@ -39,8 +40,12 @@ def _memory_fresh() -> bool:
 
 
 def _store_memory(jwks: dict) -> dict:
-    global _memory_jwks, _memory_loaded_at
+    global _memory_jwks, _memory_keyset, _memory_loaded_at
     _memory_jwks = jwks
+    try:
+        _memory_keyset = PyJWKSet.from_dict(jwks)
+    except Exception:
+        _memory_keyset = None
     _memory_loaded_at = time.time()
     return jwks
 
@@ -96,7 +101,7 @@ async def decode_identity_jwt(token: str) -> dict:
 
     header = jwt.get_unverified_header(token)
     kid = header.get("kid")
-    key_set = PyJWKSet.from_dict(jwks)
+    key_set = _memory_keyset or PyJWKSet.from_dict(jwks)
     if kid:
         signing_key = key_set[kid]
     elif key_set.keys:

@@ -72,7 +72,9 @@ from app.main import app
 def clear_database():
     """Clear the Firestore emulator database, re-seed app_config, and clear Redis between tests."""
     from app.core.redis import redis_cache
+    from app.repositories.config import clear_config_memory
 
+    clear_config_memory()
     if redis_cache.redis_client:
         if hasattr(redis_cache.redis_client, "store"):
             redis_cache.redis_client.store.clear()

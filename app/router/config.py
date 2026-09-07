@@ -24,5 +24,5 @@ async def get_system_config(db: AsyncClient = Depends(get_db)):
 
     repo = ConfigRepository(db)
     config = await repo.get_config()
-    await redis_cache.set(cache_key, config.model_dump(mode="json"), expire=3600)
+    redis_cache.set_bg(cache_key, config.model_dump(mode="json"), expire=3600)
     return config

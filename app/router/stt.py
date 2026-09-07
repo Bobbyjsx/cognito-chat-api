@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from google.cloud.firestore_v1.async_client import AsyncClient
 from pydantic import BaseModel
 
-from app.api.dependencies import get_current_user, get_provider
+from app.api.dependencies import get_persisted_user, get_provider
 from app.database import get_db
 from app.models.users import UserDB
 from app.providers.base import BaseProvider
@@ -36,7 +36,7 @@ async def transcribe_audio(
         default="audio/webm",
         description="MIME type of the uploaded audio (e.g. audio/webm;codecs=opus)",
     ),
-    current_user: UserDB = Depends(get_current_user),
+    current_user: UserDB = Depends(get_persisted_user),
     db: AsyncClient = Depends(get_db),
     service: STTService = Depends(get_stt_service),
 ):

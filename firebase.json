@@ -1,0 +1,12 @@
+{
+  "firestore": [
+    {
+      "database": "cognito-prod-db",
+      "indexes": "firestore.indexes.json"
+    },
+    {
+      "database": "(default)",
+      "indexes": "firestore.indexes.json"
+    }
+  ]
+}

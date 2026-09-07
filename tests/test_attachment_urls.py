@@ -618,3 +618,64 @@ async def test_gcs_storage_backend_signing_flow():
     call_kwargs = mock_blob.generate_signed_url.call_args.kwargs
     assert call_kwargs["version"] == "v4"
     assert call_kwargs["method"] == "GET"
+
+
+@pytest.mark.asyncio
+async def test_list_by_user_limits_firestore_scan():
+    """Default listing must cap the Firestore stream instead of reading every attachment."""
+    from app.repositories.attachments import AttachmentRepository
+
+    user_id = uuid4()
+    query = MagicMock()
+    query.where.return_value = query
+    query.order_by.return_value = query
+    query.limit.return_value = query
+
+    async def _empty_stream():
+        if False:
+            yield None
+
+    query.stream.side_effect = lambda: _empty_stream()
+
+    db_mock = MagicMock()
+    repo = AttachmentRepository(db_mock)
+    repo.collection.where.return_value = query
+
+    items, has_more, total = await repo.list_by_user(user_id, limit=15, offset=0)
+    assert items == []
+    assert has_more is False
+    assert total == 0
+    query.limit.assert_called_once_with(24)
+
+
+@pytest.mark.asyncio
+async def test_get_many_uses_document_gets():
+    """Batch fetch should use get_all on document refs, not an ``in`` query."""
+    from app.repositories.attachments import AttachmentRepository
+
+    user_id = uuid4()
+    att_id = uuid4()
+    meta = AttachmentMetadata(
+        id=att_id,
+        user_id=user_id,
+        filename="a.png",
+        mime_type="image/png",
+        size=10,
+        storage_uri="local://a.png",
+    )
+    snap = MagicMock()
+    snap.exists = True
+    snap.to_dict.return_value = meta.model_dump(mode="json")
+
+    async def _get_all(refs):
+        assert len(refs) == 1
+        yield snap
+
+    db_mock = MagicMock()
+    db_mock.get_all.side_effect = _get_all
+    repo = AttachmentRepository(db_mock)
+    found = await repo.get_many(user_id, [att_id])
+    assert len(found) == 1
+    assert str(found[0].id) == str(att_id)
+    db_mock.get_all.assert_called_once()
+    repo.collection.where.assert_not_called()

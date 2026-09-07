@@ -7,6 +7,7 @@ lands in Firestore. Chat requests reference attachments by id (see
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 
@@ -51,13 +52,18 @@ async def request_upload_url(
     service: AttachmentService = Depends(get_attachment_service),
 ):
     """Generate a presigned upload URL for direct client-to-storage upload."""
+    from app.repositories.chats import ChatRepository
+
+    config_task = ConfigRepository(db).get_config()
     if body.session_id:
-        from app.repositories.chats import ChatRepository
-
-        if not await ChatRepository(db).session_exists(body.session_id, current_user.id):
+        session_ok, config = await asyncio.gather(
+            ChatRepository(db).session_exists(body.session_id, current_user.id),
+            config_task,
+        )
+        if not session_ok:
             raise HTTPException(status_code=404, detail="Session not found.")
-
-    config = await ConfigRepository(db).get_config()
+    else:
+        config = await config_task
     try:
         return await service.create_upload_ticket(
             user=current_user,
@@ -155,14 +161,20 @@ async def upload_attachment(
     Pass the returned ``id`` in ``attachments`` on ``POST /agent/chat`` or
     ``POST /agent/chat/stream`` to attach it to a message.
     """
+    from app.repositories.chats import ChatRepository
+
+    data_task = file.read()
+    config_task = ConfigRepository(db).get_config()
     if session_id:
-        from app.repositories.chats import ChatRepository
-
-        if not await ChatRepository(db).session_exists(session_id, current_user.id):
+        session_ok, data, config = await asyncio.gather(
+            ChatRepository(db).session_exists(session_id, current_user.id),
+            data_task,
+            config_task,
+        )
+        if not session_ok:
             raise HTTPException(status_code=404, detail="Session not found.")
-
-    data = await file.read()
-    config = await ConfigRepository(db).get_config()
+    else:
+        data, config = await asyncio.gather(data_task, config_task)
 
     if len(data) > config.attachment_max_size:
         raise HTTPException(
@@ -216,7 +228,7 @@ async def list_attachments(
     items = await url_service.enrich_attachments(metadata)
     response = PaginatedResponse(items=items, total=total, limit=limit, offset=offset, has_more=has_more)
 
-    await redis_cache.set(cache_key, response.model_dump(mode="json"), expire=300)
+    redis_cache.set_bg(cache_key, response.model_dump(mode="json"), expire=300)
     return response
 
 

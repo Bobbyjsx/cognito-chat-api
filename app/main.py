@@ -49,24 +49,18 @@ async def _cleanup_loop(app: FastAPI):
 
 
 async def _prewarm_services(app: FastAPI):
-    """Background task on startup to pre-warm network connections and caches
-    so that the very first user request avoids TLS handshake and cold lookup penalties.
-    """
+    """Warm Firestore, config, storage signing, and JWKS before serving traffic."""
     try:
         from app.repositories.config import ConfigRepository
 
-        # 1. Warm Firestore connection & populate system config cache
         config_repo = ConfigRepository(app.state.db_client)
         await config_repo.get_config()
 
-        # 2. Pre-warm Google API TLS connection pool
-        import httpx
+        storage = get_storage_backend()
+        warm = getattr(storage, "warm_signing", None)
+        if callable(warm):
+            await asyncio.to_thread(warm)
 
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            try:
-                await client.get("https://generativelanguage.googleapis.com", follow_redirects=True)
-            except Exception as exc:
-                logger.debug("TLS pool pre-warming connection ignored: %s", exc)
         logger.info("Cold-start dependency pre-warming completed successfully.")
     except Exception as exc:
         logger.debug("Pre-warming background task encountered non-critical error: %s", exc)
@@ -124,18 +118,21 @@ async def _init_ai_stack(app: FastAPI):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    jwks_task = asyncio.create_task(prefetch_jwks())
     init_db()
     app.state.db_client = create_db_client()
     await redis_cache.connect()
     await _init_ai_stack(app)
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(prefetch_jwks(), _prewarm_services(app), return_exceptions=True),
+            timeout=8.0,
+        )
+    except Exception as exc:
+        logger.debug("Startup pre-warm timed out or failed: %s", exc)
     cleanup_task = asyncio.create_task(_cleanup_loop(app))
-    prewarm_task = asyncio.create_task(_prewarm_services(app))
 
     yield
-    jwks_task.cancel()
     cleanup_task.cancel()
-    prewarm_task.cancel()
     await redis_cache.disconnect()
 
 

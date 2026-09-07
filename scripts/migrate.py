@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from scripts.migrations.attachments import runner as attachments_runner
 from scripts.migrations.chat_sessions import runner as chat_sessions_runner
 from scripts.migrations.core_config import runner as core_config_runner
+from scripts.migrations.indexes import runner as indexes_runner
 from scripts.migrations.smart_model_routing import runner as smart_model_routing_runner
 from scripts.migrations.speech_to_text import runner as speech_to_text_runner
 from scripts.migrations.user_auth import runner as user_auth_runner
@@ -65,6 +66,11 @@ FEATURES = {
         "aliases": ["attachment", "files", "gcs", "storage", "upload"],
         "runner": attachments_runner,
         "description": "Canonical storage identity backfill and Firestore signed URL isolation",
+    },
+    "indexes": {
+        "aliases": ["composite-indexes", "composite_indexes", "firestore-indexes", "indices"],
+        "runner": indexes_runner,
+        "description": "Cloud Firestore composite indexes defined in firestore.indexes.json",
     },
 }
 
