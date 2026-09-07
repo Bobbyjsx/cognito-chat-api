@@ -173,6 +173,21 @@ class BenchmarkCollector:
         return latencies_ms
 
 
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 256
+
+
+def _json_id(resp: httpx.Response, *keys: str) -> str | None:
+    if resp.status_code not in (200, 201):
+        return None
+    with contextlib.suppress(Exception):
+        data = resp.json()
+        for key in keys:
+            val = data.get(key)
+            if val:
+                return str(val)
+    return None
+
+
 def run_live_benchmarks(base_url: str, iterations: int = 15) -> dict[str, Any]:
     collector = BenchmarkCollector(iterations=iterations, warmup=2)
     user_id = str(uuid.uuid4())
@@ -183,33 +198,29 @@ def run_live_benchmarks(base_url: str, iterations: int = 15) -> dict[str, Any]:
         "Pragma": "no-cache",
     }
 
-    with httpx.Client(base_url=base_url, timeout=30.0) as client:
-        # 1. Health check
+    with httpx.Client(base_url=base_url, timeout=90.0) as client:
         collector.measure("GET /health", lambda: client.get("/health"))
-
-        # 2. Config endpoint
         collector.measure("GET /config", lambda: client.get("/config", headers=headers))
-
-        # 3. List Sessions
         collector.measure("GET /agent/sessions", lambda: client.get("/agent/sessions", headers=headers))
 
-        # 4. Agent Chat (Sync)
         session_id = None
+        generation_id = None
 
         def _chat():
-            nonlocal session_id
+            nonlocal session_id, generation_id
             r = client.post(
                 "/agent/chat",
                 headers=headers,
                 json={"message": "Benchmark live prompt ping"},
             )
             if r.status_code == 200:
-                session_id = r.json().get("session_id")
+                body = r.json()
+                session_id = body.get("session_id") or session_id
+                generation_id = body.get("generation_id") or generation_id
             return r
 
         collector.measure("POST /agent/chat (Sync)", _chat)
 
-        # 5. Agent Chat Stream (SSE)
         def _stream():
             with client.stream(
                 "POST",
@@ -223,44 +234,107 @@ def run_live_benchmarks(base_url: str, iterations: int = 15) -> dict[str, Any]:
 
         collector.measure("POST /agent/chat/stream", _stream)
 
-        # 6. Get Session Details
         if session_id:
             collector.measure(
                 "GET /agent/sessions/{id}",
                 lambda: client.get(f"/agent/sessions/{session_id}", headers=headers),
             )
+            collector.measure(
+                "PATCH /agent/sessions/{id}/read",
+                lambda: client.patch(f"/agent/sessions/{session_id}/read", headers=headers),
+            )
 
-        # 7. Generations status (if endpoint exists on branch)
-        test_gen_uuid = str(uuid.uuid4())
-        with contextlib.suppress(Exception):
-            gen_resp = client.get(f"/agent/generations/{test_gen_uuid}", headers=headers)
-            if gen_resp.status_code in (200, 404):
-                collector.measure(
-                    "GET /agent/generations/{id}",
-                    lambda: client.get(f"/agent/generations/{test_gen_uuid}", headers=headers),
-                )
+        gen_lookup_id = generation_id or str(uuid.uuid4())
+        collector.measure(
+            "GET /agent/generations/{id}",
+            lambda: client.get(f"/agent/generations/{gen_lookup_id}", headers=headers),
+        )
 
-        # 8. Attachments Upload
         attachment_id = None
+
+        def _upload_url():
+            nonlocal attachment_id
+            r = client.post(
+                "/agent/attachments/upload-url",
+                headers=headers,
+                json={
+                    "filename": "bench.png",
+                    "mime_type": "image/png",
+                    "size": len(PNG_BYTES),
+                    "is_temporary": False,
+                },
+            )
+            found = _json_id(r, "attachment_id", "id")
+            if found:
+                attachment_id = found
+            return r
+
+        collector.measure("POST /agent/attachments/upload-url", _upload_url)
 
         def _upload():
             nonlocal attachment_id
-            files = {"file": ("bench.txt", b"Live benchmark attachment payload bytes", "text/plain")}
-            r = client.post("/agent/attachments", headers=headers, files=files)
-            if r.status_code in (200, 201):
-                attachment_id = r.json().get("id")
+            r = client.post(
+                "/agent/attachments",
+                headers=headers,
+                files={"file": ("bench.png", PNG_BYTES, "image/png")},
+                data={"is_temporary": "false"},
+            )
+            found = _json_id(r, "id")
+            if found:
+                attachment_id = found
             return r
 
         collector.measure("POST /agent/attachments", _upload)
 
-        # 9. Get Attachment Metadata
+        collector.measure(
+            "GET /agent/attachments",
+            lambda: client.get("/agent/attachments", headers=headers),
+        )
+
         if attachment_id:
             collector.measure(
                 "GET /agent/attachments/{id}",
                 lambda: client.get(f"/agent/attachments/{attachment_id}", headers=headers),
             )
 
-        # 11. Delete Session
+        share_id = None
+        if session_id:
+            share_resp = client.post(
+                f"/agent/sessions/{session_id}/share",
+                headers=headers,
+                json={"title": "Benchmark share", "show_name": False},
+            )
+            share_id = _json_id(share_resp, "share_id", "id")
+            collector.measure(
+                "POST /agent/sessions/{id}/share",
+                lambda: client.post(
+                    f"/agent/sessions/{session_id}/share",
+                    headers=headers,
+                    json={"title": "Benchmark share", "show_name": False},
+                ),
+            )
+            collector.measure(
+                "GET /agent/sessions/{id}/share",
+                lambda: client.get(f"/agent/sessions/{session_id}/share", headers=headers),
+            )
+            if share_id:
+                collector.measure(
+                    "GET /agent/shared/{id}",
+                    lambda: client.get(f"/agent/shared/{share_id}", headers=headers),
+                )
+
+        if attachment_id:
+            collector.measure(
+                "DELETE /agent/attachments/{id}",
+                lambda: client.delete(f"/agent/attachments/{attachment_id}", headers=headers),
+            )
+
+        if share_id:
+            collector.measure(
+                "DELETE /agent/shared/{id}",
+                lambda: client.delete(f"/agent/shared/{share_id}", headers=headers),
+            )
+
         if session_id:
             collector.measure(
                 "DELETE /agent/sessions/{id}",

@@ -62,15 +62,36 @@
       "std_dev_ms": 3.8,
       "sample_status": 200
     },
+    "PATCH /agent/sessions/{id}/read": {
+      "iterations": 15,
+      "mean_ms": 1206.1,
+      "median_ms": 1165.47,
+      "p95_ms": 1379.15,
+      "min_ms": 1115.89,
+      "max_ms": 1379.15,
+      "std_dev_ms": 92.15,
+      "sample_status": 200
+    },
     "GET /agent/generations/{id}": {
       "iterations": 15,
-      "mean_ms": 1.05,
-      "median_ms": 0.95,
-      "p95_ms": 2.01,
-      "min_ms": 0.87,
-      "max_ms": 2.01,
-      "std_dev_ms": 0.29,
-      "sample_status": 404
+      "mean_ms": 331.51,
+      "median_ms": 319.82,
+      "p95_ms": 493.26,
+      "min_ms": 307.2,
+      "max_ms": 493.26,
+      "std_dev_ms": 46.0,
+      "sample_status": 404,
+      "note": "Endpoint did not exist when the original 1.05ms baseline was recorded; replaced with first live Firestore lookup (2026-09-07)."
+    },
+    "POST /agent/attachments/upload-url": {
+      "iterations": 15,
+      "mean_ms": 949.63,
+      "median_ms": 957.88,
+      "p95_ms": 1048.65,
+      "min_ms": 880.42,
+      "max_ms": 1048.65,
+      "std_dev_ms": 55.0,
+      "sample_status": 200
     },
     "POST /agent/attachments": {
       "iterations": 15,
@@ -81,6 +102,76 @@
       "max_ms": 976.49,
       "std_dev_ms": 58.44,
       "sample_status": 201
+    },
+    "GET /agent/attachments": {
+      "iterations": 15,
+      "mean_ms": 443.47,
+      "median_ms": 407.83,
+      "p95_ms": 608.64,
+      "min_ms": 381.96,
+      "max_ms": 608.64,
+      "std_dev_ms": 72.25,
+      "sample_status": 200
+    },
+    "GET /agent/attachments/{id}": {
+      "iterations": 15,
+      "mean_ms": 556.27,
+      "median_ms": 546.08,
+      "p95_ms": 628.77,
+      "min_ms": 519.31,
+      "max_ms": 628.77,
+      "std_dev_ms": 31.06,
+      "sample_status": 200
+    },
+    "POST /agent/sessions/{id}/share": {
+      "iterations": 15,
+      "mean_ms": 696.29,
+      "median_ms": 685.29,
+      "p95_ms": 879.95,
+      "min_ms": 656.0,
+      "max_ms": 879.95,
+      "std_dev_ms": 54.98,
+      "sample_status": 200
+    },
+    "GET /agent/sessions/{id}/share": {
+      "iterations": 15,
+      "mean_ms": 262.57,
+      "median_ms": 261.14,
+      "p95_ms": 286.76,
+      "min_ms": 241.32,
+      "max_ms": 286.76,
+      "std_dev_ms": 12.88,
+      "sample_status": 200
+    },
+    "GET /agent/shared/{id}": {
+      "iterations": 15,
+      "mean_ms": 257.82,
+      "median_ms": 255.98,
+      "p95_ms": 275.24,
+      "min_ms": 247.3,
+      "max_ms": 275.24,
+      "std_dev_ms": 8.22,
+      "sample_status": 200
+    },
+    "DELETE /agent/attachments/{id}": {
+      "iterations": 15,
+      "mean_ms": 328.52,
+      "median_ms": 318.84,
+      "p95_ms": 368.78,
+      "min_ms": 299.88,
+      "max_ms": 368.78,
+      "std_dev_ms": 24.37,
+      "sample_status": 404
+    },
+    "DELETE /agent/shared/{id}": {
+      "iterations": 15,
+      "mean_ms": 689.53,
+      "median_ms": 647.09,
+      "p95_ms": 889.93,
+      "min_ms": 624.73,
+      "max_ms": 889.93,
+      "std_dev_ms": 81.36,
+      "sample_status": 200
     },
     "DELETE /agent/sessions/{id}": {
       "iterations": 15,
