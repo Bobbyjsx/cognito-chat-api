@@ -1,4 +1,4 @@
-name: CD - Database Migrations
+name: CD - Database Migrations & Indexes
 
 on:
   push:
@@ -7,12 +7,19 @@ on:
     paths:
       - 'scripts/migrations/**'
       - 'scripts/migrate.py'
+      - 'scripts/deploy_indexes.py'
+      - 'firestore.indexes.json'
   workflow_dispatch:
     inputs:
       feature:
-        description: 'Specific feature migration to run (default: "all")'
+        description: 'Specific feature migration to run (default: "all", "none" to skip)'
         required: false
         default: 'all'
+      deploy_indexes:
+        description: 'Deploy Firestore composite indexes'
+        type: boolean
+        required: false
+        default: true
 
 concurrency:
   group: cd-migrations-${{ github.ref }}
@@ -20,12 +27,26 @@ concurrency:
 
 jobs:
   migrate:
-    name: Run Database Migrations
+    name: Run Database Migrations & Indexes
     runs-on: ubuntu-latest
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Filter changed paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            indexes:
+              - 'firestore.indexes.json'
+              - 'scripts/deploy_indexes.py'
+            migrations:
+              - 'scripts/migrations/**'
+              - 'scripts/migrate.py'
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -64,7 +85,18 @@ jobs:
             echo "Warning: No Firebase credentials secret found. Relying on default GCP environment."
           fi
 
+      - name: Deploy Firestore Composite Indexes
+        if: steps.filter.outputs.indexes == 'true' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.deploy_indexes == 'true' || github.event.inputs.deploy_indexes == true))
+        env:
+          PYTHONPATH: "."
+          FIRESTORE_DATABASE: ${{ secrets.FIRESTORE_DATABASE || 'cognito-prod-db' }}
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GOOGLE_CLOUD_PROJECT || 'project-atlas-501612' }}
+        run: |
+          echo "Deploying Firestore composite indexes..."
+          uv run python scripts/deploy_indexes.py
+
       - name: Execute Migrations
+        if: steps.filter.outputs.migrations == 'true' || (github.event_name == 'workflow_dispatch' && github.event.inputs.feature != 'none')
         env:
           PYTHONPATH: "."
           FIRESTORE_DATABASE: ${{ secrets.FIRESTORE_DATABASE || 'cognito-prod-db' }}

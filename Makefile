@@ -12,9 +12,11 @@ run:
 
 lint:
 	uv run ruff check .
+	uv run ruff format --check .
 
 lint-fix:
 	uv run ruff check . --fix
+	uv run ruff format .
 
 format:
 	uv run ruff format .
@@ -41,6 +43,9 @@ migrate:
 
 migrate-list:
 	PYTHONPATH=. uv run python scripts/migrate.py --list
+
+deploy-indexes:
+	PYTHONPATH=. uv run python scripts/deploy_indexes.py
 
 clean:
 	rm -rf __pycache__

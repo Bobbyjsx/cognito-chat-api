@@ -76,6 +76,33 @@ def get_attachment_url_service(
     return AttachmentUrlService(storage)
 
 
+def _email_from_payload(payload: dict, user_id: str) -> str:
+    email = payload.get("email")
+    if email:
+        return email
+    import re
+
+    safe_local_part = re.sub(r"[^a-zA-Z0-9._-]", "_", str(user_id))
+    return f"{safe_local_part}@auth.identity"
+
+
+def _user_from_payload(payload: dict) -> UserDB:
+    user_id = payload.get("sub")
+    if not user_id or payload.get("type") == "refresh":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    import uuid
+
+    try:
+        user_id = str(uuid.UUID(str(user_id)))
+    except ValueError:
+        user_id = str(user_id)
+    return UserDB(id=user_id, email=_email_from_payload(payload, user_id), hashed_password="")
+
+
 async def decode_jwt_payload(token: str) -> dict:
     header = jwt.get_unverified_header(token)
     alg = header.get("alg") or ""
@@ -89,12 +116,12 @@ async def decode_jwt_payload(token: str) -> dict:
     )
 
 
-async def get_current_user(
+async def _authenticate_payload(
     request: Request,
     response: Response,
-    token: str = Depends(oauth2_scheme),
-    db: AsyncClient = Depends(get_db),
-) -> UserDB:
+    token: str,
+    db: AsyncClient,
+) -> dict:
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -105,7 +132,6 @@ async def get_current_user(
 
     try:
         payload = await decode_jwt_payload(token)
-        # Check if token is near expiration and refresh proactively if refresh token is supplied
         exp = payload.get("exp")
         if exp and server_token_manager.is_near_expiry(exp) and refresh_token:
             logger.info(
@@ -116,14 +142,9 @@ async def get_current_user(
                 refreshed = await server_token_manager.refresh_tokens(refresh_token, db)
                 response.headers["X-New-Access-Token"] = refreshed.access_token
                 response.headers["X-New-Refresh-Token"] = refreshed.refresh_token
-                logger.info(
-                    "get_current_user: Proactive token refresh successful. Injected updated token headers for '%s'.",
-                    request.url.path,
-                )
             except Exception as ref_exc:
                 logger.debug("Proactive token refresh encountered non-critical error: %s", ref_exc)
     except (jwt.ExpiredSignatureError, PyJWTError) as token_err:
-        # Access token is expired or invalid — attempt transparent server-side refresh if refresh token is present
         if refresh_token:
             logger.info(
                 "get_current_user: Access token expired/invalid (%s) on path '%s'. Initiating transparent server-side refresh.",
@@ -135,10 +156,6 @@ async def get_current_user(
                 response.headers["X-New-Access-Token"] = refreshed.access_token
                 response.headers["X-New-Refresh-Token"] = refreshed.refresh_token
                 payload = await decode_jwt_payload(refreshed.access_token)
-                logger.info(
-                    "get_current_user: Transparent server-side token refresh successful. Injected updated token headers for '%s'.",
-                    request.url.path,
-                )
             except Exception as ref_fail:
                 logger.warning(
                     "get_current_user: Transparent server-side token refresh failed on path '%s': %s",
@@ -147,32 +164,36 @@ async def get_current_user(
                 )
                 raise credentials_exception
         else:
-            logger.debug(
-                "get_current_user: Access token invalid/expired on path '%s' and no x-refresh-token provided.",
-                request.url.path,
-            )
             raise credentials_exception
 
     if payload is None:
         raise credentials_exception
+    return payload
 
-    user_id: str | None = payload.get("sub")
-    token_type: str | None = payload.get("type")
-    if not user_id or token_type == "refresh":
-        raise credentials_exception
 
-    import uuid
+async def get_current_user(
+    request: Request,
+    response: Response,
+    token: str = Depends(oauth2_scheme),
+    db: AsyncClient = Depends(get_db),
+) -> UserDB:
+    """Resolve identity from the JWT. Does not round-trip Firestore/Redis.
 
-    try:
-        # Normalize to standard dashed UUID string
-        user_id = str(uuid.UUID(user_id))
-    except ValueError:
-        pass
+    Use ``get_persisted_user`` when quota, profile, or JIT provisioning is required.
+    """
+    payload = await _authenticate_payload(request, response, token, db)
+    return _user_from_payload(payload)
 
-    # 1. Check Redis cache first for fast user resolution
+
+async def get_persisted_user(
+    current_user: UserDB = Depends(get_current_user),
+    db: AsyncClient = Depends(get_db),
+) -> UserDB:
+    """Load the Firestore user document (Redis-backed) and JIT-provision if missing."""
     from app.core.cache_keys import CacheKeys
     from app.core.redis import redis_cache
 
+    user_id = str(current_user.id)
     try:
         cached_user = await redis_cache.get(CacheKeys.user_auth(user_id), model_cls=UserDB)
         if cached_user:
@@ -180,30 +201,13 @@ async def get_current_user(
     except Exception as exc:
         logger.debug("Redis user cache check failed: %s", exc)
 
-    # 2. Fetch fresh from Firestore
     user = await UserRepository(db).get_by_id(user_id)
-
     if user is None:
-        email = payload.get("email")
-        if not email:
-            import re
-
-            safe_local_part = re.sub(r"[^a-zA-Z0-9._-]", "_", str(user_id))
-            email = f"{safe_local_part}@auth.identity"
-
-        new_user = UserDB(
-            id=user_id,
-            email=email,
-            hashed_password="",
+        user = await UserRepository(db).create(
+            UserDB(id=user_id, email=current_user.email, hashed_password=""),
         )
-        user = await UserRepository(db).create(new_user)
 
-    # Cache user auth for 120 seconds
-    try:
-        await redis_cache.set(CacheKeys.user_auth(user_id), user, expire=120)
-    except Exception as exc:
-        logger.debug("Failed to cache user in Redis: %s", exc)
-
+    redis_cache.set_bg(CacheKeys.user_auth(user_id), user, expire=120)
     return user
 
 

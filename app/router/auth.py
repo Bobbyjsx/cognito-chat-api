@@ -3,7 +3,7 @@ import logging
 from fastapi import APIRouter, Depends, status
 from google.cloud.firestore_v1.async_client import AsyncClient
 
-from app.api.dependencies import get_current_user
+from app.api.dependencies import get_persisted_user
 from app.database import get_db
 from app.models.users import (
     LoginRequest,
@@ -59,7 +59,7 @@ async def reset_password(request: PasswordResetRequest, auth_service: AuthServic
 
 @router.get("/me", response_model=UserResponse)
 async def get_my_profile(
-    current_user=Depends(get_current_user),
+    current_user=Depends(get_persisted_user),
     config_repo: ConfigRepository = Depends(get_config_repo),
 ):
     from app.core.cache_keys import CacheKeys
@@ -73,7 +73,7 @@ async def get_my_profile(
     config = await config_repo.get_config()
     response = QuotaService.build_user_response(current_user, config)
 
-    await redis_cache.set(cache_key, response.model_dump(mode="json"), expire=300)
+    redis_cache.set_bg(cache_key, response.model_dump(mode="json"), expire=300)
     return response
 
 

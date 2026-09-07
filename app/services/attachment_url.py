@@ -97,8 +97,12 @@ class AttachmentUrlService:
     ) -> AttachmentSchema:
         """Convert AttachmentMetadata to wire schema and attach fresh signed URLs."""
         schema = AttachmentSchema.model_validate(metadata, from_attributes=True)
-        url, expires_at = await self.generate_attachment_url(metadata, expires_in=expires_in, disposition="inline")
-        download_url, _ = await self.generate_attachment_url(metadata, expires_in=expires_in, disposition="attachment")
+        (url, expires_at), (download_url, _) = await asyncio.gather(
+            self.generate_attachment_url(metadata, expires_in=expires_in, disposition="inline"),
+            self.generate_attachment_url(
+                metadata, expires_in=expires_in, filename=metadata.filename, disposition="attachment"
+            ),
+        )
         schema.url = url
         schema.download_url = download_url
         schema.url_expires_at = expires_at
@@ -152,9 +156,11 @@ class AttachmentUrlService:
         url_map: dict[str, tuple[str | None, str | None, datetime | None]] = {}
 
         async def _sign(aid: str, meta: AttachmentMetadata):
-            url, exp = await self.generate_attachment_url(meta, expires_in=expires_in, disposition="inline")
-            dl_url, _ = await self.generate_attachment_url(
-                meta, expires_in=expires_in, filename=meta.filename, disposition="attachment"
+            (url, exp), (dl_url, _) = await asyncio.gather(
+                self.generate_attachment_url(meta, expires_in=expires_in, disposition="inline"),
+                self.generate_attachment_url(
+                    meta, expires_in=expires_in, filename=meta.filename, disposition="attachment"
+                ),
             )
             url_map[aid] = (url, dl_url, exp)
 

@@ -10,6 +10,7 @@ from app.api.dependencies import (
     get_attachment_url_service,
     get_current_user,
     get_optional_current_user,
+    get_persisted_user,
     get_provider,
     get_provider_registry,
     get_smart_router,
@@ -107,7 +108,7 @@ def get_agent_service(
 async def chat_with_agent(
     request: ChatRequest,
     session_id: uuid.UUID | None = None,
-    current_user: UserDB = Depends(get_current_user),
+    current_user: UserDB = Depends(get_persisted_user),
     agent_service: AgentService = Depends(get_agent_service),
 ):
     try:
@@ -135,7 +136,7 @@ async def stream_chat_with_agent(
     request: ChatRequest,
     fastapi_req: Request,
     session_id: uuid.UUID | None = None,
-    current_user: UserDB = Depends(get_current_user),
+    current_user: UserDB = Depends(get_persisted_user),
     agent_service: AgentService = Depends(get_agent_service),
 ):
     state = {"generation_id": None, "completed": False}
@@ -192,7 +193,7 @@ async def list_sessions(
         )
         sessions, has_more, total = sessions_res
         sessions_data = [_clip_session_list_item(s.model_dump(mode="json")) for s in sessions]
-        await redis_cache.set(
+        redis_cache.set_bg(
             cache_key,
             {"sessions": sessions_data, "has_more": has_more, "total": total},
             expire=300,
@@ -238,8 +239,8 @@ async def get_session(
 
     if session.read_status != ReadStatus.READ:
         session.read_status = ReadStatus.READ
-        await repo.mark_session_read(session_id)
-        await redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(current_user.id))
+        asyncio.create_task(repo.mark_session_read(session_id))
+        asyncio.create_task(redis_cache.delete_by_prefix(CacheKeys.user_sessions_prefix(current_user.id)))
 
     messages = session.messages or []
     session.messages = []
@@ -269,7 +270,7 @@ async def get_session(
         response.headers["Pragma"] = "no-cache"
     else:
         # Normal session: cache in Redis and allow standard caching
-        await redis_cache.set(cache_key, result, expire=300)
+        redis_cache.set_bg(cache_key, result, expire=300)
 
     return result
 

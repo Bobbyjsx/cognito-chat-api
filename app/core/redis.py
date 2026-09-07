@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from typing import Any
@@ -57,6 +58,15 @@ class RedisCache:
             await self.redis_client.set(key, json.dumps(payload, default=str), ex=expire)
         except Exception as e:
             logger.error(f"Redis set error for key {key}: {e}")
+
+    def set_bg(self, key: str, value: Any, expire: int = 3600) -> None:
+        """Write cache without delaying the response."""
+        if not self.redis_client:
+            return
+        try:
+            asyncio.get_running_loop().create_task(self.set(key, value, expire))
+        except RuntimeError:
+            pass
 
     async def delete(self, key: str):
         if not self.redis_client:
