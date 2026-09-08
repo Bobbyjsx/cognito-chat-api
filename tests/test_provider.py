@@ -9,9 +9,11 @@ import pytest
 from app.models.attachments import AttachmentMetadata, AttachmentType
 from app.providers.base import (
     ContentPart,
+    ProviderAuthError,
     ProviderGenerationError,
     ProviderModelNotFoundError,
     classify_provider_error,
+    is_retryable_provider_error,
 )
 from app.providers.gemini import GeminiProvider
 
@@ -243,3 +245,30 @@ def test_classify_provider_error_statuses():
 
     status, code, _ = classify_provider_error(RuntimeError("surprise"))
     assert (status, code) == (500, "GENERATION_FAILED")
+
+
+def test_classify_provider_error_sanitization():
+    # Verify ProviderAuthError never leaks raw AWS or token info to message
+    auth_err = ProviderAuthError(
+        "AWS Bedrock authentication failed: Error code: 403 - {'Message': 'Bearer Token has expired'}. Please verify AWS_BEARER_TOKEN_BEDROCK or IAM credentials.",
+        status_code=403,
+    )
+    status, code, msg = classify_provider_error(auth_err)
+    assert (status, code) == (403, "AUTHENTICATION_FAILED")
+    assert "Bearer Token" not in msg
+    assert "AWS" not in msg
+    assert "credentials" not in msg
+    assert msg == "The AI service is temporarily unavailable. Please try again or select another model."
+
+    # Verify sensitive keywords are stripped from general provider errors
+    leaked_gen_err = ProviderGenerationError("Error with api_key=sk-12345: Traceback (most recent call last): ...")
+    status, code, msg = classify_provider_error(leaked_gen_err)
+    assert "api_key" not in msg
+    assert "Traceback" not in msg
+    assert msg == "Model generation failed. Please try again."
+
+
+def test_is_retryable_provider_error_allows_fallback_on_auth_failure():
+    # Auth errors on one model/provider are safe to failover to a different candidate model
+    auth_err = ProviderAuthError("Token expired", status_code=403)
+    assert is_retryable_provider_error(auth_err) is True

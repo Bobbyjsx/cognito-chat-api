@@ -17,6 +17,7 @@ from typing import Any, Literal
 # ────────────────────────────────────────────────────────────────────────────
 
 SAFE_GENERATION_ERROR = "Model generation failed. Please try again."
+SAFE_AUTH_ERROR = "The AI service is temporarily unavailable. Please try again or select another model."
 
 ERROR_CODE_MODEL_NOT_FOUND = "MODEL_NOT_FOUND"
 ERROR_CODE_GENERATION_FAILED = "GENERATION_FAILED"
@@ -97,33 +98,58 @@ class ProviderUnsupportedError(ProviderGenerationError):
         super().__init__(message=message, status_code=status_code)
 
 
+def _sanitize_error_message(msg: str, default: str) -> str:
+    """Strip internal provider credentials, tokens, or tracebacks from client-facing messages."""
+    if not msg:
+        return default
+    lower = msg.lower()
+    sensitive_keywords = (
+        "bearer token",
+        "aws_bearer_token",
+        "aws_secret",
+        "aws_access_key",
+        "api_key",
+        "api key",
+        "iam credentials",
+        "credential",
+        "token has expired",
+        "signaturedoesnotmatch",
+        "traceback",
+        'file "',
+    )
+    if any(kw in lower for kw in sensitive_keywords):
+        return default
+    return msg
+
+
 def classify_provider_error(exc: Exception) -> tuple[int, str, str]:
     """Return ``(status_code, error_code, message)`` for a raised exception.
 
     Mirrors the behaviour of the historical ``extract_genai_error`` helper so
     HTTP semantics stay stable, while keeping SDK-specific exceptions inside
-    the provider layer.
+    the provider layer. Client-facing messages are sanitized to prevent credential leakage.
     """
     if isinstance(exc, ProviderModelNotFoundError):
-        return 404, ERROR_CODE_MODEL_NOT_FOUND, str(exc) or SAFE_GENERATION_ERROR
+        return 404, ERROR_CODE_MODEL_NOT_FOUND, _sanitize_error_message(str(exc), SAFE_GENERATION_ERROR)
     if isinstance(exc, ProviderRateLimitError):
-        return exc.status_code, ERROR_CODE_RATE_LIMIT, str(exc) or "Rate limit exceeded."
+        return exc.status_code, ERROR_CODE_RATE_LIMIT, _sanitize_error_message(str(exc), "Rate limit exceeded.")
     if isinstance(exc, ProviderAuthError):
-        return exc.status_code, ERROR_CODE_AUTH_FAILED, str(exc) or "Authentication failed."
+        # Never expose provider API keys, tokens, or IAM/credentials details to client
+        return exc.status_code, ERROR_CODE_AUTH_FAILED, SAFE_AUTH_ERROR
     if isinstance(exc, ProviderInvalidRequestError):
-        return exc.status_code, ERROR_CODE_INVALID_REQUEST, str(exc) or "Invalid request."
+        return exc.status_code, ERROR_CODE_INVALID_REQUEST, _sanitize_error_message(str(exc), "Invalid request.")
     if isinstance(exc, ProviderOverloadedError):
-        return exc.status_code, ERROR_CODE_OVERLOADED, str(exc) or "Provider overloaded."
+        return exc.status_code, ERROR_CODE_OVERLOADED, _sanitize_error_message(str(exc), "Provider overloaded.")
     if isinstance(exc, ProviderTimeoutError):
-        return exc.status_code, ERROR_CODE_TIMEOUT, str(exc) or "Request timed out."
+        return exc.status_code, ERROR_CODE_TIMEOUT, _sanitize_error_message(str(exc), "Request timed out.")
     if isinstance(exc, ProviderConnectionError):
-        return exc.status_code, ERROR_CODE_CONNECTION, str(exc) or "Connection error."
+        return exc.status_code, ERROR_CODE_CONNECTION, _sanitize_error_message(str(exc), "Connection error.")
     if isinstance(exc, ProviderUnsupportedError):
-        return exc.status_code, ERROR_CODE_UNSUPPORTED, str(exc) or "Unsupported operation."
+        return exc.status_code, ERROR_CODE_UNSUPPORTED, _sanitize_error_message(str(exc), "Unsupported operation.")
     if isinstance(exc, ProviderGenerationError):
-        return exc.status_code, ERROR_CODE_GENERATION_FAILED, str(exc) or SAFE_GENERATION_ERROR
+        return exc.status_code, ERROR_CODE_GENERATION_FAILED, _sanitize_error_message(str(exc), SAFE_GENERATION_ERROR)
     if isinstance(exc, ProviderError):
-        return 500, ERROR_CODE_GENERATION_FAILED, str(exc) or SAFE_GENERATION_ERROR
+        return 500, ERROR_CODE_GENERATION_FAILED, _sanitize_error_message(str(exc), SAFE_GENERATION_ERROR)
     return 500, ERROR_CODE_GENERATION_FAILED, SAFE_GENERATION_ERROR
 
 
@@ -304,13 +330,14 @@ class BaseProvider(ABC):
                 ProviderTimeoutError,
                 ProviderConnectionError,
                 ProviderModelNotFoundError,
+                ProviderAuthError,
             ),
         ):
             return True
-        if isinstance(exc, (ProviderAuthError, ProviderInvalidRequestError, ProviderUnsupportedError)):
+        if isinstance(exc, (ProviderInvalidRequestError, ProviderUnsupportedError)):
             return False
         if isinstance(exc, ProviderGenerationError):
-            return exc.status_code in (404, 429, 500, 502, 503, 504)
+            return exc.status_code in (401, 403, 404, 429, 500, 502, 503, 504)
         return False
 
     async def delete_file(self, file_uri: str) -> None:
