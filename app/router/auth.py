@@ -68,7 +68,18 @@ async def get_my_profile(
     cache_key = CacheKeys.user_profile(current_user.id)
     cached_data = await redis_cache.get(cache_key)
     if cached_data:
-        return cached_data
+        from datetime import datetime, timezone
+
+        from app.utils.datetime import ensure_utc
+
+        reset_at = ensure_utc(cached_data.get("reset_at"))
+        weekly_reset_at = ensure_utc(cached_data.get("weekly_reset_at"))
+        now = datetime.now(timezone.utc)
+        if (reset_at and reset_at <= now) or (weekly_reset_at and weekly_reset_at <= now):
+            await redis_cache.delete(cache_key)
+            await redis_cache.delete(CacheKeys.user_auth(current_user.id))
+        else:
+            return cached_data
 
     config = await config_repo.get_config()
     response = QuotaService.build_user_response(current_user, config)

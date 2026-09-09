@@ -557,3 +557,42 @@ class TestQuotaPrecheckEarlyRejection:
         # Must yield error event immediately
         assert any("event: error" in c for c in chunks)
         assert any("6-hour token limit reached" in c for c in chunks)
+
+
+class TestExpiredQuotaCacheBusting:
+    """Verifies that Redis caches are invalidated when reset_at has expired."""
+
+    def test_get_my_profile_busts_cache_when_cached_reset_at_is_past(self, client):
+        headers = _auth_headers(client, "expiredcache@example.com")
+        past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        future = (datetime.now(timezone.utc) + timedelta(hours=5)).isoformat()
+
+        stale_cached_profile = {
+            "id": str(uuid.uuid4()),
+            "email": "expiredcache@example.com",
+            "reset_at": past,
+            "pct_6h": 100.0,
+            "reset_countdown_6h": "Resets soon",
+            "weekly_reset_at": future,
+            "pct_weekly": 20.0,
+            "reset_countdown_weekly": "resets in 5d",
+        }
+
+        fresh_user = _make_user(
+            email="expiredcache@example.com",
+            tokens_used_6h=0,
+            reset_at=datetime.now(timezone.utc) + timedelta(hours=6),
+        )
+
+        with (
+            patch("app.core.redis.redis_cache.get", new=AsyncMock(return_value=stale_cached_profile)),
+            patch("app.core.redis.redis_cache.delete", new=AsyncMock()) as mock_del,
+            patch("app.api.dependencies.UserRepository.get_by_id", new=AsyncMock(return_value=fresh_user)),
+            patch("app.repositories.config.ConfigRepository.get_config", new=AsyncMock(return_value=AppConfigDB())),
+        ):
+            resp = client.get("/auth/me", headers=headers)
+            assert resp.status_code == 200
+            data = resp.json()
+            # Stale 100% cache was busted, fresh profile returned
+            assert data["pct_6h"] == 0.0
+            assert mock_del.called

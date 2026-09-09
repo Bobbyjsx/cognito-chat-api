@@ -197,7 +197,17 @@ async def get_persisted_user(
     try:
         cached_user = await redis_cache.get(CacheKeys.user_auth(user_id), model_cls=UserDB)
         if cached_user:
-            return cached_user
+            from datetime import datetime, timezone
+
+            from app.utils.datetime import ensure_utc
+
+            now = datetime.now(timezone.utc)
+            reset_at = ensure_utc(cached_user.reset_at)
+            weekly_reset_at = ensure_utc(cached_user.weekly_reset_at)
+            if (reset_at and reset_at <= now) or (weekly_reset_at and weekly_reset_at <= now):
+                await redis_cache.delete(CacheKeys.user_auth(user_id))
+            else:
+                return cached_user
     except Exception as exc:
         logger.debug("Redis user cache check failed: %s", exc)
 
