@@ -44,6 +44,19 @@ class SubscriptionRepository:
         data["id"] = docs[0].id
         return SubscriptionDB(**data)
 
+    async def get_by_provider_customer_code(self, code: str) -> SubscriptionDB | None:
+        docs = (
+            await self.collection.where(filter=firestore.FieldFilter("provider_customer_code", "==", code))
+            .limit(1)
+            .get()
+        )
+
+        if not docs:
+            return None
+        data = docs[0].to_dict()
+        data["id"] = docs[0].id
+        return SubscriptionDB(**data)
+
     async def save(self, subscription: SubscriptionDB) -> SubscriptionDB:
         data = subscription.model_dump(exclude={"id"})
         if not subscription.id:
