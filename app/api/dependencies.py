@@ -281,3 +281,20 @@ async def get_optional_current_user(
         return await get_current_user(request=request, response=response, token=token, db=db)
     except Exception:
         return None
+
+
+def require_tier(required_tier: str):
+    async def _require_tier(
+        current_user: UserDB = Depends(get_current_user), db: AsyncClient = Depends(get_db)
+    ) -> UserDB:
+        from app.billing.entitlements import has_minimum_tier
+        from app.billing.repository import SubscriptionRepository
+
+        repo = SubscriptionRepository(db)
+        sub = await repo.get_by_user_id(str(current_user.id))
+
+        if not has_minimum_tier(sub, required_tier):
+            raise HTTPException(status_code=403, detail="subscription_required")
+        return current_user
+
+    return _require_tier
