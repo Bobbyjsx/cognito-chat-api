@@ -68,7 +68,6 @@ class Settings(BaseSettings):
     paystack_public_key: str = ""
     paystack_webhook_secret: str = ""
     paystack_base_url: str = "https://api.paystack.co"
-    paystack_mode: str = "test"
     go_paystack_plan_code: str = ""
     premium_paystack_plan_code: str = ""
 
