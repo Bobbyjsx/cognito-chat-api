@@ -150,3 +150,6 @@ reports/
 benchmarks/current_*.json
 benchmarks/*_branch.json
 *.benchmark.json
+
+# Scratch scripts
+scratch/
