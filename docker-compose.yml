@@ -33,8 +33,7 @@ services:
       FIREBASE_CREDENTIALS_PATH: /app/firebase-credentials.json
       REDIS_URL: redis://redis:6379/0
     env_file:
-      - path: .env
-        required: false
+      - .env
     depends_on:
       redis:
         condition: service_healthy
