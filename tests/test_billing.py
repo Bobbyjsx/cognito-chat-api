@@ -22,19 +22,24 @@ Coverage:
 import hashlib
 import hmac
 import json
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Fixtures & helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-TEST_SECRET = "sk_test_dc8973dd7d21fd6658833238637ebd7bb48f4bdb"
-GO_PLAN_CODE = "PLN_sr1h7zo9qogclvb"
-PREMIUM_PLAN_CODE = "PLN_3v65wje2l7kin47"
+GO_PLAN_CODE = os.environ.get("GO_PAYSTACK_PLAN_CODE", "PLN_3v65wje2l7kin47")
+PREMIUM_PLAN_CODE = os.environ.get("PREMIUM_PAYSTACK_PLAN_CODE", "PLN_sr1h7zo9qogclvb")
 USER_ID = "test-user-billing-001"
 USER_EMAIL = "billing@test.com"
+
+
+TEST_SECRET = os.environ.get("PAYSTACK_SECRET_KEY", "")
 
 
 def _sign(body: bytes, secret: str = TEST_SECRET) -> str:
@@ -146,6 +151,45 @@ def _auth(token: str) -> dict:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def test_synthetic_identity_email_is_not_usable():
+    from app.core.identity import email_from_mapping, is_usable_email
+
+    assert not is_usable_email("")
+    assert not is_usable_email("not-an-email")
+    assert not is_usable_email("user@auth.identity")
+    assert not is_usable_email("b0dd30c5-be96-4d77-b011-9955179cfa32@auth.identity")
+    assert is_usable_email("person@gmail.com")
+    assert email_from_mapping({"email": "person@gmail.com"}) == "person@gmail.com"
+    assert email_from_mapping({"user": {"email": "person@gmail.com"}}) == "person@gmail.com"
+    assert email_from_mapping({"email": "x@auth.identity"}) is None
+
+
+@pytest.mark.asyncio
+async def test_create_checkout_rejects_synthetic_email():
+    from fastapi import HTTPException
+
+    from app.billing.service import BillingService
+
+    provider = MagicMock()
+    provider.initialize_subscription_checkout = AsyncMock()
+    service = BillingService(None, provider)  # type: ignore[arg-type]
+    with pytest.raises(HTTPException) as exc_info:
+        await service.create_checkout("premium", USER_ID, "abc@auth.identity")
+    assert exc_info.value.status_code == 400
+    provider.initialize_subscription_checkout.assert_not_called()
+
+
+def test_sanitize_callback_url_allows_billing_return_only():
+    from app.billing.service import BillingService
+
+    assert (
+        BillingService._sanitize_callback_url("http://localhost:3000/settings/billing")
+        == "http://localhost:3000/settings/billing"
+    )
+    assert BillingService._sanitize_callback_url("https://evil.example/phish") is None
+    assert BillingService._sanitize_callback_url("javascript:alert(1)") is None
+
+
 def test_go_plan_amount_is_5999_ngn():
     from app.billing.service import BillingService
 
@@ -171,6 +215,9 @@ def test_plans_endpoint_returns_ngn_not_kobo(client):
     assert plans["go"]["amount"] == 5999
     assert plans["premium"]["amount"] == 9999
     assert plans["go"]["currency"] == "NGN"
+    assert "token_limit_6h" not in plans["go"]
+    assert "token_limit_weekly" not in plans["go"]
+    assert "token_limit_6h" not in plans["premium"]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -295,8 +342,63 @@ def test_checkout_unauthenticated_rejected(client):
     assert resp.status_code == 401
 
 
+@pytest.mark.asyncio
+async def test_cancel_without_subscription_code_backfills_from_customer():
+    from app.billing.models import SubscriptionDB, SubscriptionStatus
+    from app.billing.service import BillingService
+
+    sub = SubscriptionDB(
+        id="sub1",
+        user_id=USER_ID,
+        tier="premium",
+        status=SubscriptionStatus.ACTIVE,
+        interval="monthly",
+        amount=999900,
+        currency="NGN",
+        provider_customer_code="CUS_live",
+        provider_subscription_code="",
+        provider_plan_code=PREMIUM_PLAN_CODE,
+    )
+    repo = MagicMock()
+    repo.get_by_user_id = AsyncMock(return_value=sub)
+    repo.save = AsyncMock(return_value=sub)
+    provider = MagicMock()
+    provider.find_customer_subscription = AsyncMock(
+        return_value={"subscription_code": "SUB_live", "email_token": "etok"}
+    )
+    provider.cancel_subscription = AsyncMock(return_value=True)
+
+    service = BillingService(repo, provider)
+    assert await service.cancel_subscription(USER_ID, USER_EMAIL) is True
+    provider.cancel_subscription.assert_awaited_once_with("SUB_live", "etok")
+
+
+@pytest.mark.asyncio
+async def test_checkout_without_paystack_secret_returns_503():
+    from fastapi import HTTPException
+
+    from app.billing.models import BillingPlan
+    from app.billing.providers.paystack import PaystackProvider
+
+    provider = PaystackProvider()
+    provider.secret_key = ""
+    plan = BillingPlan(
+        id="go_monthly",
+        product="cognito",
+        tier="go",
+        interval="monthly",
+        amount=599900,
+        currency="NGN",
+        provider="paystack",
+        provider_plan_code=GO_PLAN_CODE,
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await provider.initialize_subscription_checkout("a@b.com", plan, USER_ID)
+    assert exc_info.value.status_code == 503
+
+
 def test_checkout_go_calls_paystack(client):
-    """Checkout initializes with Paystack and returns authorization_url."""
+    """Checkout initializes with Paystack and returns checkout_url."""
     token = _signup_login(client, "checkout_go@test.com")
 
     mock_provider = MagicMock()
@@ -308,7 +410,7 @@ def test_checkout_go_calls_paystack(client):
         resp = client.post("/billing/checkout", json={"plan": "go"}, headers=_auth(token))
 
     assert resp.status_code == 200
-    assert resp.json()["authorization_url"] == "https://checkout.paystack.com/abc"
+    assert resp.json()["checkout_url"] == "https://checkout.paystack.com/abc"
     assert resp.json()["reference"] == "ref_abc"
 
 
@@ -484,6 +586,47 @@ def test_charge_success_premium_creates_premium_subscription(client):
     assert sub is not None
     assert sub["tier"] == "premium"
     assert sub["status"] == "active"
+
+
+def test_charge_success_amount_wins_over_mismatched_plan_code(client):
+    """A ₦9,999 charge must be Premium even if Paystack echoes the Go plan code."""
+    uid = f"db-cs-mismatch-{uuid.uuid4().hex}"
+    payload = _charge_success_payload(
+        user_id=uid,
+        plan_id="premium_monthly",
+        plan_code=GO_PLAN_CODE,
+        amount=999900,
+    )
+    resp = _webhook(client, payload)
+    assert resp.status_code == 200
+    sub = _get_sub_by_user(uid)
+    assert sub is not None
+    assert sub["tier"] == "premium"
+    assert sub["amount"] == 999900
+
+
+def test_subscription_create_before_charge_success_keeps_sub_code(client):
+    uid = f"db-race-{uuid.uuid4().hex}"
+    cus = f"CUS_{uuid.uuid4().hex[:8]}"
+    sub_code = f"SUB_{uuid.uuid4().hex[:8]}"
+
+    create = _subscription_create_payload(sub_code=sub_code)
+    create["data"]["customer"] = {"customer_code": cus, "email": USER_EMAIL, "metadata": {}}
+    assert _webhook(client, create).status_code == 200
+
+    charge = _charge_success_payload(
+        user_id=uid,
+        plan_id="premium_monthly",
+        plan_code=PREMIUM_PLAN_CODE,
+        amount=999900,
+    )
+    charge["data"]["customer"]["customer_code"] = cus
+    assert _webhook(client, charge).status_code == 200
+
+    sub = _get_sub_by_user(uid)
+    assert sub is not None
+    assert sub["tier"] == "premium"
+    assert sub["provider_subscription_code"] == sub_code
 
 
 def test_subscription_create_links_sub_code_to_user(client):
@@ -663,3 +806,440 @@ def test_billing_status_reflects_past_due(client):
     resp = client.get("/billing", headers=_auth(token))
     assert resp.status_code == 200
     assert resp.json()["status"] == "past_due"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Upgrade / Downgrade Refinements
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_upgrade_to_premium_cancels_old_go_renewal(client):
+    uid = f"db-upgrade-{uuid.uuid4().hex}"
+    cus = f"CUS_{uuid.uuid4().hex[:8]}"
+    old_sub = f"SUB_oldgo_{uuid.uuid4().hex[:8]}"
+    new_sub = f"SUB_newprem_{uuid.uuid4().hex[:8]}"
+
+    # Setup initial Go subscription
+    create = _subscription_create_payload(user_id=uid, sub_code=old_sub, plan_code=GO_PLAN_CODE)
+    create["data"]["customer"] = {"customer_code": cus, "email": USER_EMAIL, "metadata": {"user_id": uid}}
+    assert _webhook(client, create).status_code == 200
+
+    # User upgrades to Premium
+    charge = _charge_success_payload(
+        user_id=uid,
+        plan_id="premium_monthly",
+        plan_code=PREMIUM_PLAN_CODE,
+        amount=999900,
+    )
+    charge["data"]["customer"]["customer_code"] = cus
+    charge["data"]["subscription_code"] = new_sub
+
+    mock_provider = MagicMock()
+    mock_provider.get_subscription = AsyncMock(return_value={"email_token": "token"})
+    mock_provider.cancel_subscription = AsyncMock(return_value=True)
+
+    with patch("app.billing.providers.paystack.PaystackProvider", return_value=mock_provider):
+        assert _webhook(client, charge).status_code == 200
+
+    # It should have cancelled the OLD subscription!
+    mock_provider.cancel_subscription.assert_called_once_with(old_sub, "token")
+
+    # DB should reflect Premium
+    sub = _get_sub_by_user(uid)
+    assert sub["tier"] == "premium"
+    assert sub["provider_subscription_code"] == new_sub
+
+
+def test_downgrade_to_go_defers_transition(client):
+    uid = f"db-downgrade-{uuid.uuid4().hex}"
+    cus = f"CUS_{uuid.uuid4().hex[:8]}"
+    prem_sub = f"SUB_prem_{uuid.uuid4().hex[:8]}"
+
+    # Setup initial Premium subscription
+    create = _subscription_create_payload(user_id=uid, sub_code=prem_sub, plan_code=PREMIUM_PLAN_CODE)
+    create["data"]["customer"] = {"customer_code": cus, "email": USER_EMAIL, "metadata": {"user_id": uid}}
+    assert _webhook(client, create).status_code == 200
+
+    sub = _get_sub_by_user(uid)
+    assert sub["tier"] == "premium"
+
+    # User schedules downgrade to Go
+    token = _signup_login(client, USER_EMAIL)
+    # mock get_user_by_email to return the right user, or use the token user id
+    # Since _signup_login creates a user, let's use its id.
+    uid = client.get("/auth/me", headers=_auth(token)).json()["id"]
+
+    # recreate premium sub with real user id
+    create = _subscription_create_payload(user_id=uid, sub_code=prem_sub, plan_code=PREMIUM_PLAN_CODE)
+    create["data"]["customer"] = {"customer_code": cus, "email": USER_EMAIL, "metadata": {"user_id": uid}}
+    assert _webhook(client, create).status_code == 200
+
+    mock_provider = MagicMock()
+    mock_provider.get_subscription = AsyncMock(
+        return_value={"email_token": "token", "authorization": {"authorization_code": "auth123"}}
+    )
+    mock_provider.cancel_subscription = AsyncMock(return_value=True)
+    mock_provider.create_subscription = AsyncMock(return_value={"subscription_code": "SUB_futurego"})
+
+    with patch("app.router.billing.PaystackProvider", return_value=mock_provider):
+        resp = client.post("/billing/subscription/downgrade", json={"plan": "go"}, headers=_auth(token))
+        assert resp.status_code == 200
+
+    # It should have cancelled renewal of Premium
+    mock_provider.cancel_subscription.assert_called_once_with(prem_sub, "token")
+    # It should have created a future Go sub
+    mock_provider.create_subscription.assert_called_once()
+
+    # DB should still be Premium, but with scheduled_change
+    sub = _get_sub_by_user(uid)
+    assert sub["tier"] == "premium"
+    assert sub["scheduled_change"]["target_tier"] == "go"
+    assert sub["scheduled_change"]["status"] == "pending"
+    assert sub["scheduled_change"]["provider_subscription_code"] == "SUB_futurego"
+
+
+def test_cancel_downgrade_restores_premium(client):
+    # Setup user
+    token = _signup_login(client, "cancel_dg@test.com")
+    uid = client.get("/auth/me", headers=_auth(token)).json()["id"]
+    cus = f"CUS_{uuid.uuid4().hex[:8]}"
+    prem_sub = f"SUB_prem_{uuid.uuid4().hex[:8]}"
+
+    # Setup Premium
+    create = _subscription_create_payload(user_id=uid, sub_code=prem_sub, plan_code=PREMIUM_PLAN_CODE)
+    create["data"]["customer"] = {"customer_code": cus, "email": "cancel_dg@test.com", "metadata": {"user_id": uid}}
+    _webhook(client, create)
+
+    # Downgrade to Go
+    mock_provider = MagicMock()
+    mock_provider.get_subscription = AsyncMock(
+        return_value={"email_token": "token", "authorization": {"authorization_code": "auth123"}}
+    )
+    mock_provider.cancel_subscription = AsyncMock(return_value=True)
+    mock_provider.create_subscription = AsyncMock(return_value={"subscription_code": "SUB_futurego"})
+
+    with patch("app.router.billing.PaystackProvider", return_value=mock_provider):
+        client.post("/billing/subscription/downgrade", json={"plan": "go"}, headers=_auth(token))
+
+    # Now Cancel the Downgrade
+    mock_provider.enable_subscription = AsyncMock(return_value=True)
+    with patch("app.router.billing.PaystackProvider", return_value=mock_provider):
+        resp = client.post("/billing/subscription/downgrade/cancel", headers=_auth(token))
+        assert resp.status_code == 200
+
+    # DB should be Premium with NO scheduled_change
+    sub = _get_sub_by_user(uid)
+    assert sub["tier"] == "premium"
+    assert sub.get("scheduled_change") is None
+
+    # Future Go should be cancelled, Premium should be re-enabled
+    mock_provider.cancel_subscription.assert_called_with("SUB_futurego", "token")
+    mock_provider.enable_subscription.assert_called_with(prem_sub, "token")
+
+
+def test_downgrade_from_cancelled_succeeds(client):
+    # Setup user
+    token = _signup_login(client, "cancel_then_dg@test.com")
+    uid = client.get("/auth/me", headers=_auth(token)).json()["id"]
+    cus = f"CUS_{uuid.uuid4().hex[:8]}"
+    prem_sub = f"SUB_prem_{uuid.uuid4().hex[:8]}"
+
+    # Setup Premium
+    create = _subscription_create_payload(user_id=uid, sub_code=prem_sub, plan_code=PREMIUM_PLAN_CODE)
+    create["data"]["customer"] = {
+        "customer_code": cus,
+        "email": "cancel_then_dg@test.com",
+        "metadata": {"user_id": uid},
+    }
+    _webhook(client, create)
+
+    # Cancel Premium
+    mock_provider = MagicMock()
+    mock_provider.get_subscription = AsyncMock(
+        return_value={"email_token": "token", "authorization": {"authorization_code": "auth123"}}
+    )
+    mock_provider.cancel_subscription = AsyncMock(return_value=True)
+    with patch("app.router.billing.PaystackProvider", return_value=mock_provider):
+        resp = client.post("/billing/subscription/cancel", headers=_auth(token))
+        assert resp.status_code == 200
+
+    # Ensure it's cancelled
+    sub = _get_sub_by_user(uid)
+    assert sub["status"] == "cancelled"
+    assert sub["cancel_at_period_end"] is True
+
+    # Now downgrade to Go
+    mock_provider.create_subscription = AsyncMock(return_value={"subscription_code": "SUB_futurego"})
+    with patch("app.router.billing.PaystackProvider", return_value=mock_provider):
+        resp = client.post("/billing/subscription/downgrade", json={"plan": "go"}, headers=_auth(token))
+        assert resp.status_code == 200
+
+    # DB should preserve cancelled status, but record scheduled_change
+    sub = _get_sub_by_user(uid)
+    assert sub["status"] == "cancelled"
+    assert sub["cancel_at_period_end"] is True
+    assert sub["tier"] == "premium"
+    assert sub["scheduled_change"]["target_tier"] == "go"
+    assert sub["scheduled_change"]["status"] == "pending"
+
+    # Now cancel the downgrade schedule
+    mock_provider.enable_subscription = AsyncMock()
+    with patch("app.router.billing.PaystackProvider", return_value=mock_provider):
+        resp = client.post("/billing/subscription/downgrade/cancel", headers=_auth(token))
+        assert resp.status_code == 200
+
+    # DB should still be cancelled (not active!), and scheduled_change is gone
+    sub = _get_sub_by_user(uid)
+    assert sub["status"] == "cancelled"
+    assert sub["cancel_at_period_end"] is True
+    assert sub.get("scheduled_change") is None
+
+    # Should NOT have called enable_subscription on Paystack!
+    mock_provider.enable_subscription.assert_not_called()
+
+
+def test_downgrade_to_same_plan_rejected(client):
+    # Setup user
+    token = _signup_login(client, "same_dg@test.com")
+    uid = client.get("/auth/me", headers=_auth(token)).json()["id"]
+    cus = f"CUS_{uuid.uuid4().hex[:8]}"
+    go_sub = f"SUB_go_{uuid.uuid4().hex[:8]}"
+
+    # Setup Go
+    create = _subscription_create_payload(user_id=uid, sub_code=go_sub, plan_code=GO_PLAN_CODE)
+    create["data"]["customer"] = {"customer_code": cus, "email": "same_dg@test.com", "metadata": {"user_id": uid}}
+    _webhook(client, create)
+
+    # Downgrade to Go
+    mock_provider = MagicMock()
+    mock_provider.get_subscription = AsyncMock(
+        return_value={"email_token": "token", "authorization": {"authorization_code": "auth123"}}
+    )
+    mock_provider.cancel_subscription = AsyncMock(return_value=True)
+
+    with patch("app.router.billing.PaystackProvider", return_value=mock_provider):
+        resp = client.post("/billing/subscription/downgrade", json={"plan": "go"}, headers=_auth(token))
+        assert resp.status_code == 400
+        assert "Already on this plan" in resp.json()["detail"]
+
+
+def test_verify_transaction_activates_subscription(client):
+    email = f"verify-{uuid.uuid4().hex}@test.com"
+    token = _signup_login(client, email)
+    uid = _real_user_id(client, token)
+    cus = f"CUS_{uuid.uuid4().hex[:8]}"
+    ref = f"T_{uuid.uuid4().hex[:12]}"
+    sub_code = f"SUB_{uuid.uuid4().hex[:8]}"
+
+    tx_data = {
+        "status": "success",
+        "reference": ref,
+        "amount": 599900,
+        "currency": "NGN",
+        "paid_at": "2026-09-20T18:00:00.000Z",
+        "plan": GO_PLAN_CODE,
+        "metadata": {"user_id": uid, "plan_id": "go_monthly"},
+        "customer": {"customer_code": cus, "email": email},
+    }
+
+    mock_provider = MagicMock()
+    mock_provider.verify_transaction = AsyncMock(return_value=tx_data)
+    mock_provider.find_customer_subscription = AsyncMock(return_value={"subscription_code": sub_code})
+
+    with patch("app.router.billing.PaystackProvider", return_value=mock_provider):
+        resp = client.get(f"/billing/verify?reference={ref}", headers=_auth(token))
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["tier"] == "go"
+        assert data["status"] == "active"
+        assert data["amount"] == 5999
+
+    # Verify database
+    sub = _get_sub_by_user(uid)
+    assert sub is not None
+    assert sub["tier"] == "go"
+    assert sub["status"] == "active"
+    assert sub["provider_subscription_code"] == sub_code
+
+
+def test_downgrade_idempotency_returns_existing_pending(client):
+    """Calling downgrade multiple times for the same plan returns the existing pending change without duplicate sub creation."""
+    token = _signup_login(client, "idempotent_dg@test.com")
+    uid = client.get("/auth/me", headers=_auth(token)).json()["id"]
+    cus = f"CUS_{uuid.uuid4().hex[:8]}"
+    prem_sub = f"SUB_prem_{uuid.uuid4().hex[:8]}"
+
+    create = _subscription_create_payload(user_id=uid, sub_code=prem_sub, plan_code=PREMIUM_PLAN_CODE)
+    create["data"]["customer"] = {"customer_code": cus, "email": "idempotent_dg@test.com", "metadata": {"user_id": uid}}
+    _webhook(client, create)
+
+    mock_provider = MagicMock()
+    mock_provider.get_subscription = AsyncMock(
+        return_value={"email_token": "token", "authorization": {"authorization_code": "auth123"}}
+    )
+    mock_provider.cancel_subscription = AsyncMock(return_value=True)
+    mock_provider.create_subscription = AsyncMock(return_value={"subscription_code": "SUB_futurego_once"})
+
+    with patch("app.router.billing.PaystackProvider", return_value=mock_provider):
+        resp1 = client.post("/billing/subscription/downgrade", json={"plan": "go"}, headers=_auth(token))
+        assert resp1.status_code == 200
+        assert resp1.json()["scheduled_plan"] == "go"
+
+        # Second call to downgrade to Go
+        resp2 = client.post("/billing/subscription/downgrade", json={"plan": "go"}, headers=_auth(token))
+        assert resp2.status_code == 200
+        assert resp2.json()["scheduled_plan"] == "go"
+
+    # create_subscription must only be called ONCE
+    mock_provider.create_subscription.assert_called_once()
+
+
+def test_cancel_subscription_cancels_pending_future_downgrade(client):
+    """When a user fully cancels while a downgrade is scheduled, the future sub on Paystack must also be cancelled."""
+    token = _signup_login(client, "cancel_with_dg@test.com")
+    uid = client.get("/auth/me", headers=_auth(token)).json()["id"]
+    cus = f"CUS_{uuid.uuid4().hex[:8]}"
+    prem_sub = f"SUB_prem_{uuid.uuid4().hex[:8]}"
+
+    create = _subscription_create_payload(user_id=uid, sub_code=prem_sub, plan_code=PREMIUM_PLAN_CODE)
+    create["data"]["customer"] = {
+        "customer_code": cus,
+        "email": "cancel_with_dg@test.com",
+        "metadata": {"user_id": uid},
+    }
+    _webhook(client, create)
+
+    mock_provider = MagicMock()
+    mock_provider.get_subscription = AsyncMock(
+        return_value={"email_token": "token", "authorization": {"authorization_code": "auth123"}}
+    )
+    mock_provider.cancel_subscription = AsyncMock(return_value=True)
+    mock_provider.create_subscription = AsyncMock(return_value={"subscription_code": "SUB_future_cancel"})
+
+    with patch("app.router.billing.PaystackProvider", return_value=mock_provider):
+        client.post("/billing/subscription/downgrade", json={"plan": "go"}, headers=_auth(token))
+
+        # Now full cancel
+        resp = client.post("/billing/subscription/cancel", headers=_auth(token))
+        assert resp.status_code == 200
+
+    # Both current and future subs must have cancel_subscription called
+    mock_provider.cancel_subscription.assert_any_call(prem_sub, "token")
+    mock_provider.cancel_subscription.assert_any_call("SUB_future_cancel", "token")
+
+    sub = _get_sub_by_user(uid)
+    assert sub["status"] == "cancelled"
+    assert sub["cancel_at_period_end"] is True
+    assert sub.get("scheduled_change") is None
+
+
+def test_schedule_downgrade_formats_iso_without_microseconds(client):
+    """start_date passed to Paystack create_subscription must NOT contain microseconds (Paystack requirement)."""
+    token = _signup_login(client, "iso_format@test.com")
+    uid = client.get("/auth/me", headers=_auth(token)).json()["id"]
+    cus = f"CUS_{uuid.uuid4().hex[:8]}"
+    prem_sub = f"SUB_prem_{uuid.uuid4().hex[:8]}"
+
+    create = _subscription_create_payload(user_id=uid, sub_code=prem_sub, plan_code=PREMIUM_PLAN_CODE)
+    create["data"]["customer"] = {"customer_code": cus, "email": "iso_format@test.com", "metadata": {"user_id": uid}}
+    _webhook(client, create)
+
+    mock_provider = MagicMock()
+    mock_provider.get_subscription = AsyncMock(
+        return_value={"email_token": "token", "authorization": {"authorization_code": "auth123"}}
+    )
+    mock_provider.cancel_subscription = AsyncMock(return_value=True)
+    mock_provider.create_subscription = AsyncMock(return_value={"subscription_code": "SUB_futurego"})
+
+    with patch("app.router.billing.PaystackProvider", return_value=mock_provider):
+        resp = client.post("/billing/subscription/downgrade", json={"plan": "go"}, headers=_auth(token))
+        assert resp.status_code == 200
+
+    call_kwargs = mock_provider.create_subscription.call_args.kwargs
+    start_date = call_kwargs.get("start_date")
+    assert start_date is not None
+    # Must end with Z (UTC) and have NO microseconds dot
+    assert start_date.endswith("Z")
+    assert "." not in start_date
+
+
+def test_cancel_downgrade_resilient_to_paystack_enable_error(client):
+    """If Paystack throws on enable_subscription (e.g. 400 Bad Request already enabled), cancel downgrade must still succeed."""
+    token = _signup_login(client, "resilient_cancel@test.com")
+    uid = client.get("/auth/me", headers=_auth(token)).json()["id"]
+    cus = f"CUS_{uuid.uuid4().hex[:8]}"
+    prem_sub = f"SUB_prem_{uuid.uuid4().hex[:8]}"
+
+    create = _subscription_create_payload(user_id=uid, sub_code=prem_sub, plan_code=PREMIUM_PLAN_CODE)
+    create["data"]["customer"] = {
+        "customer_code": cus,
+        "email": "resilient_cancel@test.com",
+        "metadata": {"user_id": uid},
+    }
+    _webhook(client, create)
+
+    mock_provider = MagicMock()
+    mock_provider.get_subscription = AsyncMock(
+        return_value={"email_token": "token", "authorization": {"authorization_code": "auth123"}}
+    )
+    mock_provider.cancel_subscription = AsyncMock(return_value=True)
+    mock_provider.create_subscription = AsyncMock(return_value={"subscription_code": "SUB_futurego"})
+
+    with patch("app.router.billing.PaystackProvider", return_value=mock_provider):
+        client.post("/billing/subscription/downgrade", json={"plan": "go"}, headers=_auth(token))
+
+    # Now cancel downgrade, but mock enable_subscription raising an exception
+    mock_provider.enable_subscription = AsyncMock(side_effect=Exception("400 Bad Request already enabled"))
+    with patch("app.router.billing.PaystackProvider", return_value=mock_provider):
+        resp = client.post("/billing/subscription/downgrade/cancel", headers=_auth(token))
+        assert resp.status_code == 200
+
+    sub = _get_sub_by_user(uid)
+    assert sub["tier"] == "premium"
+    assert sub.get("scheduled_change") is None
+
+
+def test_verify_transaction_rejects_wrong_user(client):
+    """A user cannot verify another user's transaction reference."""
+    token1 = _signup_login(client, "user1_verify@test.com")
+    token2 = _signup_login(client, "user2_verify@test.com")
+    uid1 = _real_user_id(client, token1)
+
+    ref = f"T_{uuid.uuid4().hex[:12]}"
+    tx_data = {
+        "status": "success",
+        "reference": ref,
+        "amount": 599900,
+        "currency": "NGN",
+        "metadata": {"user_id": uid1, "plan_id": "go_monthly"},
+        "customer": {"customer_code": "CUS_xyz", "email": "user1_verify@test.com"},
+    }
+
+    mock_provider = MagicMock()
+    mock_provider.verify_transaction = AsyncMock(return_value=tx_data)
+
+    with patch("app.router.billing.PaystackProvider", return_value=mock_provider):
+        # User 2 tries to verify user 1's transaction
+        resp = client.get(f"/billing/verify?reference={ref}", headers=_auth(token2))
+        assert resp.status_code == 403
+
+
+def test_verify_transaction_failed_status_rejected(client):
+    """Unsuccessful transactions return 400."""
+    token = _signup_login(client, "fail_tx@test.com")
+    uid = _real_user_id(client, token)
+    ref = f"T_{uuid.uuid4().hex[:12]}"
+
+    tx_data = {
+        "status": "failed",
+        "reference": ref,
+        "amount": 599900,
+        "metadata": {"user_id": uid, "plan_id": "go_monthly"},
+    }
+
+    mock_provider = MagicMock()
+    mock_provider.verify_transaction = AsyncMock(return_value=tx_data)
+
+    with patch("app.router.billing.PaystackProvider", return_value=mock_provider):
+        resp = client.get(f"/billing/verify?reference={ref}", headers=_auth(token))
+        assert resp.status_code == 400
