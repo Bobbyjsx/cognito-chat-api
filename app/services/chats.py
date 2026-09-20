@@ -49,7 +49,7 @@ from app.services.quota import resolve_user_limits
 from app.tools.executor import ToolExecutor
 from app.tools.registry import ToolRegistry
 from app.utils.datetime import ensure_utc
-from app.utils.prompts import get_base_system_instructions
+from app.utils.prompts import get_user_system_instructions
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,7 @@ class AgentService:
         self.user_repo = user_repo
         self.config_repo = config_repo
         self.attachment_service = attachment_service
-        self.db = getattr(chat_repo, "db", None)
+        self.db = getattr(chat_repo, "db", None) or getattr(user_repo, "db", None)
 
         if generation_repo is None and self.db is not None:
             from app.repositories.generations import GenerationRepository
@@ -305,7 +305,14 @@ class AgentService:
 
         return model, reasoning, thinking_budget, tool_configs, fallbacks
 
-    # ── quota ─────────────────────────────────────────────────────────────────
+    async def _get_subscription_tier(self, user_id: str) -> str:
+        """Look up the user's active subscription tier. Fail-closed to 'free'."""
+        from app.billing.entitlements import lookup_active_tier
+
+        db = getattr(self.user_repo, "db", None) or self.db
+        if not db:
+            return "free"
+        return await lookup_active_tier(db, str(user_id))
 
     async def _quota_precheck(self, user: UserDB, config: AppConfigDB) -> None:
         now = datetime.now(timezone.utc)
@@ -318,7 +325,8 @@ class AgentService:
         effective_6h = 0 if is_6h_expired else user.tokens_used_6h
         effective_weekly = 0 if is_weekly_expired else user.tokens_used_weekly
 
-        limit_6h, limit_weekly = resolve_user_limits(user, config)
+        subscription_tier = await self._get_subscription_tier(user.id)
+        limit_6h, limit_weekly = resolve_user_limits(user, config, subscription_tier)
 
         if effective_6h >= limit_6h:
             reset_str = reset_at.isoformat() if reset_at else ""
@@ -330,11 +338,15 @@ class AgentService:
     async def _charge_usage(self, user: UserDB, tokens: int, config: AppConfigDB) -> bool:
         if tokens <= 0:
             return True
+
+        subscription_tier = await self._get_subscription_tier(user.id)
+        limit_6h, limit_weekly = resolve_user_limits(user, config, subscription_tier)
+
         success = await self.user_repo.atomic_increment_if_within_limit(
             user.id,
             tokens,
-            default_limit_6h=config.default_token_limit_6h,
-            default_limit_weekly=config.default_token_limit_weekly,
+            default_limit_6h=limit_6h,
+            default_limit_weekly=limit_weekly,
         )
         from app.core.cache_keys import CacheKeys
         from app.core.redis import redis_cache
@@ -688,9 +700,19 @@ class AgentService:
             for meta in await self.attachment_service.resolve_many(user.id, parsed):
                 attachment_map[str(meta.id)] = meta
 
+        subscription_tier = await self._get_subscription_tier(user.id)
+        is_premium = subscription_tier == "premium"
+        from app.utils.prompts import expand_message_for_llm, get_clean_message_text
+
         contents: list[ContentPart] = []
         for msg in history:
-            parts: list[dict] = [{"text": msg.content}]
+            if msg.role == "user":
+                text_content = (
+                    expand_message_for_llm(msg.content) if is_premium else get_clean_message_text(msg.content)
+                )
+            else:
+                text_content = msg.content
+            parts: list[dict] = [{"text": text_content}]
             for a_id in msg.attachment_ids or []:
                 meta = attachment_map.get(str(a_id))
                 if meta is None:
@@ -815,10 +837,17 @@ class AgentService:
             parts=user_parts,
         )
 
-        current_parts = await self._prepare_current_parts(message_text, attachments)
+        subscription_tier = await self._get_subscription_tier(user.id)
+        is_premium = subscription_tier == "premium"
+
+        from app.utils.prompts import expand_message_for_llm, get_clean_message_text
+
+        llm_text = expand_message_for_llm(message_text) if is_premium else get_clean_message_text(message_text)
+        current_parts = await self._prepare_current_parts(llm_text, attachments)
         contents = await self._build_contents(user, session, active_config, current_parts)
+        effective_custom_instructions = getattr(user, "custom_instructions", None) if is_premium else None
         generation_config = GenerationConfig(
-            system_instruction=get_base_system_instructions(),
+            system_instruction=get_user_system_instructions(effective_custom_instructions),
             thinking_budget=thinking_budget,
             include_thoughts=True,
             tool_configs=tool_configs,
@@ -968,9 +997,12 @@ class AgentService:
             from app.models.chats import MessageRole
 
             async def _shielded_prep():
+                from app.utils.prompts import get_clean_message_text
+
+                clean_title_text = get_clean_message_text(message_text)
                 _active_config, _session_res = await asyncio.gather(
                     self.get_active_config(),
-                    self._resolve_session(user, session_id, message_text, model=requested_model),
+                    self._resolve_session(user, session_id, clean_title_text, model=requested_model),
                 )
                 if len(_session_res) == 4:
                     _session, _session_id, _title, _needs_ai_worker = _session_res
@@ -980,7 +1012,7 @@ class AgentService:
 
                 if _needs_ai_worker and getattr(_active_config, "enable_ai_title_generation", True):
                     _enqueue_task = asyncio.create_task(
-                        self.enqueue_title_generation(_session_id, user.id, message_text, model=requested_model)
+                        self.enqueue_title_generation(_session_id, user.id, clean_title_text, model=requested_model)
                     )
                     _fire_and_forget_tasks.add(_enqueue_task)
                     _enqueue_task.add_done_callback(_fire_and_forget_tasks.discard)
@@ -1116,10 +1148,17 @@ class AgentService:
             if title:
                 yield f"event: chunk\ndata: {json.dumps({'type': 'title', 'title': title, 'session_id': str(session_id)})}\n\n"
 
-            current_parts = await self._prepare_current_parts(message_text, attachments)
+            subscription_tier = await self._get_subscription_tier(user.id)
+            is_premium = subscription_tier == "premium"
+
+            from app.utils.prompts import expand_message_for_llm, get_clean_message_text
+
+            llm_text = expand_message_for_llm(message_text) if is_premium else get_clean_message_text(message_text)
+            current_parts = await self._prepare_current_parts(llm_text, attachments)
             contents = await self._build_contents(user, session, active_config, current_parts)
+            effective_custom_instructions = getattr(user, "custom_instructions", None) if is_premium else None
             generation_config = GenerationConfig(
-                system_instruction=get_base_system_instructions(),
+                system_instruction=get_user_system_instructions(effective_custom_instructions),
                 thinking_budget=thinking_budget,
                 include_thoughts=True,
                 tool_configs=tool_configs,
