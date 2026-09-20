@@ -23,6 +23,21 @@ class BillingPlan(BaseModel):
     provider_plan_code: str
 
 
+class ScheduledChangeStatus(str, Enum):
+    PENDING = "pending"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class ScheduledChange(BaseModel):
+    target_tier: str
+    effective_at: datetime
+    status: ScheduledChangeStatus
+    provider_subscription_code: str | None = None
+    was_already_cancelled: bool = False
+
+
 class SubscriptionDB(BaseModel):
     id: str
     user_id: str
@@ -41,6 +56,8 @@ class SubscriptionDB(BaseModel):
     current_period_start: datetime | None = None
     current_period_end: datetime | None = None
     cancel_at_period_end: bool = False
+
+    scheduled_change: ScheduledChange | None = None
 
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -28,3 +28,27 @@ def has_minimum_tier(subscription: SubscriptionDB | None, required_tier: str) ->
     required_level = PLAN_HIERARCHY.get(required_tier, 0)
     user_level = get_entitlement_level(subscription)
     return user_level >= required_level
+
+
+def get_active_tier(subscription: SubscriptionDB | None) -> str:
+    """Return the string tier name the user currently has entitlement to.
+
+    Returns 'free' for None, cancelled-past-period, past_due, or expired subscriptions.
+    """
+    level = get_entitlement_level(subscription)
+    # Find the highest tier matching this exact level
+    for tier, lvl in sorted(PLAN_HIERARCHY.items(), key=lambda x: -x[1]):
+        if lvl == level:
+            return tier
+    return "free"
+
+
+async def lookup_active_tier(db, user_id: str) -> str:
+    """Load the user's subscription and return the entitled tier. Fail-closed to free."""
+    try:
+        from app.billing.repository import SubscriptionRepository
+
+        sub = await SubscriptionRepository(db).get_by_user_id(str(user_id))
+        return get_active_tier(sub)
+    except Exception:
+        return "free"

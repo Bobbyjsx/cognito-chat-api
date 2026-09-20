@@ -41,17 +41,86 @@ logger = logging.getLogger(__name__)
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-PLAN_CODE_TO_TIER: dict[str, str] = {}  # populated lazily at first request
-
 
 def _plan_code_map() -> dict[str, str]:
     """Resolve Paystack plan codes → internal tier names from config (no DB hit)."""
-    if not PLAN_CODE_TO_TIER:
-        if settings.go_paystack_plan_code:
-            PLAN_CODE_TO_TIER[settings.go_paystack_plan_code] = "go"
-        if settings.premium_paystack_plan_code:
-            PLAN_CODE_TO_TIER[settings.premium_paystack_plan_code] = "premium"
-    return PLAN_CODE_TO_TIER
+    mapping: dict[str, str] = {}
+    if settings.go_paystack_plan_code:
+        mapping[settings.go_paystack_plan_code.strip()] = "go"
+    if settings.premium_paystack_plan_code:
+        mapping[settings.premium_paystack_plan_code.strip()] = "premium"
+    return mapping
+
+
+def _catalog_plans():
+    from app.billing.service import BillingService
+
+    return BillingService(repository=None, provider=None)._get_plans()  # type: ignore[arg-type]
+
+
+def _extract_plan_code(data: dict) -> str:
+    plan = data.get("plan")
+    if isinstance(plan, dict):
+        return str(plan.get("plan_code") or plan.get("code") or "").strip()
+    if isinstance(plan, str):
+        return plan.strip()
+    return ""
+
+
+def _extract_metadata(data: dict) -> dict:
+    meta: dict = {}
+    raw = data.get("metadata")
+    if isinstance(raw, dict):
+        meta.update(raw)
+    customer = data.get("customer") or {}
+    if isinstance(customer, dict):
+        customer_meta = customer.get("metadata")
+        if isinstance(customer_meta, dict):
+            meta.update(customer_meta)
+    return meta
+
+
+def _resolve_tier(data: dict, metadata: dict | None = None) -> tuple[str | None, str]:
+    """Resolve (tier, plan_code). Prefer amount paid, then our checkout metadata, then Paystack plan code."""
+    metadata = metadata if metadata is not None else _extract_metadata(data)
+    plan_code = _extract_plan_code(data)
+    plans = _catalog_plans()
+
+    amount = data.get("amount")
+    if isinstance(amount, int):
+        by_amount = next((p for p in plans.values() if p.amount == amount), None)
+        if by_amount:
+            return by_amount.tier, plan_code or by_amount.provider_plan_code
+
+    plan_id = metadata.get("plan_id")
+    if plan_id:
+        matched = next((p for p in plans.values() if p.id == plan_id), None)
+        if matched:
+            return matched.tier, plan_code or matched.provider_plan_code
+
+    mapped = _plan_code_map().get(plan_code)
+    if mapped:
+        return mapped, plan_code
+    return None, plan_code
+
+
+async def _find_existing_sub(
+    repo: SubscriptionRepository,
+    user_id: str | None = None,
+    customer_code: str | None = None,
+    sub_code: str | None = None,
+):
+    if sub_code:
+        found = await repo.get_by_provider_subscription_code(sub_code)
+        if found:
+            return found
+    if user_id:
+        found = await repo.get_by_user_id(user_id)
+        if found:
+            return found
+    if customer_code:
+        return await repo.get_by_provider_customer_code(customer_code)
+    return None
 
 
 def _verify_signature(body: bytes, signature: str) -> bool:
@@ -165,47 +234,36 @@ async def paystack_webhook(request: Request, db: AsyncClient = Depends(get_db)):
 async def _handle_charge_success(data: dict, repo: SubscriptionRepository) -> None:
     """First payment succeeded.
 
-    Paystack sends this before subscription.create.  We create/update the
-    subscription in ACTIVE state and populate what we already know.  The
-    subscription_code arrives later via subscription.create.
+    Paystack may send this before or after subscription.create.  We upsert
+    ACTIVE state from the amount actually paid, not a mismatched plan_code.
     """
-    metadata = data.get("metadata") or {}
+    metadata = _extract_metadata(data)
     user_id: str | None = metadata.get("user_id")
-    plan_id: str | None = metadata.get("plan_id")
+    customer = data.get("customer") or {}
+    customer_code = customer.get("customer_code") or ""
+    incoming_sub_code = data.get("subscription_code") or (data.get("subscription") or {}).get("subscription_code") or ""
 
     if not user_id:
         logger.warning("charge.success: no user_id in metadata – cannot map subscription")
         return
 
-    # Resolve plan from the plan_id stored in metadata (set by us at checkout)
-    plan_code: str = data.get("plan", {}).get("plan_code") or ""
-    tier = _plan_code_map().get(plan_code)
-
-    # Fallback: resolve via plan_id from metadata
-    if not tier and plan_id:
-        from app.billing.service import BillingService
-
-        svc = BillingService(repository=repo, provider=None)  # type: ignore[arg-type]
-        plans = svc._get_plans()
-        matched = next((p for p in plans.values() if p.id == plan_id), None)
-        if matched:
-            plan_code = plan_code or matched.provider_plan_code
-            tier = matched.tier
-
+    tier, plan_code = _resolve_tier(data, metadata)
     if not tier:
         logger.error(
-            "charge.success: cannot resolve tier for user=%s plan_id=%s plan_code=%s", user_id, plan_id, plan_code
+            "charge.success: cannot resolve tier for user=%s plan_id=%s plan_code=%s amount=%s",
+            user_id,
+            metadata.get("plan_id"),
+            plan_code,
+            data.get("amount"),
         )
         return
 
-    customer = data.get("customer") or {}
     from datetime import datetime
 
     from dateutil.relativedelta import relativedelta
 
     now = datetime.now(timezone.utc)
     period_start = now
-    # paid_at from the charge is more accurate if present
     paid_at_str = data.get("paid_at") or data.get("created_at")
     if paid_at_str:
         parsed = _parse_dt(paid_at_str)
@@ -214,7 +272,31 @@ async def _handle_charge_success(data: dict, repo: SubscriptionRepository) -> No
 
     period_end = period_start + relativedelta(months=1)
 
-    sub = await repo.get_by_user_id(user_id)
+    sub = await _find_existing_sub(repo, user_id=user_id, customer_code=customer_code, sub_code=incoming_sub_code)
+
+    # Handle stopping the old subscription during an upgrade/plan change
+    if sub is not None:
+        old_sub_code = sub.provider_subscription_code
+        if old_sub_code and (not incoming_sub_code or old_sub_code != incoming_sub_code) and sub.tier != tier:
+            logger.info(
+                "charge.success: plan change detected (%s -> %s). Stopping renewal of old sub %s",
+                sub.tier,
+                tier,
+                old_sub_code,
+            )
+            try:
+                from app.billing.providers.paystack import PaystackProvider
+
+                provider = PaystackProvider()
+                old_paystack_sub = await provider.get_subscription(old_sub_code)
+                if old_paystack_sub:
+                    email_token = old_paystack_sub.get("email_token")
+                    if email_token:
+                        await provider.cancel_subscription(old_sub_code, email_token)
+                        logger.info("Successfully disabled old subscription %s on Paystack", old_sub_code)
+            except Exception as e:
+                logger.error("Failed to cancel old subscription %s during upgrade: %s", old_sub_code, e)
+
     if sub is None:
         sub = SubscriptionDB(
             id="",
@@ -226,23 +308,34 @@ async def _handle_charge_success(data: dict, repo: SubscriptionRepository) -> No
             amount=data.get("amount") or 0,
             currency=data.get("currency") or "NGN",
             provider="paystack",
-            provider_customer_code=customer.get("customer_code") or "",
-            provider_subscription_code="",  # filled in by subscription.create
+            provider_customer_code=customer_code,
+            provider_subscription_code=incoming_sub_code,
             provider_plan_code=plan_code,
             current_period_start=period_start,
             current_period_end=period_end,
             cancel_at_period_end=False,
         )
     else:
-        # Reactivate / upgrade
+        sub.user_id = user_id or sub.user_id
         sub.status = SubscriptionStatus.ACTIVE
         sub.tier = tier
         sub.provider_plan_code = plan_code or sub.provider_plan_code
-        sub.provider_customer_code = customer.get("customer_code") or sub.provider_customer_code
+        sub.provider_customer_code = customer_code or sub.provider_customer_code
+        if incoming_sub_code:
+            sub.provider_subscription_code = incoming_sub_code
         sub.current_period_start = period_start
         sub.current_period_end = period_end
         sub.cancel_at_period_end = False
         sub.amount = data.get("amount") or sub.amount
+
+        # If this charge matches a pending scheduled change, clear it.
+        if sub.scheduled_change and sub.scheduled_change.status == "pending":
+            if sub.scheduled_change.target_tier == tier:
+                logger.info("charge.success: completed scheduled change to %s", tier)
+                sub.scheduled_change.status = "completed"
+            elif tier:
+                # If they somehow got charged for a different tier, also complete/clear it
+                sub.scheduled_change.status = "cancelled"
 
     await repo.save(sub)
     logger.info("charge.success: subscription ACTIVE for user=%s tier=%s", user_id, tier)
@@ -250,43 +343,86 @@ async def _handle_charge_success(data: dict, repo: SubscriptionRepository) -> No
 
 async def _handle_subscription_create(data: dict, repo: SubscriptionRepository) -> None:
     """Paystack subscription object created.  Attach the subscription_code and
-    accurate next payment date to the subscription record."""
+    accurate next payment date.  May arrive before charge.success."""
     customer = data.get("customer") or {}
-    # Paystack places our metadata on the customer object
-    metadata = customer.get("metadata") or {}
+    metadata = _extract_metadata(data)
     user_id: str | None = metadata.get("user_id")
-
-    # Also check top-level metadata (varies by Paystack version)
-    if not user_id:
-        metadata = data.get("metadata") or {}
-        user_id = metadata.get("user_id")
-
+    customer_code = customer.get("customer_code") or ""
     sub_code: str | None = data.get("subscription_code")
 
     if not sub_code:
         logger.warning("subscription.create: no subscription_code in payload")
         return
 
-    # Try to find by user_id first
-    sub = None
-    if user_id:
-        sub = await repo.get_by_user_id(user_id)
-
-    # Fallback: the customer_code may already be in Firestore from charge.success
-    if sub is None and customer.get("customer_code"):
-        sub = await repo.get_by_provider_customer_code(customer["customer_code"])
+    sub = await _find_existing_sub(repo, user_id=user_id, customer_code=customer_code, sub_code=sub_code)
+    tier, plan_code = _resolve_tier(data, metadata)
 
     if sub is None:
-        logger.warning("subscription.create: cannot find subscription for user=%s", user_id)
-        return
+        if not user_id and not customer_code:
+            logger.warning("subscription.create: cannot find subscription for user=%s", user_id)
+            return
+        from datetime import datetime
 
-    sub.provider_subscription_code = sub_code
-    next_payment = _parse_dt(data.get("next_payment_date"))
-    if next_payment:
-        sub.current_period_end = next_payment
-    # Ensure active
-    sub.status = SubscriptionStatus.ACTIVE
-    sub.cancel_at_period_end = False
+        from dateutil.relativedelta import relativedelta
+
+        now = datetime.now(timezone.utc)
+        sub = SubscriptionDB(
+            id="",
+            user_id=user_id or "",
+            product="cognito",
+            tier=tier or "go",
+            status=SubscriptionStatus.ACTIVE,
+            interval="monthly",
+            amount=data.get("amount") or 0,
+            currency=data.get("currency") or "NGN",
+            provider="paystack",
+            provider_customer_code=customer_code,
+            provider_subscription_code=sub_code,
+            provider_plan_code=plan_code,
+            current_period_start=now,
+            current_period_end=now + relativedelta(months=1),
+            cancel_at_period_end=False,
+        )
+    else:
+        if user_id:
+            sub.user_id = user_id
+
+        # If this is a future-dated subscription (e.g., from a scheduled downgrade)
+        # we do not want to immediately overwrite the current active tier.
+        import datetime as dt
+
+        now = dt.datetime.now(timezone.utc)
+
+        start_ts = data.get("start")
+        is_future = False
+        if isinstance(start_ts, (int, float)):
+            start_dt = dt.datetime.fromtimestamp(start_ts, tz=timezone.utc)
+            if start_dt > now:
+                is_future = True
+
+        is_scheduled = sub.scheduled_change and sub.scheduled_change.status == "pending"
+
+        if is_future or is_scheduled:
+            logger.info(
+                "subscription.create: detected future/scheduled subscription %s. Preserving current tier %s",
+                sub_code,
+                sub.tier,
+            )
+            if sub.scheduled_change:
+                sub.scheduled_change.provider_subscription_code = sub_code
+        else:
+            sub.provider_subscription_code = sub_code
+            sub.provider_customer_code = customer_code or sub.provider_customer_code
+            if tier:
+                sub.tier = tier
+            if plan_code:
+                sub.provider_plan_code = plan_code
+
+            next_payment = _parse_dt(data.get("next_payment_date"))
+            if next_payment:
+                sub.current_period_end = next_payment
+            sub.status = SubscriptionStatus.ACTIVE
+            sub.cancel_at_period_end = False
 
     await repo.save(sub)
     logger.info("subscription.create: linked sub_code=%s for user=%s", sub_code, sub.user_id)

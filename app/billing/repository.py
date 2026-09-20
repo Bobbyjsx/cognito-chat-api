@@ -66,6 +66,16 @@ class SubscriptionRepository:
 
         doc_ref = self.collection.document(subscription.id)
         await doc_ref.set(data)
+
+        try:
+            from app.core.cache_keys import CacheKeys
+            from app.core.redis import redis_cache
+
+            await redis_cache.delete(CacheKeys.user_profile(subscription.user_id))
+            await redis_cache.delete(CacheKeys.user_auth(subscription.user_id))
+        except Exception:  # noqa: S110
+            pass
+
         return subscription
 
     async def mark_event_processed(self, event_id: str) -> bool:
