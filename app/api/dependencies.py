@@ -77,13 +77,9 @@ def get_attachment_url_service(
 
 
 def _email_from_payload(payload: dict, user_id: str) -> str:
-    email = payload.get("email")
-    if email:
-        return email
-    import re
+    from app.core.identity import email_from_jwt_payload
 
-    safe_local_part = re.sub(r"[^a-zA-Z0-9._-]", "_", str(user_id))
-    return f"{safe_local_part}@auth.identity"
+    return email_from_jwt_payload(payload, user_id)
 
 
 def _user_from_payload(payload: dict) -> UserDB:
@@ -186,11 +182,13 @@ async def get_current_user(
 
 
 async def get_persisted_user(
+    request: Request,
     current_user: UserDB = Depends(get_current_user),
     db: AsyncClient = Depends(get_db),
 ) -> UserDB:
     """Load the Firestore user document (Redis-backed) and JIT-provision if missing."""
     from app.core.cache_keys import CacheKeys
+    from app.core.identity import fetch_identity_email, is_usable_email
     from app.core.redis import redis_cache
 
     user_id = str(current_user.id)
@@ -206,16 +204,31 @@ async def get_persisted_user(
             weekly_reset_at = ensure_utc(cached_user.weekly_reset_at)
             if (reset_at and reset_at <= now) or (weekly_reset_at and weekly_reset_at <= now):
                 await redis_cache.delete(CacheKeys.user_auth(user_id))
-            else:
+            elif is_usable_email(cached_user.email):
                 return cached_user
+            else:
+                await redis_cache.delete(CacheKeys.user_auth(user_id))
     except Exception as exc:
         logger.debug("Redis user cache check failed: %s", exc)
 
-    user = await UserRepository(db).get_by_id(user_id)
+    repo = UserRepository(db)
+    user = await repo.get_by_id(user_id)
+
+    resolved_email = current_user.email
+    if not is_usable_email(resolved_email) or (user is not None and not is_usable_email(user.email)):
+        auth_header = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+        token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+        fetched = await fetch_identity_email(token)
+        if fetched:
+            resolved_email = fetched
+
     if user is None:
-        user = await UserRepository(db).create(
-            UserDB(id=user_id, email=current_user.email, hashed_password=""),
+        user = await repo.create(
+            UserDB(id=user_id, email=resolved_email, hashed_password=""),
         )
+    elif is_usable_email(resolved_email) and user.email != resolved_email:
+        await repo.update_email(user.id, resolved_email)
+        user.email = resolved_email
 
     redis_cache.set_bg(CacheKeys.user_auth(user_id), user, expire=120)
     return user
@@ -281,3 +294,20 @@ async def get_optional_current_user(
         return await get_current_user(request=request, response=response, token=token, db=db)
     except Exception:
         return None
+
+
+def require_tier(required_tier: str):
+    async def _require_tier(
+        current_user: UserDB = Depends(get_current_user), db: AsyncClient = Depends(get_db)
+    ) -> UserDB:
+        from app.billing.entitlements import has_minimum_tier
+        from app.billing.repository import SubscriptionRepository
+
+        repo = SubscriptionRepository(db)
+        sub = await repo.get_by_user_id(str(current_user.id))
+
+        if not has_minimum_tier(sub, required_tier):
+            raise HTTPException(status_code=403, detail="subscription_required")
+        return current_user
+
+    return _require_tier

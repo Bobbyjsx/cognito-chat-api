@@ -1,9 +1,11 @@
 import logging
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from google.cloud.firestore_v1.async_client import AsyncClient
+from pydantic import BaseModel, Field
 
 from app.api.dependencies import get_persisted_user
+from app.billing.entitlements import lookup_active_tier
 from app.database import get_db
 from app.models.users import (
     LoginRequest,
@@ -40,7 +42,7 @@ async def signup(
 ):
     user = await auth_service.register_user(user_data)
     config = await config_repo.get_config()
-    return QuotaService.build_user_response(user, config)
+    return QuotaService.build_user_response(user, config, subscription_tier="free")
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -61,6 +63,7 @@ async def reset_password(request: PasswordResetRequest, auth_service: AuthServic
 async def get_my_profile(
     current_user=Depends(get_persisted_user),
     config_repo: ConfigRepository = Depends(get_config_repo),
+    db: AsyncClient = Depends(get_db),
 ):
     from app.core.cache_keys import CacheKeys
     from app.core.redis import redis_cache
@@ -82,10 +85,50 @@ async def get_my_profile(
             return cached_data
 
     config = await config_repo.get_config()
-    response = QuotaService.build_user_response(current_user, config)
+    from app.billing.entitlements import get_active_tier, get_entitlement_level
+    from app.billing.repository import SubscriptionRepository
+
+    sub = await SubscriptionRepository(db).get_by_user_id(str(current_user.id))
+    subscription_tier = get_active_tier(sub)
+    subscription_status = sub.status.value if sub else "expired"
+    is_subscribed = get_entitlement_level(sub) > 0
+
+    response = QuotaService.build_user_response(
+        current_user,
+        config,
+        subscription_tier=subscription_tier,
+        subscription_status=subscription_status,
+        is_subscribed=is_subscribed,
+    )
 
     redis_cache.set_bg(cache_key, response.model_dump(mode="json"), expire=300)
     return response
+
+
+class CustomInstructionsRequest(BaseModel):
+    custom_instructions: str | None = Field(default=None, max_length=1500)
+
+
+@router.put("/custom-instructions")
+async def update_custom_instructions(
+    request: CustomInstructionsRequest,
+    current_user=Depends(get_persisted_user),
+    db: AsyncClient = Depends(get_db),
+):
+
+    subscription_tier = await lookup_active_tier(db, str(current_user.id))
+    if subscription_tier != "premium":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Custom instructions are exclusively available on the Premium plan.",
+        )
+
+    user_repo = UserRepository(db)
+    await user_repo.update_custom_instructions(current_user.id, request.custom_instructions)
+    return {
+        "message": "Custom instructions updated successfully.",
+        "custom_instructions": request.custom_instructions,
+    }
 
 
 @router.post("/refresh", response_model=TokenResponse)

@@ -1,0 +1,19 @@
+from typing import Any, Protocol
+
+from app.billing.models import BillingPlan
+
+
+class PaymentProvider(Protocol):
+    async def initialize_subscription_checkout(
+        self, email: str, plan: BillingPlan, user_id: str, callback_url: str | None = None
+    ) -> dict[str, Any]: ...
+
+    async def get_subscription(self, subscription_code: str) -> dict[str, Any]: ...
+
+    async def find_customer_subscription(self, customer_code: str) -> dict[str, Any] | None: ...
+
+    async def cancel_subscription(self, subscription_code: str, email: str) -> bool: ...
+
+    async def enable_subscription(self, subscription_code: str, email: str) -> bool: ...
+
+    async def fetch_customer(self, email: str) -> dict[str, Any] | None: ...

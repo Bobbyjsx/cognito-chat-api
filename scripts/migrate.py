@@ -28,6 +28,7 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from scripts.migrations.attachments import runner as attachments_runner
+from scripts.migrations.billing_quotas import runner as billing_quotas_runner
 from scripts.migrations.chat_sessions import runner as chat_sessions_runner
 from scripts.migrations.core_config import runner as core_config_runner
 from scripts.migrations.indexes import runner as indexes_runner
@@ -46,6 +47,11 @@ FEATURES = {
         "aliases": ["user_auth", "users", "auth", "quota"],
         "runner": user_auth_runner,
         "description": "User documents, usage periods, and token quota enforcement",
+    },
+    "billing-quotas": {
+        "aliases": ["billing_quotas", "tier-quotas", "plan-limits"],
+        "runner": billing_quotas_runner,
+        "description": "Per-tier token quota limits for Go and Premium subscription plans",
     },
     "speech-to-text": {
         "aliases": ["speech_to_text", "stt", "audio"],

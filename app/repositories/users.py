@@ -92,8 +92,8 @@ class UserRepository:
         self,
         user_id: UUID | str,
         tokens_added: int,
-        default_limit_6h: int = 60_000,
-        default_limit_weekly: int = 300_000,
+        default_limit_6h: int = 10_000,
+        default_limit_weekly: int = 100_000,
     ) -> bool:
         """Atomically checks both 6-hourly and weekly windows inside a Firestore transaction.
 
@@ -162,9 +162,38 @@ class UserRepository:
 
         return bool(res)
 
+    async def update_email(self, user_id: UUID | str, email: str) -> None:
+        doc_ref = self.collection.document(str(user_id))
+        await doc_ref.update({"email": email})
+        from app.core.cache_keys import CacheKeys
+        from app.core.redis import redis_cache
+
+        try:
+            await redis_cache.delete(CacheKeys.user_profile(user_id))
+            await redis_cache.delete(CacheKeys.user_auth(user_id))
+        except Exception as exc:
+            logger.debug("Redis cache invalidation skipped for user %s: %s", user_id, exc)
+
     async def update_password(self, user_id: UUID | str, hashed_password: str) -> None:
         doc_ref = self.collection.document(str(user_id))
         await doc_ref.update({"hashed_password": hashed_password})
+        from app.core.cache_keys import CacheKeys
+        from app.core.redis import redis_cache
+
+        try:
+            await redis_cache.delete(CacheKeys.user_profile(user_id))
+            await redis_cache.delete(CacheKeys.user_auth(user_id))
+        except Exception as exc:
+            logger.debug("Redis cache invalidation skipped for user %s: %s", user_id, exc)
+
+    async def update_custom_instructions(self, user_id: UUID | str, custom_instructions: str | None) -> None:
+        doc_ref = self.collection.document(str(user_id))
+        await doc_ref.update(
+            {
+                "custom_instructions": custom_instructions,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        )
         from app.core.cache_keys import CacheKeys
         from app.core.redis import redis_cache
 

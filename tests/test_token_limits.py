@@ -331,6 +331,9 @@ class TestTokenQuotaEndpoints:
         assert "pct_weekly" in data
         assert "reset_at" in data
         assert "weekly_reset_at" in data
+        assert "tier" in data
+        assert "token_limit_6h" not in data
+        assert "token_limit_weekly" not in data
 
     def test_reset_at_is_6h_from_signup(self, client):
         frozen_now = datetime(2026, 7, 29, 6, 0, 0, tzinfo=timezone.utc)
@@ -557,6 +560,177 @@ class TestQuotaPrecheckEarlyRejection:
         # Must yield error event immediately
         assert any("event: error" in c for c in chunks)
         assert any("6-hour token limit reached" in c for c in chunks)
+
+
+class TestTierQuotaEnforcement:
+    """Paid tiers must get Go/Premium limits; free users must not inherit paid caps."""
+
+    def test_resolve_free_go_premium_canonical_limits(self):
+        from app.services.quota import resolve_user_limits
+
+        user = _make_user(token_limit_6h=None, token_limit_weekly=None)
+        assert resolve_user_limits(user, AppConfigDB(), "free") == (10_000, 100_000)
+        assert resolve_user_limits(user, AppConfigDB(), "go") == (40_000, 400_000)
+        assert resolve_user_limits(user, AppConfigDB(), "premium") == (60_000, 600_000)
+
+    def test_stale_app_config_cannot_inflate_free_limits(self):
+        from app.services.quota import resolve_user_limits
+
+        user = _make_user(token_limit_6h=None, token_limit_weekly=None)
+        stale = AppConfigDB(default_token_limit_6h=60_000, default_token_limit_weekly=300_000)
+        assert resolve_user_limits(user, stale, "free") == (10_000, 100_000)
+
+    def test_per_user_override_beats_tier(self):
+        from app.services.quota import resolve_user_limits
+
+        user = _make_user(token_limit_6h=5_000, token_limit_weekly=20_000)
+        assert resolve_user_limits(user, AppConfigDB(), "premium") == (5_000, 20_000)
+
+    @pytest.mark.asyncio
+    async def test_go_user_blocked_at_40k_six_hour(self):
+        from fastapi import HTTPException
+
+        from app.services.chats import AgentService
+
+        agent = AgentService(
+            provider=MagicMock(),
+            chat_repo=MagicMock(),
+            user_repo=MagicMock(),
+            config_repo=MagicMock(),
+            attachment_service=MagicMock(),
+        )
+        agent._get_subscription_tier = AsyncMock(return_value="go")
+        now = datetime.now(timezone.utc)
+        user = _make_user(
+            tokens_used_6h=40_000,
+            token_limit_6h=None,
+            token_limit_weekly=None,
+            reset_at=now + timedelta(hours=3),
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await agent._quota_precheck(user, AppConfigDB())
+        assert exc_info.value.status_code == 429
+        assert "6-hour" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_premium_user_blocked_at_60k_six_hour(self):
+        from fastapi import HTTPException
+
+        from app.services.chats import AgentService
+
+        agent = AgentService(
+            provider=MagicMock(),
+            chat_repo=MagicMock(),
+            user_repo=MagicMock(),
+            config_repo=MagicMock(),
+            attachment_service=MagicMock(),
+        )
+        agent._get_subscription_tier = AsyncMock(return_value="premium")
+        now = datetime.now(timezone.utc)
+        user = _make_user(
+            tokens_used_6h=60_000,
+            token_limit_6h=None,
+            token_limit_weekly=None,
+            reset_at=now + timedelta(hours=3),
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await agent._quota_precheck(user, AppConfigDB())
+        assert exc_info.value.status_code == 429
+
+    @pytest.mark.asyncio
+    async def test_go_user_blocked_at_400k_weekly(self):
+        from fastapi import HTTPException
+
+        from app.services.chats import AgentService
+
+        agent = AgentService(
+            provider=MagicMock(),
+            chat_repo=MagicMock(),
+            user_repo=MagicMock(),
+            config_repo=MagicMock(),
+            attachment_service=MagicMock(),
+        )
+        agent._get_subscription_tier = AsyncMock(return_value="go")
+        now = datetime.now(timezone.utc)
+        user = _make_user(
+            tokens_used_weekly=400_000,
+            token_limit_6h=None,
+            token_limit_weekly=None,
+            weekly_reset_at=now + timedelta(days=3),
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await agent._quota_precheck(user, AppConfigDB())
+        assert exc_info.value.status_code == 429
+        assert "Weekly" in exc_info.value.detail
+
+    @pytest.mark.asyncio
+    async def test_free_user_blocked_at_10k_not_paid_cap(self):
+        from fastapi import HTTPException
+
+        from app.services.chats import AgentService
+
+        agent = AgentService(
+            provider=MagicMock(),
+            chat_repo=MagicMock(),
+            user_repo=MagicMock(),
+            config_repo=MagicMock(),
+            attachment_service=MagicMock(),
+        )
+        agent._get_subscription_tier = AsyncMock(return_value="free")
+        now = datetime.now(timezone.utc)
+        user = _make_user(
+            tokens_used_6h=10_000,
+            token_limit_6h=None,
+            token_limit_weekly=None,
+            reset_at=now + timedelta(hours=3),
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await agent._quota_precheck(user, AppConfigDB(default_token_limit_6h=60_000))
+        assert exc_info.value.status_code == 429
+
+    @pytest.mark.asyncio
+    async def test_charge_usage_passes_go_limits_to_increment(self):
+        from app.services.chats import AgentService
+
+        agent = AgentService(
+            provider=MagicMock(),
+            chat_repo=MagicMock(),
+            user_repo=MagicMock(),
+            config_repo=MagicMock(),
+            attachment_service=MagicMock(),
+        )
+        agent._get_subscription_tier = AsyncMock(return_value="go")
+        agent.user_repo.atomic_increment_if_within_limit = AsyncMock(return_value=True)
+        user = _make_user(token_limit_6h=None, token_limit_weekly=None)
+
+        with patch("app.core.redis.redis_cache.delete", new=AsyncMock()):
+            await agent._charge_usage(user, 100, AppConfigDB())
+
+        kwargs = agent.user_repo.atomic_increment_if_within_limit.call_args.kwargs
+        assert kwargs["default_limit_6h"] == 40_000
+        assert kwargs["default_limit_weekly"] == 400_000
+
+    @pytest.mark.asyncio
+    async def test_charge_usage_passes_premium_limits_to_increment(self):
+        from app.services.chats import AgentService
+
+        agent = AgentService(
+            provider=MagicMock(),
+            chat_repo=MagicMock(),
+            user_repo=MagicMock(),
+            config_repo=MagicMock(),
+            attachment_service=MagicMock(),
+        )
+        agent._get_subscription_tier = AsyncMock(return_value="premium")
+        agent.user_repo.atomic_increment_if_within_limit = AsyncMock(return_value=True)
+        user = _make_user(token_limit_6h=None, token_limit_weekly=None)
+
+        with patch("app.core.redis.redis_cache.delete", new=AsyncMock()):
+            await agent._charge_usage(user, 100, AppConfigDB())
+
+        kwargs = agent.user_repo.atomic_increment_if_within_limit.call_args.kwargs
+        assert kwargs["default_limit_6h"] == 60_000
+        assert kwargs["default_limit_weekly"] == 600_000
 
 
 class TestExpiredQuotaCacheBusting:

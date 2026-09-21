@@ -34,6 +34,9 @@ class GenerationWorkerService:
         self.user_repo = user_repo
         self.config_repo = config_repo
         self.agent_service = agent_service
+        self.db = (
+            getattr(generation_repo, "db", None) or getattr(chat_repo, "db", None) or getattr(user_repo, "db", None)
+        )
 
     async def execute_task(self, task: GenerationTaskPayload) -> TaskExecutionResponse:
         generation_id = task.generation_id
@@ -168,7 +171,7 @@ class GenerationWorkerService:
                 raise ValueError("No messages found in session.")
 
             from app.providers.base import GenerationConfig
-            from app.services.chats import get_base_system_instructions
+            from app.utils.prompts import get_user_system_instructions
 
             model = generation.resolved_model
             reasoning = generation.resolved_reasoning
@@ -205,8 +208,21 @@ class GenerationWorkerService:
                     [t.value for t in active_config.allowed_tools]
                 )
 
+            from app.billing.entitlements import lookup_active_tier
+
+            db = (
+                self.db
+                or getattr(self.generation_repo, "db", None)
+                or getattr(self.chat_repo, "db", None)
+                or getattr(self.user_repo, "db", None)
+            )
+            subscription_tier = await lookup_active_tier(db, str(user.id)) if db else "free"
+            effective_custom_instructions = (
+                getattr(user, "custom_instructions", None) if subscription_tier == "premium" else None
+            )
+
             generation_config = GenerationConfig(
-                system_instruction=get_base_system_instructions(),
+                system_instruction=get_user_system_instructions(effective_custom_instructions),
                 thinking_budget=thinking_budget,
                 include_thoughts=True,
                 tool_configs=tool_configs,

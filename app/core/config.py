@@ -63,6 +63,14 @@ class Settings(BaseSettings):
     # Generation Timeout (seconds)
     generation_timeout_seconds: int = 300
 
+    # Paystack Configuration
+    paystack_secret_key: str = ""
+    paystack_public_key: str = ""
+    paystack_webhook_secret: str = ""
+    paystack_base_url: str = "https://api.paystack.co"
+    go_paystack_plan_code: str = ""
+    premium_paystack_plan_code: str = ""
+
     environment: str = ""
 
     class Config:

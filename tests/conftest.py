@@ -2,11 +2,20 @@ import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Set environment variables for the Firestore emulator
 os.environ["FIRESTORE_EMULATOR_HOST"] = os.environ.get("FIRESTORE_EMULATOR_HOST", "127.0.0.1:8080")
 os.environ["GOOGLE_CLOUD_PROJECT"] = os.environ.get("GOOGLE_CLOUD_PROJECT", "test-project")
-os.environ["FIRESTORE_DATABASE"] = os.environ.get("FIRESTORE_DATABASE", "(default)")
+os.environ["FIRESTORE_DATABASE"] = "(default)"
+
+# Set environment variables for Paystack
+os.environ["PAYSTACK_SECRET_KEY"] = os.environ.get("PAYSTACK_SECRET_KEY", "")
+os.environ["PAYSTACK_PUBLIC_KEY"] = os.environ.get("PAYSTACK_PUBLIC_KEY", "")
+os.environ["GO_PAYSTACK_PLAN_CODE"] = os.environ.get("GO_PAYSTACK_PLAN_CODE", "")
+os.environ["PREMIUM_PAYSTACK_PLAN_CODE"] = os.environ.get("PREMIUM_PAYSTACK_PLAN_CODE", "")
 
 # Attachments use the local storage backend in tests
 os.environ["STORAGE_BACKEND"] = "local"
@@ -65,7 +74,18 @@ patch("firebase_admin.get_app", return_value=MockApp()).start()
 
 from fastapi.testclient import TestClient
 
+from app.core.config import settings
 from app.main import app
+
+settings.firestore_database = "(default)"
+if os.environ.get("PAYSTACK_SECRET_KEY"):
+    settings.paystack_secret_key = os.environ["PAYSTACK_SECRET_KEY"]
+if os.environ.get("PAYSTACK_PUBLIC_KEY"):
+    settings.paystack_public_key = os.environ["PAYSTACK_PUBLIC_KEY"]
+if os.environ.get("GO_PAYSTACK_PLAN_CODE"):
+    settings.go_paystack_plan_code = os.environ["GO_PAYSTACK_PLAN_CODE"]
+if os.environ.get("PREMIUM_PAYSTACK_PLAN_CODE"):
+    settings.premium_paystack_plan_code = os.environ["PREMIUM_PAYSTACK_PLAN_CODE"]
 
 
 @pytest.fixture(autouse=True)

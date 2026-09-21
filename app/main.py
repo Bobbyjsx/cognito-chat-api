@@ -166,12 +166,18 @@ app.add_middleware(
     ],
 )
 
+from app.api.webhooks import paystack
+from app.router import billing, prompts
+
 app.include_router(auth.router)
 app.include_router(chats.router)
 app.include_router(config.router)
 app.include_router(stt.router)
 app.include_router(attachments.router)
 app.include_router(tasks.router)
+app.include_router(billing.router)
+app.include_router(paystack.router)
+app.include_router(prompts.router)
 
 
 @app.get("/health")

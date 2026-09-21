@@ -110,8 +110,8 @@ class AppConfigDB(BaseModel):
     id: str = "app_config"
 
     # ── Token Quota ────────────────────────────────────────────────────────────
-    default_token_limit_6h: int = 60_000
-    default_token_limit_weekly: int = 300_000
+    default_token_limit_6h: int = 10_000
+    default_token_limit_weekly: int = 100_000
 
     # ── Feature Toggles ────────────────────────────────────────────────────────
     enable_text_generation: bool = True

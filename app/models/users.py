@@ -34,6 +34,7 @@ class UserDB(BaseModel):
 
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    custom_instructions: str | None = None
 
 
 class UserCreate(BaseModel):
@@ -55,6 +56,10 @@ class UserResponse(BaseModel):
     weekly_reset_at: datetime
     pct_weekly: float = 0.0
     reset_countdown_weekly: str = "Resets soon"
+    tier: str = "free"
+    subscription_status: str | None = None
+    is_subscribed: bool = False
+    custom_instructions: str | None = None
 
 
 class TokenResponse(BaseModel):

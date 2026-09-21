@@ -57,11 +57,16 @@ async def transcribe_audio(
     result = await service.transcribe(audio_bytes, effective_mime)
 
     if result.tokens_used > 0:
+        from app.billing.entitlements import lookup_active_tier
+        from app.services.quota import resolve_user_limits
+
+        subscription_tier = await lookup_active_tier(db, str(current_user.id))
+        limit_6h, limit_weekly = resolve_user_limits(current_user, cfg, subscription_tier)
         within_limit = await UserRepository(db).atomic_increment_if_within_limit(
             current_user.id,
             result.tokens_used,
-            default_limit_6h=cfg.default_token_limit_6h,
-            default_limit_weekly=cfg.default_token_limit_weekly,
+            default_limit_6h=limit_6h,
+            default_limit_weekly=limit_weekly,
         )
         logger.info(
             "STT usage user=%s tokens=%d within_limit=%s",

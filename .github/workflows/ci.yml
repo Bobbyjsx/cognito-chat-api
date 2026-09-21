@@ -83,6 +83,10 @@ jobs:
           FIRESTORE_DATABASE: "(default)"
           STORAGE_BACKEND: "local"
           PYTHONPATH: "."
+          PAYSTACK_SECRET_KEY: ${{ secrets.PAYSTACK_SECRET_KEY }}
+          PAYSTACK_PUBLIC_KEY: ${{ secrets.PAYSTACK_PUBLIC_KEY }}
+          GO_PAYSTACK_PLAN_CODE: ${{ secrets.GO_PAYSTACK_PLAN_CODE }}
+          PREMIUM_PAYSTACK_PLAN_CODE: ${{ secrets.PREMIUM_PAYSTACK_PLAN_CODE }}
         run: |
           uv run pytest -v tests/
 
