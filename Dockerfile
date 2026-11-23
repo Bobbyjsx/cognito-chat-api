@@ -21,4 +21,4 @@ COPY . .
 RUN python -m compileall -q /app
 
 # Wake identity-service in the background while this process still imports.
-CMD ["sh", "-c", "python /app/scripts/wake_identity.py & exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8001}"]
+CMD ["sh", "-c", "python /app/scripts/wake_identity.py & exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8002}"]

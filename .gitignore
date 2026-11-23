@@ -1,5 +1,7 @@
 # Environments
 .env
+.env.*
+.env.prod
 .venv/
 env/
 venv/

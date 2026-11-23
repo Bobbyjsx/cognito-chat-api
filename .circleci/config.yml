@@ -1,0 +1,137 @@
+version: 2.1
+
+jobs:
+  test:
+    docker:
+      - image: cimg/python:3.12
+      - image: google/cloud-sdk:latest
+        command: ["gcloud", "beta", "emulators", "firestore", "start", "--host-port=0.0.0.0:8080"]
+        environment:
+          FIRESTORE_PROJECT_ID: test-project
+
+    steps:
+      - checkout
+
+      - run:
+          name: Install uv
+          command: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - run:
+          name: Install Dependencies
+          command: uv sync
+
+      - run:
+          name: Wait for Firestore Emulator
+          command: |
+            for i in $(seq 1 30); do
+              if nc -z 127.0.0.1 8080 2>/dev/null || curl -s http://127.0.0.1:8080/ >/dev/null 2>&1; then
+                echo "Firestore emulator is ready!"
+                exit 0
+              fi
+              sleep 1
+            done
+            echo "Timeout waiting for emulator"
+            exit 1
+
+      - run:
+          name: Run Linter
+          command: make lint
+
+      - run:
+          name: Run Tests
+          command: |
+            cp -n .env.example .env || true
+            FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 GOOGLE_CLOUD_PROJECT=test-project FIRESTORE_DATABASE="(default)" STORAGE_BACKEND=local PYTHONPATH=. uv run pytest tests/
+
+  deploy-production:
+    docker:
+      - image: cimg/base:current
+    steps:
+      - checkout
+      - setup_remote_docker:
+          version: default
+          docker_layer_caching: true
+      - run:
+          name: Set Environment Variables
+          command: |
+            echo "export DEPLOY_VERSION=${CIRCLE_SHA1}" >> "$BASH_ENV"
+            echo "export SERVICE_NAME=cognito-api-production" >> "$BASH_ENV"
+            echo "export GCP_PROJECT_ID=${GCP_PROJECT_ID:-project-atlas-501612}" >> "$BASH_ENV"
+            echo "export ENV_DECLARATION_FILE=../.env.example" >> "$BASH_ENV"
+            echo "export BUILD_CONTEXT=.." >> "$BASH_ENV"
+            echo "export DOCKERFILE=../Dockerfile" >> "$BASH_ENV"
+            echo "export PORT=8002" >> "$BASH_ENV"
+            echo "export DOCKER_NETWORK=docker_webnet" >> "$BASH_ENV"
+      - run:
+          name: Clone deploy-ops
+          command: git clone --branch main https://github.com/Bobbyjsx/deploy-ops.git
+      - run:
+          name: Build and Deploy
+          command: |
+            cd deploy-ops
+            make build
+            make deploy
+
+  deploy-staging:
+    docker:
+      - image: cimg/base:current
+    steps:
+      - checkout
+      - setup_remote_docker:
+          version: default
+          docker_layer_caching: true
+      - run:
+          name: Set Environment Variables
+          command: |
+            echo "export DEPLOY_VERSION=${CIRCLE_SHA1}" >> "$BASH_ENV"
+            echo "export SERVICE_NAME=cognito-api-staging" >> "$BASH_ENV"
+            echo "export GCP_PROJECT_ID=${GCP_PROJECT_ID:-project-atlas-501612}" >> "$BASH_ENV"
+            echo "export ENV_DECLARATION_FILE=../.env.example" >> "$BASH_ENV"
+            echo "export BUILD_CONTEXT=.." >> "$BASH_ENV"
+            echo "export DOCKERFILE=../Dockerfile" >> "$BASH_ENV"
+            echo "export PORT=8002" >> "$BASH_ENV"
+            echo "export DOCKER_NETWORK=docker_webnet" >> "$BASH_ENV"
+      - run:
+          name: Clone deploy-ops
+          command: git clone --branch main https://github.com/Bobbyjsx/deploy-ops.git
+      - run:
+          name: Build and Deploy
+          command: |
+            cd deploy-ops
+            make build
+            make deploy
+
+workflows:
+  version: 2
+  build-and-deploy-production:
+    jobs:
+      - test:
+          context:
+            - cognito-api-prod
+          filters:
+            branches:
+              only:
+                - main
+                - master
+      - deploy-production:
+          requires:
+            - test
+          context:
+            - cognito-api-prod
+            - deploy-ops
+          filters:
+            branches:
+              only:
+                - main
+                - master
+
+  build-and-deploy-staging:
+    jobs:
+      - deploy-staging:
+          context:
+            - cognito-api-staging
+            - deploy-ops-staging
+          filters:
+            branches:
+              only:
+                - staging
